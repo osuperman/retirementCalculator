@@ -1,0 +1,65 @@
+name: Deploy to GitHub Pages
+
+on:
+  # Deploy whenever main is updated. Adjust the branch if you publish from another.
+  push:
+    branches: [main]
+  # Allow manual runs from the Actions tab.
+  workflow_dispatch:
+
+# Permissions required by the GitHub Pages deploy action.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment; don't cancel an in-progress production run.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        # --legacy-peer-deps: the project runs Vite 8, but @vitejs/plugin-react@4
+        # only declares peer support up to Vite 7. The mismatch is advisory (the
+        # app builds fine), so we skip npm's strict peer-dependency check here.
+        run: npm ci --legacy-peer-deps
+
+      - name: Build
+        # The Vite `base` is '/retirementCalculator/', which matches the repo
+        # name, so assets resolve correctly under the project Pages URL.
+        # If you deploy the Ask AI backend, set VITE_CHAT_API_URL here, e.g.:
+        #   env:
+        #     VITE_CHAT_API_URL: https://your-backend.example.com/api/chat
+        run: npm run build
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
