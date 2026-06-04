@@ -47,6 +47,8 @@ npm run build
 
 `npm run build` may print Vite/plugin deprecation and chunk-size warnings. Those are build-tool warnings, not calculation failures.
 
+There is no external test runner; calculation self-tests run in-browser via the **Run Diagnostics** button (`runSelfTests()` in `src/App.jsx`). For an independent review of the financial model, see `MODEL_VALIDATION.md`.
+
 ## Calculation Model
 
 The projection engine models:
