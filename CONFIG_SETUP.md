@@ -7,7 +7,11 @@ sends data anywhere is the optional Ask AI tab, and only when the user actively 
 
 ## Current Behavior
 
-- The built-in default values live in `DEFAULT_INPUTS` inside `src/App.jsx`.
+- The built-in default values live in `DEFAULT_INPUTS` inside `src/App.jsx`
+  (couple-mode defaults in `DEFAULT_COUPLE_INPUTS` are derived from it). These
+  ship in the **public** production bundle and are what new visitors and the
+  Reset button see, so they must stay **generic and illustrative — never real
+  personal financial data.**
 - Each visitor can keep multiple **named scenarios**, each holding its own input set.
   Save, Save as new…, Rename, and Delete are in the Scenarios card in the sidebar;
   a compact Save button and the active-scenario indicator are in the header.
@@ -38,6 +42,11 @@ These files still exist as reference/example data:
 - `src/config/config.local.json`, if you create one locally
 
 The active React app does not currently import those JSON files. If file-based config loading is reintroduced, update this document and keep `src/config/config.local.json` gitignored.
+
+`defaults.json` and `config.local.example.json` are committed and therefore
+public — keep them populated with the same generic placeholder values as
+`DEFAULT_INPUTS`. Put your own real numbers only in `src/config/config.local.json`
+(gitignored) or in your browser's saved scenarios, never in the committed files.
 
 ## New Calculation Inputs
 

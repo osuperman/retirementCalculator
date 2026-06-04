@@ -96,11 +96,37 @@ account-to-account transfers, not spending cash.
 
 More detail is in `CALCULATION_MODEL.md`.
 
-## Personal Values
+## Default Values And Privacy
 
-The app saves values in browser storage through the Save button. Saved browser values are merged with `DEFAULT_INPUTS` when the app loads.
+This repository is **public**, and the production site is built directly from
+source on every push (see [Deployment](#deployment)). That means the built-in
+defaults are not private:
 
-The files in `src/config/` are reference/example data only at the moment. They are not loaded by the active React app unless a config loader is reintroduced.
+- `DEFAULT_INPUTS` (and the `src/config/*.json` examples) ship in the public
+  bundle, are what every first-time visitor sees, and are exactly what the
+  **Reset to defaults** button loads.
+- **Keep these values generic and illustrative — never commit real personal
+  balances, incomes, or account details.** The current defaults are round
+  placeholder figures meant only to make the charts render something on first
+  load.
+
+Your own real numbers stay private a different way: the app saves them only in
+**your browser's** storage via the Save button, and those saved values are
+merged over `DEFAULT_INPUTS` when the app loads. Nothing you enter is uploaded
+or committed; localStorage is per-browser and not visible to other visitors.
+
+The files in `src/config/` are reference/example data only at the moment. They
+are not loaded by the active React app unless a config loader is reintroduced,
+but they are still public — keep them generic too.
+
+## Deployment
+
+`.github/workflows/deploy.yml` deploys to GitHub Pages on every push to `main`.
+The workflow runs `npm run build` and publishes the freshly built `dist/`
+output — it does **not** serve the committed `docs/` folder. Because the bundle
+is rebuilt from source, whatever lives in `DEFAULT_INPUTS` at build time becomes
+the public default for all visitors. Do not hand-edit the minified bundle;
+change `src/` and let the build regenerate it.
 
 ## Not Financial Advice
 
