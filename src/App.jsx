@@ -255,11 +255,14 @@ function rmdDivisor(age) {
     84: 16.8, 85: 16.0, 86: 15.2, 87: 14.4, 88: 13.7, 89: 12.9,
     90: 12.2, 91: 11.5, 92: 10.8, 93: 10.1, 94: 9.5, 95: 8.9,
     96: 8.4, 97: 7.8, 98: 7.3, 99: 6.8, 100: 6.4,
+    101: 6.0, 102: 5.6, 103: 5.2, 104: 4.9, 105: 4.6, 106: 4.3,
+    107: 4.1, 108: 3.9, 109: 3.7, 110: 3.5, 111: 3.4, 112: 3.3,
+    113: 3.1, 114: 3.0, 115: 2.9, 116: 2.8, 117: 2.7, 118: 2.5,
+    119: 2.3, 120: 2.0,
   };
   if (table[age] != null) return table[age];
   if (age < 72) return null;
-  // Extrapolate for ages > 100, never below 1.9
-  return Math.max(1.9, 6.4 - (age - 100) * 0.4);
+  return 2.0;
 }
 
 // 2024 Federal Poverty Level for household of 2 (lower 48), projected by inflation
@@ -478,7 +481,9 @@ function computeIrmaaSurcharge(magi, year, inflation = 0.03, medicareEnrollees =
   const coveredPeople = Math.max(1, Math.min(2, medicareEnrollees || 1));
   for (const tier of IRMAA_2026_MFJ) {
     const threshold = tier.top === Infinity ? Infinity : tier.top * factor;
-    if (magi <= threshold) {
+    const atExclusiveTopTierBoundary =
+      tier.top === 750000 && magi >= threshold;
+    if (!atExclusiveTopTierBoundary && magi <= threshold) {
       return (tier.monthlyPartB + tier.monthlyPartD) * 12 * coveredPeople * factor;
     }
   }
@@ -576,6 +581,12 @@ function runSelfTests() {
   test("rmdDivisor(90) = 12.2", rmdDivisor(90), 12.2, (a, e) =>
     Math.abs(a - e) < 0.01,
   );
+  test("rmdDivisor(110) = 3.5", rmdDivisor(110), 3.5, (a, e) =>
+    Math.abs(a - e) < 0.01,
+  );
+  test("rmdDivisor(121) = 2.0 (120+ table floor)", rmdDivisor(121), 2.0, (a, e) =>
+    Math.abs(a - e) < 0.01,
+  );
   test("rmdDivisor(65) = null (below threshold)", rmdDivisor(65), null, (a, e) =>
     a === e,
   );
@@ -611,6 +622,13 @@ function runSelfTests() {
   // Hard to isolate precisely; we just verify NIIT is non-zero at high MAGI by comparing
   // $300K MAGI tax to a hypothetical "no NIIT" calc (can't run directly, but the test above
   // implicitly validates the 3.8% is included in the $22.9K total)
+
+  test(
+    "IRMAA: exactly $750K MFJ uses top 2026 tier",
+    computeIrmaaSurcharge(750000, 2026, 0.03, 2),
+    (487 + 91) * 12 * 2,
+    pctEq,
+  );
 
   // --- computeRealizedGain
   test(
@@ -1787,6 +1805,18 @@ function solveCoupleGrossedUpWithdrawals({
   };
 }
 
+function allocateCoupleHsaWithdrawals(primaryHsa, spouseHsa, healthcarePortion) {
+  let remainingHealthcare = Math.max(0, healthcarePortion);
+  const primaryWithdrawal = Math.min(primaryHsa, remainingHealthcare);
+  remainingHealthcare -= primaryWithdrawal;
+  const spouseWithdrawal = Math.min(spouseHsa, remainingHealthcare);
+  return {
+    primary: primaryWithdrawal,
+    spouse: spouseWithdrawal,
+    total: primaryWithdrawal + spouseWithdrawal,
+  };
+}
+
 function simulateCouple(coupleInputs, options = {}) {
   const { yearlyReturns = null, useFlexibleSpending = false } = options;
   const { primary, spouse, shared } = normalizeCoupleInputs(coupleInputs);
@@ -2082,18 +2112,14 @@ function simulateCouple(coupleInputs, options = {}) {
       spouseRmd,
     );
 
-    const healthcarePortion = Math.max(0, spending - lifestyleSpending);
-    let remainingHealthcare = healthcarePortion;
-    const primaryHsaWithdrawal = Math.min(primaryState.bHsa, remainingHealthcare);
-    remainingHealthcare -= primaryHsaWithdrawal;
-    const spouseHsaWithdrawal = Math.min(spouseState.bHsa, remainingHealthcare);
-    remainingHealthcare -= spouseHsaWithdrawal;
-    const extraPrimaryHsaWithdrawal = Math.min(primaryState.bHsa - primaryHsaWithdrawal, remainingHealthcare);
-    const totalPrimaryHsaWithdrawal = primaryHsaWithdrawal + extraPrimaryHsaWithdrawal;
-    remainingHealthcare -= extraPrimaryHsaWithdrawal;
-    const extraSpouseHsaWithdrawal = Math.min(spouseState.bHsa - spouseHsaWithdrawal, remainingHealthcare);
-    const totalSpouseHsaWithdrawal = spouseHsaWithdrawal + extraSpouseHsaWithdrawal;
-    const hsaWithdrawal = totalPrimaryHsaWithdrawal + totalSpouseHsaWithdrawal;
+    let hsaAllocation = allocateCoupleHsaWithdrawals(
+      primaryState.bHsa,
+      spouseState.bHsa,
+      Math.max(0, spending - lifestyleSpending),
+    );
+    let totalPrimaryHsaWithdrawal = hsaAllocation.primary;
+    let totalSpouseHsaWithdrawal = hsaAllocation.spouse;
+    let hsaWithdrawal = hsaAllocation.total;
 
     const incomeTotal =
       primaryPartTime +
@@ -2148,6 +2174,14 @@ function simulateCouple(coupleInputs, options = {}) {
       );
       acaSubsidy = Math.max(0, pre65HealthcareSticker - subsidizedPre65Healthcare);
       spending = Math.max(0, Math.round(spending - acaSubsidy));
+      hsaAllocation = allocateCoupleHsaWithdrawals(
+        primaryState.bHsa,
+        spouseState.bHsa,
+        Math.max(0, spending - lifestyleSpending),
+      );
+      totalPrimaryHsaWithdrawal = hsaAllocation.primary;
+      totalSpouseHsaWithdrawal = hsaAllocation.spouse;
+      hsaWithdrawal = hsaAllocation.total;
       netNeed = Math.max(0, spending - hsaWithdrawal - incomeTotal);
       solve = solveCoupleGrossedUpWithdrawals({
         netNeed,
@@ -2185,14 +2219,28 @@ function simulateCouple(coupleInputs, options = {}) {
     if (primaryAge >= 65 || spouseAge >= 65) {
       const medicareEnrollees =
         (primaryAge >= 65 ? 1 : 0) + (spouseAge >= 65 ? 1 : 0);
-      irmaaSurcharge = computeIrmaaSurcharge(
-        solve.ordIncome + solve.realizedGain,
-        year,
-        shared.inflation,
-        medicareEnrollees,
-      );
-      if (irmaaSurcharge > 0) {
-        spending = Math.round(spending + irmaaSurcharge);
+      const baseSpendingBeforeIrmaa = spending;
+      for (let outerIter = 0; outerIter < 4; outerIter++) {
+        const newIrmaa = computeIrmaaSurcharge(
+          solve.ordIncome + solve.realizedGain,
+          year,
+          shared.inflation,
+          medicareEnrollees,
+        );
+        if (Math.abs(newIrmaa - irmaaSurcharge) < 10) {
+          irmaaSurcharge = newIrmaa;
+          break;
+        }
+        irmaaSurcharge = newIrmaa;
+        spending = Math.round(baseSpendingBeforeIrmaa + irmaaSurcharge);
+        hsaAllocation = allocateCoupleHsaWithdrawals(
+          primaryState.bHsa,
+          spouseState.bHsa,
+          Math.max(0, spending - lifestyleSpending),
+        );
+        totalPrimaryHsaWithdrawal = hsaAllocation.primary;
+        totalSpouseHsaWithdrawal = hsaAllocation.spouse;
+        hsaWithdrawal = hsaAllocation.total;
         netNeed = Math.max(0, spending - hsaWithdrawal - incomeTotal);
         solve = solveCoupleGrossedUpWithdrawals({
           netNeed,
@@ -2225,6 +2273,7 @@ function simulateCouple(coupleInputs, options = {}) {
           inflation: shared.inflation,
         });
       }
+      spending = Math.round(baseSpendingBeforeIrmaa + irmaaSurcharge);
     }
 
     const { withdrawals } = solve;
