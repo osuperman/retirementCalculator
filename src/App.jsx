@@ -134,8 +134,16 @@ function defaultRmdStartAge(currentAge, currentYear = PROJECTION_START_YEAR) {
   return rmdStartAgeForBirthYear(currentYear - currentAge);
 }
 
+// Earliest legal claim age is 62; delayed retirement credits stop at 70.
+const SS_MIN_CLAIM_AGE = 62;
+const SS_MAX_CREDIT_AGE = 70;
+
 function adjustedSocialSecurityBenefit(fraBenefit, claimAge, fullRetirementAge = 67) {
-  const months = Math.round((claimAge - fullRetirementAge) * 12);
+  const effectiveClaimAge = Math.min(
+    SS_MAX_CREDIT_AGE,
+    Math.max(SS_MIN_CLAIM_AGE, claimAge),
+  );
+  const months = Math.round((effectiveClaimAge - fullRetirementAge) * 12);
   if (months === 0) return fraBenefit;
   if (months > 0) {
     return fraBenefit * (1 + Math.min(months, 36) * (0.08 / 12));
@@ -196,12 +204,15 @@ function nyStateTaxMFJ(taxableIncome, year = NY_TAX_BASE_YEAR, inflation = 0.03)
   const factor = Math.pow(1 + inflation, Math.max(0, year - NY_TAX_BASE_YEAR));
   const stdDed = 16050 * factor;
   const nyTaxable = Math.max(0, taxableIncome - stdDed);
+  // FY2026 NY budget (Ch. 59, Laws of 2025) cuts the bottom five rates by
+  // 0.1pp in tax year 2026 and 0.2pp total from 2027 onward (permanent).
+  const midClassCut = year >= 2027 ? 0.002 : year >= 2026 ? 0.001 : 0;
   const baseBrackets = [
-    [0, 17150, 0.04],
-    [17150, 23600, 0.045],
-    [23600, 27900, 0.0525],
-    [27900, 161550, 0.055],
-    [161550, 323200, 0.06],
+    [0, 17150, 0.04 - midClassCut],
+    [17150, 23600, 0.045 - midClassCut],
+    [23600, 27900, 0.0525 - midClassCut],
+    [27900, 161550, 0.055 - midClassCut],
+    [161550, 323200, 0.06 - midClassCut],
     [323200, 2155350, 0.0685],
     [2155350, 5000000, 0.0965],
     [5000000, 25000000, 0.103],
@@ -394,12 +405,14 @@ function solveGrossedUpWithdrawals({
   age,
   inflation,
   minimumRmd = 0,
+  penaltyFree401k = false,
 }) {
   let tax = 0;
   let withdrawals = { wCash: 0, wTaxable: 0, w401k: 0, wIra: 0, wRoth: 0 };
   let realizedGain = 0;
   let taxableSs = 0;
   let ordIncome = 0;
+  let earlyPenalty = 0;
   for (let iter = 0; iter < 10; iter++) {
     const grossNeed = Math.max(0, netNeed + tax);
     withdrawals = doWithdrawalWaterfall(grossNeed, state, preSs);
@@ -449,17 +462,35 @@ function solveGrossedUpWithdrawals({
       withdrawals.wIra +
       conversion +
       (pensionNyExempt ? 0 : pensionGross);
+    // NY pension/annuity exclusion applies from age 59½ (annual model: 60).
     const nyPensionAnnuityExclusion =
-      age >= 60 ? Math.min(20000, privateRetirementIncome) : 0;
-    const newTax = totalTax(
-      ordIncome,
-      realizedGain,
-      year,
-      nyExemptAmount,
-      inflation,
-      taxableSs,
-      nyPensionAnnuityExclusion,
-    );
+      age >= 59.5 ? Math.min(20000, privateRetirementIncome) : 0;
+    // IRC §72(t): 10% additional tax on early distributions before age 59½.
+    // - 401k: exempt when the Rule of 55 applies (separation at 55+), and only
+    //   from age 55 onward.
+    // - Traditional IRA: always penalized before 59½ (Rule of 55 never applies).
+    // - Roth: conservative approximation — basis/conversion layers aren't
+    //   tracked, so early Roth draws are penalized in full. The waterfall taps
+    //   Roth last, so this rarely binds.
+    // RMDs cannot coexist with age < 59½, so forced RMD draws are never hit.
+    if (age < 59.5) {
+      const penalized401k =
+        penaltyFree401k && age >= 55 ? 0 : withdrawals.w401k;
+      earlyPenalty =
+        0.1 * (penalized401k + withdrawals.wIra + withdrawals.wRoth);
+    } else {
+      earlyPenalty = 0;
+    }
+    const newTax =
+      totalTax(
+        ordIncome,
+        realizedGain,
+        year,
+        nyExemptAmount,
+        inflation,
+        taxableSs,
+        nyPensionAnnuityExclusion,
+      ) + earlyPenalty;
     if (Math.abs(newTax - tax) < 1) {
       tax = newTax;
       break;
@@ -472,6 +503,7 @@ function solveGrossedUpWithdrawals({
     realizedGain,
     taxableSs,
     ordIncome,
+    earlyPenalty: Math.round(earlyPenalty),
   };
 }
 
@@ -1090,6 +1122,248 @@ function runSelfTests() {
     },
   );
 
+  // --- NY middle-class tax cut (Ch. 59, Laws of 2025): bottom five rates
+  // drop 0.1pp in 2026 and 0.2pp total from 2027. $100K taxable, 0% inflation:
+  // 2027 = 17150(3.8%) + 6450(4.3%) + 4300(5.05%) + 56050(5.3%) = $4,116.85
+  test(
+    "nyStateTaxMFJ: 2027 middle-class rate cut applied",
+    nyStateTaxMFJ(100000, 2027, 0),
+    4116.85,
+    pctEq,
+  );
+  test(
+    "nyStateTaxMFJ: 2024 pre-cut rates unchanged",
+    nyStateTaxMFJ(100000, 2024, 0),
+    4284.75,
+    pctEq,
+  );
+
+  // --- Social Security claim-age clamp: claiming below 62 is impossible;
+  // entered age 55 must price as the legal floor of 62 (30% reduction at FRA 67)
+  test(
+    "adjustedSocialSecurityBenefit: claim age below 62 clamps to 62 (70% of FRA)",
+    adjustedSocialSecurityBenefit(30000, 55),
+    21000,
+    pctEq,
+  );
+  test(
+    "adjustedSocialSecurityBenefit: claim age above 70 clamps to 70 (124% of FRA)",
+    adjustedSocialSecurityBenefit(30000, 75),
+    30000 * 1.24,
+    pctEq,
+  );
+
+  // --- §72(t) early-withdrawal penalty
+  const penaltyState = {
+    bCash: 0,
+    bTaxable: 0,
+    bTaxableBasis: 0,
+    b401k: 2000000,
+    bTradIra: 0,
+    bRoth: 0,
+  };
+  const solveAge50 = solveGrossedUpWithdrawals({
+    netNeed: 60000,
+    state: penaltyState,
+    preSs: true,
+    conversion: 0,
+    ptIncome: 0,
+    ssGross: 0,
+    pensionGross: 0,
+    pensionNyExempt: false,
+    year: 2030,
+    age: 50,
+    inflation: 0.03,
+    penaltyFree401k: false,
+  });
+  const gross50 =
+    solveAge50.withdrawals.w401k +
+    solveAge50.withdrawals.wIra +
+    solveAge50.withdrawals.wRoth;
+  test(
+    "early penalty: age 50 401k draw pays 10% additional tax",
+    solveAge50.earlyPenalty,
+    gross50 * 0.1,
+    pctEq,
+  );
+  const solveAge56R55 = solveGrossedUpWithdrawals({
+    netNeed: 60000,
+    state: penaltyState,
+    preSs: true,
+    conversion: 0,
+    ptIncome: 0,
+    ssGross: 0,
+    pensionGross: 0,
+    pensionNyExempt: false,
+    year: 2030,
+    age: 56,
+    inflation: 0.03,
+    penaltyFree401k: true,
+  });
+  test(
+    "early penalty: Rule of 55 exempts 401k at age 56",
+    solveAge56R55.earlyPenalty,
+    0,
+  );
+  const solveAge56NoR55 = solveGrossedUpWithdrawals({
+    netNeed: 60000,
+    state: penaltyState,
+    preSs: true,
+    conversion: 0,
+    ptIncome: 0,
+    ssGross: 0,
+    pensionGross: 0,
+    pensionNyExempt: false,
+    year: 2030,
+    age: 56,
+    inflation: 0.03,
+    penaltyFree401k: false,
+  });
+  test(
+    "early penalty: no Rule of 55 (retired <55) keeps penalty at 56",
+    solveAge56NoR55.earlyPenalty > 0 ? 1 : 0,
+    1,
+  );
+
+  testScenario(
+    "Couple: retirement-year balances grow at exactly (1 + postReturn)",
+    () => {
+      const noSpend = {
+        currentAge: 66,
+        retirementAge: 65,
+        planThroughAge: 70,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        ssIncome: 0,
+        pensionIncome: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        rmdStartAge: 99,
+        healthcarePre65: 0,
+        healthcarePost65: 0,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+        contrib401k: 0,
+        contribMatch: 0,
+        contribHsa: 0,
+      };
+      const couple = normalizeCoupleInputs({
+        primary: { ...DEFAULT_COUPLE_INPUTS.primary, ...noSpend, balance401k: 1000000 },
+        spouse: { ...DEFAULT_COUPLE_INPUTS.spouse, ...noSpend, balance401k: 0 },
+        shared: {
+          ...DEFAULT_COUPLE_INPUTS.shared,
+          balanceCash: 0,
+          balanceTaxable: 0,
+          baseExpenses: 0,
+          creditCardDebt: 0,
+          postReturn: 0.06,
+        },
+      });
+      const r = simulateCouple(couple);
+      const expected = Math.round(1000000 * 1.06);
+      const ok = Math.abs(r.yearlyData[0].k401 - expected) <= expected * 0.001;
+      return {
+        passed: ok,
+        details: `year-1 401k=${r.yearlyData[0].k401}, expected ${expected} (double-growth would be ${Math.round(1000000 * 1.06 * 1.06)})`,
+      };
+    },
+  );
+
+  testScenario(
+    "Couple: RMD equals prior year-end balance / divisor",
+    () => {
+      const base = {
+        currentAge: 75,
+        retirementAge: 70,
+        planThroughAge: 78,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        ssIncome: 0,
+        pensionIncome: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        healthcarePre65: 0,
+        healthcarePost65: 0,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+        contrib401k: 0,
+        contribMatch: 0,
+        contribHsa: 0,
+      };
+      const couple = normalizeCoupleInputs({
+        primary: { ...DEFAULT_COUPLE_INPUTS.primary, ...base, balance401k: 1000000, rmdStartAge: 73 },
+        spouse: { ...DEFAULT_COUPLE_INPUTS.spouse, ...base, balance401k: 0, rmdStartAge: 99 },
+        shared: {
+          ...DEFAULT_COUPLE_INPUTS.shared,
+          balanceCash: 0,
+          balanceTaxable: 0,
+          baseExpenses: 0,
+          creditCardDebt: 0,
+          postReturn: 0.06,
+        },
+      });
+      const r = simulateCouple(couple);
+      const expected = Math.round(1000000 / 24.6); // age-75 divisor on prior year-end $1M
+      const actual = r.yearlyData[0].rmdAmount;
+      const ok = Math.abs(actual - expected) <= expected * 0.005;
+      return {
+        passed: ok,
+        details: `year-1 RMD=${actual}, expected ${expected} (grown-balance bug would give ${Math.round((1000000 * 1.06) / 24.6)})`,
+      };
+    },
+  );
+
+  testScenario(
+    "Accumulation: Traditional IRA RMDs forced while still working",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        currentAge: 75,
+        retirementAge: 78,
+        planThroughAge: 82,
+        balanceTradIra: 100000,
+        rmdStartAge: 73,
+      });
+      const row = r.yearlyData[0];
+      const expected = Math.round(100000 / 24.6);
+      const ok = Math.abs(row.rmdAmount - expected) <= expected * 0.005;
+      return {
+        passed: ok,
+        details: `age-75 working-year IRA RMD=${row.rmdAmount}, expected ${expected}`,
+      };
+    },
+  );
+
+  testScenario(
+    "Early retiree (age 52): 401k draw carries earlyPenalty in plan rows",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        currentAge: 50,
+        retirementAge: 52,
+        planThroughAge: 60,
+        balanceCash: 0,
+        balanceTaxable: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        balanceTradIra: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+      });
+      const row = r.yearlyData.find((d) => d.age === 52);
+      if (!row) return { passed: false, details: "no age-52 row" };
+      return {
+        passed: row.earlyPenalty > 0 && row.from401k > 0,
+        details: `age 52: from401k=${row.from401k}, earlyPenalty=${row.earlyPenalty}`,
+      };
+    },
+  );
+
   const passed = results.filter((r) => r.passed).length;
   const failed = results.filter((r) => !r.passed).length;
   return { passed, failed, total: results.length, results };
@@ -1174,6 +1448,12 @@ function simulate(inputs, options = {}) {
   const endYear = currentYear + (planThroughAge - currentAge);
   const effectiveRmdStartAge =
     rmdStartAge ?? defaultRmdStartAge(currentAge, currentYear);
+  // Benefits cannot start before 62 even if the user types a lower age.
+  const ssClaimAge = Math.max(SS_MIN_CLAIM_AGE, ssAge);
+  // Rule of 55: separating from service in/after the year you turn 55 makes
+  // withdrawals from THAT employer's 401k penalty-free (never IRAs). Retiring
+  // before 55 forfeits it permanently for this model.
+  const penaltyFree401k = retirementAge >= 55;
   const taxableReturn = (ret) => Math.max(-0.99, ret - taxableAnnualTaxDrag);
 
   let bCash = balanceCash;
@@ -1203,6 +1483,7 @@ function simulate(inputs, options = {}) {
   let totalUnmetCashFlow = unpaidDebt;
   let depleted = unpaidDebt > 1;
   let priorYearEndTotal = bCash + bTaxable + b401k + bTradIra + bRoth + bHsa - unpaidDebt;
+  let priorPriorYearEndTotal = 0;
 
   for (let year = currentYear; year <= endYear; year++) {
     const age = currentAge + (year - currentYear);
@@ -1227,13 +1508,28 @@ function simulate(inputs, options = {}) {
         Math.max(0, limits.k401Total - applied401k),
       );
       const appliedHsa = Math.min(Math.max(0, contribHsa), limits.hsa);
+      // Traditional IRA RMDs are required even while still working — the
+      // still-working exception covers only the current employer's 401k.
+      // Income tax on the forced distribution is not modeled in accumulation
+      // years (salary and its taxes are out of scope); the gross amount is
+      // reinvested in the taxable account, raising its cost basis.
+      let accumIraRmd = 0;
+      if (age >= effectiveRmdStartAge && bTradIra > 0) {
+        const divisor = rmdDivisor(age);
+        if (divisor) {
+          accumIraRmd = bTradIra / divisor;
+          bTradIra -= accumIraRmd;
+        }
+      }
       b401k = b401k * (1 + marketReturn) + applied401k + appliedMatch;
-      bTaxable = bTaxable * (1 + taxableReturn(marketReturn));
+      bTaxable = bTaxable * (1 + taxableReturn(marketReturn)) + accumIraRmd;
+      bTaxableBasis += accumIraRmd;
       bTradIra = bTradIra * (1 + marketReturn);
       bRoth = bRoth * (1 + marketReturn);
       bHsa = bHsa * (1 + marketReturn) + appliedHsa;
       bCash = bCash * (1 + cashReturn);
       const total = bCash + bTaxable + b401k + bTradIra + bRoth + bHsa - unpaidDebt;
+      priorPriorYearEndTotal = priorYearEndTotal;
       priorYearEndTotal = total;
 
       yearlyData.push({
@@ -1261,7 +1557,7 @@ function simulate(inputs, options = {}) {
         roth: Math.round(bRoth),
         hsa: Math.round(bHsa),
         total: Math.round(total),
-        rmdAmount: 0,
+        rmdAmount: Math.round(accumIraRmd),
         realizedGain: 0,
         taxableSs: 0,
         magi: 0,
@@ -1270,6 +1566,7 @@ function simulate(inputs, options = {}) {
         irmaaTriggered: false,
         acaSubsidy: 0,
         hsaWithdrawal: 0,
+        earlyPenalty: 0,
         unmetCashFlow: Math.round(unpaidDebt),
         contribution401kApplied: Math.round(applied401k),
         contributionMatchApplied: Math.round(appliedMatch),
@@ -1283,10 +1580,9 @@ function simulate(inputs, options = {}) {
     const lifestyleSpending = Math.round(baseExpenses * inflMult);
     const spendingBase = Math.round((baseExpenses + healthcareSticker) * inflMult);
     let spending = spendingBase;
-    const currentTotalBeforeWD =
-      bCash + bTaxable + b401k + bTradIra + bRoth + bHsa - unpaidDebt;
-    if (useFlexibleSpending && priorYearEndTotal > 0 && yearsFromRetirement > 0) {
-      const yoyChange = (currentTotalBeforeWD - priorYearEndTotal) / priorYearEndTotal;
+    if (useFlexibleSpending && priorPriorYearEndTotal > 0 && yearsFromRetirement > 0) {
+      const yoyChange =
+        (priorYearEndTotal - priorPriorYearEndTotal) / priorPriorYearEndTotal;
       if (yoyChange < -0.15) {
         spending = Math.round(spending * 0.9);
       }
@@ -1296,9 +1592,9 @@ function simulate(inputs, options = {}) {
       age < retirementAge + partTimeYears
         ? Math.round(partTimeIncome * inflMult)
         : 0;
-    const ssClaimBenefit = adjustedSocialSecurityBenefit(ssIncome, ssAge);
+    const ssClaimBenefit = adjustedSocialSecurityBenefit(ssIncome, ssClaimAge);
     const ssGross =
-      age >= ssAge
+      age >= ssClaimAge
         ? Math.round(ssClaimBenefit * Math.pow(1 + inflation, year - currentYear))
         : 0;
     // Pension: grows at pensionCola from today (represents benefit formula growth + COLA)
@@ -1323,7 +1619,7 @@ function simulate(inputs, options = {}) {
         Math.min(Math.round(conversionMid * inflMult), b401k),
       );
       strategy = `Flex | Convert $${Math.round(conversionMid / 1000)}K`;
-    } else if (age < ssAge) {
+    } else if (age < ssClaimAge) {
       conversion = Math.max(
         0,
         Math.min(Math.round(conversionFinal * inflMult), b401k),
@@ -1358,7 +1654,7 @@ function simulate(inputs, options = {}) {
       bRoth,
     };
 
-    const preSs = age < ssAge;
+    const preSs = age < ssClaimAge;
 
     // === Converged solve: withdrawals, tax, RMD, and IRMAA all converge together ===
     // Outer loop: iterate IRMAA (and ACA pre-65) until spending stabilizes.
@@ -1396,6 +1692,7 @@ function simulate(inputs, options = {}) {
         age,
         inflation,
         minimumRmd: rmdAmount,
+        penaltyFree401k,
       });
 
       finalSpending = effectiveSpending;
@@ -1464,6 +1761,7 @@ function simulate(inputs, options = {}) {
         age,
         inflation,
         minimumRmd: rmdAmount,
+        penaltyFree401k,
       });
     }
 
@@ -1525,6 +1823,7 @@ function simulate(inputs, options = {}) {
 
     const total = bCash + bTaxable + b401k + bTradIra + bRoth + bHsa - unpaidDebt;
     const grossWithdrawal = wCash + wTaxable + w401k + wIra + wRoth;
+    priorPriorYearEndTotal = priorYearEndTotal;
     priorYearEndTotal = total;
 
     // Depletion: total portfolio hits zero (consistent with Monte Carlo)
@@ -1532,8 +1831,8 @@ function simulate(inputs, options = {}) {
 
     let phase = "bridge";
     if (age >= 60 && age < 65) phase = "mid";
-    else if (age >= 65 && age < ssAge) phase = "medicare";
-    else if (age >= ssAge) phase = "ss";
+    else if (age >= 65 && age < ssClaimAge) phase = "medicare";
+    else if (age >= ssClaimAge) phase = "ss";
 
     yearlyData.push({
       year,
@@ -1570,6 +1869,7 @@ function simulate(inputs, options = {}) {
       irmaaSurcharge: Math.round(irmaaSurcharge),
       irmaaTriggered,
       acaSubsidy: Math.round(acaSubsidy),
+      earlyPenalty: solve.earlyPenalty,
       unmetCashFlow: Math.round(unmetCashFlow),
     });
   }
@@ -1634,7 +1934,7 @@ function personConversionTarget(person, age, inflMult, b401k, rmdAmount) {
   let target = 0;
   if (age < 60) target = person.conversionBridge;
   else if (age < 65) target = person.conversionMid;
-  else if (age < person.ssAge) target = person.conversionFinal;
+  else if (age < Math.max(SS_MIN_CLAIM_AGE, person.ssAge)) target = person.conversionFinal;
   const conversion = Math.max(0, Math.min(Math.round(target * inflMult), b401k));
   const rmdThatMustComeFrom401k = Math.max(0, rmdAmount);
   return Math.min(conversion, Math.max(0, b401k - rmdThatMustComeFrom401k));
@@ -1719,12 +2019,14 @@ function solveCoupleGrossedUpWithdrawals({
   year,
   ages,
   inflation,
+  penaltyFree401k = { primary: false, spouse: false },
 }) {
   let tax = 0;
   let withdrawals = doCoupleWithdrawalWaterfall(0, state, preHouseholdSs, rmds);
   let realizedGain = 0;
   let taxableSs = 0;
   let ordIncome = 0;
+  let earlyPenalty = 0;
 
   for (let iter = 0; iter < 10; iter++) {
     const grossNeed = Math.max(0, netNeed + tax);
@@ -1776,19 +2078,44 @@ function solveCoupleGrossedUpWithdrawals({
       withdrawals.spouseIra +
       conversions.spouse +
       (incomes.spousePensionNyExempt ? 0 : incomes.spousePension);
+    // NY pension/annuity exclusion applies from age 59½ (annual model: 60).
     const nyPensionAnnuityExclusion =
-      (ages.primary >= 60 ? Math.min(20000, primaryPrivateRetirement) : 0) +
-      (ages.spouse >= 60 ? Math.min(20000, spousePrivateRetirement) : 0);
+      (ages.primary >= 59.5 ? Math.min(20000, primaryPrivateRetirement) : 0) +
+      (ages.spouse >= 59.5 ? Math.min(20000, spousePrivateRetirement) : 0);
 
-    const newTax = totalTax(
-      ordIncome,
-      realizedGain,
-      year,
-      nyExemptAmount,
-      inflation,
-      taxableSs,
-      nyPensionAnnuityExclusion,
-    );
+    // IRC §72(t) 10% early-distribution penalty, applied per spouse.
+    // See solveGrossedUpWithdrawals for the Rule-of-55 / IRA / Roth treatment.
+    const personPenalty = (age, ruleOf55, w401k, wIra, wRoth) => {
+      if (age >= 59.5) return 0;
+      const penalized401k = ruleOf55 && age >= 55 ? 0 : w401k;
+      return 0.1 * (penalized401k + wIra + wRoth);
+    };
+    earlyPenalty =
+      personPenalty(
+        ages.primary,
+        penaltyFree401k.primary,
+        withdrawals.primary401k,
+        withdrawals.primaryIra,
+        withdrawals.primaryRoth,
+      ) +
+      personPenalty(
+        ages.spouse,
+        penaltyFree401k.spouse,
+        withdrawals.spouse401k,
+        withdrawals.spouseIra,
+        withdrawals.spouseRoth,
+      );
+
+    const newTax =
+      totalTax(
+        ordIncome,
+        realizedGain,
+        year,
+        nyExemptAmount,
+        inflation,
+        taxableSs,
+        nyPensionAnnuityExclusion,
+      ) + earlyPenalty;
     if (Math.abs(newTax - tax) < 1) {
       tax = newTax;
       break;
@@ -1802,6 +2129,7 @@ function solveCoupleGrossedUpWithdrawals({
     realizedGain,
     taxableSs,
     ordIncome,
+    earlyPenalty: Math.round(earlyPenalty),
   };
 }
 
@@ -1861,6 +2189,7 @@ function simulateCouple(coupleInputs, options = {}) {
   let totalConverted = 0;
   let totalUnmetCashFlow = unpaidDebt;
   let depleted = unpaidDebt > 1;
+  let priorPriorYearEndTotal = 0;
   let priorYearEndTotal =
     cash +
     taxable +
@@ -1955,25 +2284,43 @@ function simulateCouple(coupleInputs, options = {}) {
       ? 0
       : Math.min(Math.max(0, spouse.contribHsa), remainingHsaLimit);
 
-    primaryState.b401k =
-      primaryState.b401k * (1 + marketReturn) +
-      primary401kApplied +
-      primaryMatchApplied;
-    spouseState.b401k =
-      spouseState.b401k * (1 + marketReturn) +
-      spouse401kApplied +
-      spouseMatchApplied;
-    primaryState.bTradIra *= 1 + marketReturn;
-    spouseState.bTradIra *= 1 + marketReturn;
-    primaryState.bRoth *= 1 + marketReturn;
-    spouseState.bRoth *= 1 + marketReturn;
-    primaryState.bHsa = primaryState.bHsa * (1 + marketReturn) + primaryHsaApplied;
-    spouseState.bHsa = spouseState.bHsa * (1 + marketReturn) + spouseHsaApplied;
-    cash *= 1 + shared.cashReturn;
-    taxable *= 1 + taxableReturn(marketReturn);
-
     if (!householdRetired) {
+      // Traditional IRA RMDs are required even while still working — the
+      // still-working exception covers only the current employer's 401k.
+      // Tax on the forced distribution is not modeled in accumulation years
+      // (salary taxes are out of scope); gross amount moves to taxable.
+      let accumIraRmd = 0;
+      const takeAccumRmd = (state, age, rmdStartAge) => {
+        if (age < rmdStartAge || state.bTradIra <= 0) return 0;
+        const divisor = rmdDivisor(age);
+        if (!divisor) return 0;
+        const rmd = state.bTradIra / divisor;
+        state.bTradIra -= rmd;
+        return rmd;
+      };
+      accumIraRmd += takeAccumRmd(primaryState, primaryAge, primary.rmdStartAge);
+      accumIraRmd += takeAccumRmd(spouseState, spouseAge, spouse.rmdStartAge);
+
+      primaryState.b401k =
+        primaryState.b401k * (1 + marketReturn) +
+        primary401kApplied +
+        primaryMatchApplied;
+      spouseState.b401k =
+        spouseState.b401k * (1 + marketReturn) +
+        spouse401kApplied +
+        spouseMatchApplied;
+      primaryState.bTradIra *= 1 + marketReturn;
+      spouseState.bTradIra *= 1 + marketReturn;
+      primaryState.bRoth *= 1 + marketReturn;
+      spouseState.bRoth *= 1 + marketReturn;
+      primaryState.bHsa = primaryState.bHsa * (1 + marketReturn) + primaryHsaApplied;
+      spouseState.bHsa = spouseState.bHsa * (1 + marketReturn) + spouseHsaApplied;
+      cash *= 1 + shared.cashReturn;
+      taxable = taxable * (1 + taxableReturn(marketReturn)) + accumIraRmd;
+      taxableBasis += accumIraRmd;
+
       const total = totalAssets();
+      priorPriorYearEndTotal = priorYearEndTotal;
       priorYearEndTotal = total;
       yearlyData.push({
         year,
@@ -2003,7 +2350,7 @@ function simulateCouple(coupleInputs, options = {}) {
         roth: Math.round(primaryState.bRoth + spouseState.bRoth),
         hsa: Math.round(primaryState.bHsa + spouseState.bHsa),
         total: Math.round(total),
-        rmdAmount: 0,
+        rmdAmount: Math.round(accumIraRmd),
         realizedGain: 0,
         taxableSs: 0,
         magi: 0,
@@ -2011,6 +2358,7 @@ function simulateCouple(coupleInputs, options = {}) {
         irmaaSurcharge: 0,
         irmaaTriggered: false,
         acaSubsidy: 0,
+        earlyPenalty: 0,
         unmetCashFlow: Math.round(unpaidDebt),
         ownerDetails: {
           primary: {
@@ -2038,9 +2386,9 @@ function simulateCouple(coupleInputs, options = {}) {
       : 0;
     const lifestyleSpending = Math.round(shared.baseExpenses * inflMult);
     let spending = Math.round(lifestyleSpending + primaryHealthcare + spouseHealthcare);
-    const currentTotalBeforeWD = totalAssets();
-    if (useFlexibleSpending && priorYearEndTotal > 0 && yearsFromRetirement > 0) {
-      const yoyChange = (currentTotalBeforeWD - priorYearEndTotal) / priorYearEndTotal;
+    if (useFlexibleSpending && priorPriorYearEndTotal > 0 && yearsFromRetirement > 0) {
+      const yoyChange =
+        (priorYearEndTotal - priorPriorYearEndTotal) / priorPriorYearEndTotal;
       if (yoyChange < -0.15) spending = Math.round(spending * 0.9);
     }
 
@@ -2053,14 +2401,14 @@ function simulateCouple(coupleInputs, options = {}) {
         ? Math.round(spouse.partTimeIncome * inflMult)
         : 0;
     const primarySs =
-      primaryAge >= primary.ssAge
+      primaryAge >= Math.max(SS_MIN_CLAIM_AGE, primary.ssAge)
         ? Math.round(
             adjustedSocialSecurityBenefit(primary.ssIncome, primary.ssAge) *
               Math.pow(1 + shared.inflation, year - currentYear),
           )
         : 0;
     const spouseSs =
-      spouseAge >= spouse.ssAge
+      spouseAge >= Math.max(SS_MIN_CLAIM_AGE, spouse.ssAge)
         ? Math.round(
             adjustedSocialSecurityBenefit(spouse.ssIncome, spouse.ssAge) *
               Math.pow(1 + shared.inflation, year - currentYear),
@@ -2081,6 +2429,8 @@ function simulateCouple(coupleInputs, options = {}) {
           )
         : 0;
 
+    // RMDs use start-of-year balances, which equal the prior December 31
+    // balances now that growth is applied once at the end of each year.
     const primaryRmd =
       primaryAge >= primary.rmdStartAge
         ? Math.max(
@@ -2128,6 +2478,12 @@ function simulateCouple(coupleInputs, options = {}) {
       spouseSs +
       primaryPension +
       spousePension;
+    // Rule of 55 per spouse: separation from service at 55+ exempts that
+    // spouse's 401k (never IRAs) from the §72(t) early-withdrawal penalty.
+    const couplePenaltyFree401k = {
+      primary: primary.retirementAge >= 55,
+      spouse: spouse.retirementAge >= 55,
+    };
     let netNeed = Math.max(0, spending - hsaWithdrawal - incomeTotal);
     let solve = solveCoupleGrossedUpWithdrawals({
       netNeed,
@@ -2158,6 +2514,7 @@ function simulateCouple(coupleInputs, options = {}) {
       year,
       ages: { primary: primaryAge, spouse: spouseAge },
       inflation: shared.inflation,
+      penaltyFree401k: couplePenaltyFree401k,
     });
     let acaSubsidy = 0;
     const pre65HealthcareSticker =
@@ -2212,6 +2569,7 @@ function simulateCouple(coupleInputs, options = {}) {
         year,
         ages: { primary: primaryAge, spouse: spouseAge },
         inflation: shared.inflation,
+        penaltyFree401k: couplePenaltyFree401k,
       });
     }
 
@@ -2271,6 +2629,7 @@ function simulateCouple(coupleInputs, options = {}) {
           year,
           ages: { primary: primaryAge, spouse: spouseAge },
           inflation: shared.inflation,
+          penaltyFree401k: couplePenaltyFree401k,
         });
       }
       spending = Math.round(baseSpendingBeforeIrmaa + irmaaSurcharge);
@@ -2321,19 +2680,26 @@ function simulateCouple(coupleInputs, options = {}) {
 
     cash *= 1 + shared.cashReturn;
     taxable *= 1 + taxableReturn(marketReturn);
-    primaryState.b401k *= 1 + marketReturn;
-    spouseState.b401k *= 1 + marketReturn;
+    primaryState.b401k =
+      primaryState.b401k * (1 + marketReturn) +
+      primary401kApplied +
+      primaryMatchApplied;
+    spouseState.b401k =
+      spouseState.b401k * (1 + marketReturn) +
+      spouse401kApplied +
+      spouseMatchApplied;
     primaryState.bTradIra *= 1 + marketReturn;
     spouseState.bTradIra *= 1 + marketReturn;
     primaryState.bRoth *= 1 + marketReturn;
     spouseState.bRoth *= 1 + marketReturn;
-    primaryState.bHsa *= 1 + marketReturn;
-    spouseState.bHsa *= 1 + marketReturn;
+    primaryState.bHsa = primaryState.bHsa * (1 + marketReturn) + primaryHsaApplied;
+    spouseState.bHsa = spouseState.bHsa * (1 + marketReturn) + spouseHsaApplied;
 
     totalTaxesPaid += tax;
     totalConverted += primaryConversion + spouseConversion;
 
     const total = totalAssets();
+    priorPriorYearEndTotal = priorYearEndTotal;
     priorYearEndTotal = total;
     if ((total <= 0 || unmetCashFlow > 1) && !depleted) depleted = true;
 
@@ -2378,6 +2744,7 @@ function simulateCouple(coupleInputs, options = {}) {
       irmaaSurcharge: Math.round(irmaaSurcharge),
       irmaaTriggered: irmaaSurcharge > 0,
       acaSubsidy: Math.round(acaSubsidy),
+      earlyPenalty: solve.earlyPenalty,
       unmetCashFlow: Math.round(unmetCashFlow),
       ownerDetails: {
         primary: {
@@ -2689,6 +3056,116 @@ function Section({
         </span>
       </button>
       {open && <div className={styles.body}>{children}</div>}
+    </div>
+  );
+}
+
+// Always-visible plan-health banner. Red when the projection runs out of
+// money (with the exact age), amber when the plan is tight, slim green
+// confirmation when funded. Also included in the printed report.
+function PlanStatusBanner({ shortfall, planThroughAge, isCouple }) {
+  if (!shortfall) return null;
+  const { status } = shortfall;
+
+  if (status === "danger") {
+    const ageLabel =
+      shortfall.firstShortfallAge != null
+        ? `age ${shortfall.firstShortfallAge}${isCouple ? " (primary)" : ""} — year ${shortfall.firstShortfallYear}`
+        : `before age ${planThroughAge}`;
+    return (
+      <div
+        role="alert"
+        className="bg-rose-600 text-white px-6 py-4 shadow-md print:bg-white print:text-rose-700 print:border-2 print:border-rose-600 print:rounded print-avoid-break"
+      >
+        <div className="max-w-[1800px] mx-auto flex items-start gap-3">
+          <svg
+            className="w-8 h-8 flex-shrink-0 mt-0.5 animate-pulse print:animate-none"
+            fill="currentColor"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+          >
+            <path d="M12 2L1 21h22L12 2zm0 6a1 1 0 0 1 1 1v5a1 1 0 1 1-2 0V9a1 1 0 0 1 1-1zm0 9.5a1.25 1.25 0 1 1 0 2.5 1.25 1.25 0 0 1 0-2.5z" />
+          </svg>
+          <div>
+            <p className="text-lg font-bold leading-tight">
+              Plan shortfall: your money runs out at {ageLabel}
+            </p>
+            <p className="text-sm mt-1 text-rose-100 print:text-rose-700">
+              Spending and taxes exceed available funds in{" "}
+              {shortfall.shortfallYearCount} plan year
+              {shortfall.shortfallYearCount === 1 ? "" : "s"}
+              {shortfall.totalUnmet > 0
+                ? ` — total unfunded need ${fmtMoney(shortfall.totalUnmet)}`
+                : ""}
+              . The shortfall year is marked on the chart and highlighted in
+              the year-by-year table below. Levers to test: lower spending,
+              retire later, adjust the Social Security claim age, or reduce
+              Roth conversions in tight years.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (status === "warning") {
+    const reasons = [];
+    if (shortfall.withdrawalRate >= 0.045) {
+      reasons.push(
+        `the Year-1 withdrawal rate is ${fmtPct(shortfall.withdrawalRate)} (above the 4% guideline)`,
+      );
+    }
+    if (shortfall.endingVsRetirement < 0.3) {
+      reasons.push(
+        `the projected ending balance is only ${Math.round(shortfall.endingVsRetirement * 100)}% of the portfolio at retirement`,
+      );
+    }
+    return (
+      <div
+        role="alert"
+        className="bg-amber-400 text-amber-950 px-6 py-3 shadow print:bg-white print:border-2 print:border-amber-500 print:rounded print-avoid-break"
+      >
+        <div className="max-w-[1800px] mx-auto flex items-start gap-3">
+          <svg
+            className="w-6 h-6 flex-shrink-0 mt-0.5"
+            fill="currentColor"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+          >
+            <path d="M12 2L1 21h22L12 2zm0 6a1 1 0 0 1 1 1v5a1 1 0 1 1-2 0V9a1 1 0 0 1 1-1zm0 9.5a1.25 1.25 0 1 1 0 2.5 1.25 1.25 0 0 1 0-2.5z" />
+          </svg>
+          <div>
+            <p className="text-sm font-bold leading-tight">
+              Plan is funded through age {planThroughAge}, but the margin is
+              thin
+            </p>
+            <p className="text-xs mt-0.5">
+              {reasons.join("; ")}. A weak market early in retirement could
+              create a shortfall — check the Risk Analysis tab for the
+              probability of running out.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-emerald-50 border-b border-emerald-200 text-emerald-900 px-6 py-2 print:border print:border-emerald-300 print:rounded print-avoid-break">
+      <div className="max-w-[1800px] mx-auto flex items-center gap-2 text-sm">
+        <svg
+          className="w-4 h-4 text-emerald-600 flex-shrink-0"
+          fill="currentColor"
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+        >
+          <path d="M9 16.2l-3.5-3.5L4 14.2 9 19.2 20 8.2l-1.4-1.4z" />
+        </svg>
+        <span>
+          On track — plan is funded through age {planThroughAge} with{" "}
+          {fmtMoney(shortfall.endBalance)} projected remaining.
+        </span>
+      </div>
     </div>
   );
 }
@@ -4254,6 +4731,40 @@ function hasMaterialUnmetCashFlow(summary) {
   return summary.totalUnmetCashFlow > threshold;
 }
 
+// Scan the projection for the first year the plan cannot fund itself and
+// classify overall plan health for the always-visible status banner.
+// Returns { status: "danger" | "warning" | "ok", ... }.
+function computeShortfallInfo(results) {
+  const s = results.summary;
+  const rows = results.yearlyData.filter((d) => d.phase !== "accumulation");
+  const shortfallRows = rows.filter(
+    (d) => (d.unmetCashFlow || 0) > 1 || d.total <= 0,
+  );
+  const first = shortfallRows[0] || null;
+  const lastRow = rows[rows.length - 1] || null;
+  const material =
+    hasMaterialUnmetCashFlow(s) || rows.some((d) => d.total <= 0);
+  const endingVsRetirement =
+    s.portfolioAtRetirement > 0 ? s.portfolioAtEnd / s.portfolioAtRetirement : 0;
+
+  let status = "ok";
+  if (shortfallRows.length > 0 && material) status = "danger";
+  else if (s.year1WithdrawalRate >= 0.045 || endingVsRetirement < 0.3)
+    status = "warning";
+
+  return {
+    status,
+    firstShortfallAge: first ? first.age : null,
+    firstShortfallYear: first ? first.year : null,
+    shortfallYearCount: shortfallRows.length,
+    totalUnmet: s.totalUnmetCashFlow,
+    endBalance: s.portfolioAtEnd,
+    endAge: lastRow ? lastRow.age : null,
+    withdrawalRate: s.year1WithdrawalRate,
+    endingVsRetirement,
+  };
+}
+
 function generatePlanNarrative(inputs, results, mcResults) {
   const s = results.summary;
   const retirementYears = inputs.planThroughAge - inputs.retirementAge;
@@ -4483,6 +4994,7 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
         label="Age to Claim SS"
         value={person.ssAge}
         onChange={onChange("ssAge")}
+        hint="62 (earliest) to 70; 67 = full benefit"
       />
       <NumberInput
         label="Annual Pension"
@@ -5023,6 +5535,12 @@ export default function RetirementPlanner() {
 
   const s = results.summary;
   const materialUnmetCashFlow = hasMaterialUnmetCashFlow(s);
+  const shortfall = computeShortfallInfo(results);
+  const shortfallAxisValue =
+    shortfall.firstShortfallAge != null
+      ? chartData.find((row) => row.age === shortfall.firstShortfallAge)
+          ?.axisLabel ?? shortfall.firstShortfallAge
+      : null;
   const chatProfile = useMemo(
     () => buildChatProfile(inputs, results),
     [inputs, results],
@@ -5172,15 +5690,23 @@ export default function RetirementPlanner() {
               ),
             )}
             sublabel={
-              s.portfolioAtEnd === 0
-                ? "Funds depleted"
+              shortfall.status === "danger"
+                ? shortfall.firstShortfallAge != null
+                  ? `Funds run out at age ${shortfall.firstShortfallAge}`
+                  : `Unmet cash flow: ${fmtMoney(s.totalUnmetCashFlow)}`
                 : materialUnmetCashFlow
                   ? `Unmet cash flow: ${fmtMoney(s.totalUnmetCashFlow)}`
                 : showRealDollars
                   ? `Inflation-adjusted — future dollars: ${fmtMoney(s.portfolioAtEnd)}`
                   : "Projected ending balance (future dollars)"
             }
-            tone={materialUnmetCashFlow || s.portfolioAtEnd <= 0 ? "bad" : "good"}
+            tone={
+              shortfall.status === "danger" || s.portfolioAtEnd <= 0
+                ? "bad"
+                : shortfall.status === "warning"
+                  ? "warn"
+                  : "good"
+            }
           />
           <MetricCard
             label="Year 1 Withdrawal Rate"
@@ -5199,6 +5725,13 @@ export default function RetirementPlanner() {
           />
         </div>
       </div>
+
+      {/* Plan health banner — always visible, also printed */}
+      <PlanStatusBanner
+        shortfall={shortfall}
+        planThroughAge={displayInputs.planThroughAge}
+        isCouple={isCouple}
+      />
 
       {/* Tab bar */}
       <div className="bg-white border-b border-slate-200 px-6 print:hidden">
@@ -5690,7 +6223,7 @@ export default function RetirementPlanner() {
                 label="Age to Claim SS"
                 value={inputs.ssAge}
                 onChange={update("ssAge")}
-                hint="67 = full benefit"
+                hint="62 (earliest) to 70; 67 = full benefit"
               />
             </Section>
 
@@ -5953,6 +6486,20 @@ export default function RetirementPlanner() {
                     fontSize: 11,
                   }}
                 />
+                {shortfall.status === "danger" && shortfallAxisValue != null && (
+                  <ReferenceLine
+                    x={shortfallAxisValue}
+                    stroke="#be123c"
+                    strokeWidth={2}
+                    label={{
+                      value: "⚠ Money runs out",
+                      position: "insideTopRight",
+                      fill: "#be123c",
+                      fontSize: 12,
+                      fontWeight: 700,
+                    }}
+                  />
+                )}
                 <Area
                   type="monotone"
                   dataKey="Cash"
@@ -6342,10 +6889,16 @@ export default function RetirementPlanner() {
                       const spouseOwner = d.ownerDetails?.spouse || {};
                       const primaryPlanLabel = primaryOwner.employerPlanLabel || "401k";
                       const spousePlanLabel = spouseOwner.employerPlanLabel || "403b";
+                      const isShortfallYear =
+                        (rawRow.unmetCashFlow || 0) > 1 || rawRow.total <= 0;
                       return (
                         <Fragment key={d.year}>
                         <tr
-                          className="border-b border-slate-100 hover:bg-slate-50"
+                          className={
+                            isShortfallYear
+                              ? "border-b border-rose-200 bg-rose-50 hover:bg-rose-100"
+                              : "border-b border-slate-100 hover:bg-slate-50"
+                          }
                         >
                           <td className="px-3 py-1.5 font-semibold">
                             {isCouple && d.spouseAge != null
@@ -6384,6 +6937,14 @@ export default function RetirementPlanner() {
                                   title={`ACA subsidy savings: ${fmtMoney(d.acaSubsidy)}`}
                                 >
                                   ACA
+                                </span>
+                              )}
+                              {isShortfallYear && (
+                                <span
+                                  className="text-[10px] font-bold bg-rose-600 text-white px-1.5 py-0.5 rounded"
+                                  title={`Unfunded need this year: ${fmtMoney(d.unmetCashFlow)}. Spending + taxes exceed available withdrawals.`}
+                                >
+                                  SHORTFALL
                                 </span>
                               )}
                             </div>

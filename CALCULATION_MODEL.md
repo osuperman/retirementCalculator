@@ -17,6 +17,10 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 ## Returns And Inflation
 
 - `preReturn`, `postReturn`, and `cashReturn` are nominal annual rates.
+- Both engines apply growth exactly once per projection year. In retirement
+  years, withdrawals come out of start-of-year balances and growth applies at
+  year end. (Couple mode previously grew balances both before and after
+  withdrawals, compounding retirement years at `(1+r)^2`; fixed 2026-06-10.)
 - Cash / HYSA uses `cashReturn` in every accumulation and retirement projection year.
 - All today's-dollar inputs — base lifestyle spending, healthcare, part-time
   income, Roth conversion targets, Social Security, and pensions — are inflated
@@ -48,6 +52,18 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 - NIIT is modeled at 3.8% above the non-indexed $250,000 MFJ MAGI threshold.
 - NY tax excludes taxable Social Security and applies a simplified public-pension/private-retirement-income treatment.
 - NY brackets and the MFJ standard deduction are projected from their 2024 statutory values by the input inflation rate, consistent with how federal brackets are projected (previously NY was left unindexed, causing one-sided bracket creep).
+- The NY middle-class rate cut (Ch. 59, Laws of 2025) is applied: the bottom
+  five rates drop 0.1pp in tax year 2026 and 0.2pp total from 2027 onward.
+- The NY $20,000 pension/annuity exclusion is gated at age 59½ (the annual
+  model evaluates integer ages, so it takes effect in the age-60 year).
+- IRC §72(t) 10% early-distribution penalty is modeled inside the tax
+  gross-up solve for withdrawals before age 59½: traditional IRA draws are
+  always penalized; 401(k)/403(b) draws are exempt only under the Rule of 55
+  (retirement age 55+, and only from age 55); early Roth draws are penalized
+  in full as a conservative approximation since contribution/conversion basis
+  layers are not tracked. Roth conversions themselves are never penalized.
+  The penalty appears in each row's `earlyPenalty` field and is included in
+  `tax`.
 - Tax is solved iteratively so withdrawals cover both spending needs and tax created by those withdrawals.
 - Married-couple mode uses the same MFJ tax engine as individual mode. It sums
   household ordinary income, LTCG, taxable Social Security, MAGI, pensions,
@@ -57,6 +73,9 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 ## Social Security
 
 - `ssIncome` is treated as the annual full-retirement-age benefit in today's dollars.
+- Claim age is clamped to the legal window: benefits cannot start before 62,
+  and delayed retirement credits stop accruing at 70. FRA is modeled as 67
+  (exact only for those born 1960+).
 - Claiming before FRA reduces the benefit using SSA-style monthly reduction factors.
 - Claiming after FRA increases the benefit by 8% per year up to 36 delayed months.
 - Taxable Social Security uses MFJ provisional-income thresholds of $32,000 and $44,000, which are not inflation-indexed.
@@ -81,6 +100,11 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 - RMD amounts use the 2022+ Uniform Lifetime Table.
 - RMDs are calculated from start-of-year balances, representing the prior year-end balance.
 - Forced RMD surplus beyond spending plus tax is reinvested into cash.
+- Traditional IRA RMDs are also enforced in accumulation (still-working)
+  years, since the still-working exception covers only the current employer's
+  401(k)/403(b). The gross amount moves to the taxable account (raising its
+  basis); income tax on it is not modeled in accumulation years, consistent
+  with salary taxes being out of scope.
 - In married-couple mode, RMDs are calculated independently for each spouse's
   tax-deferred accounts and then included in the household tax solve.
 
@@ -130,7 +154,10 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 - Monte Carlo runs feed randomized annual retirement returns into the same deterministic engine used by the main projection.
 - This keeps taxes, Roth conversions, RMDs, ACA, IRMAA, HSA withdrawals, and unmet cash-flow logic consistent with the main plan.
 - Volatility is controlled by `portfolioVolatility`.
-- Flexible spending, if enabled, reduces spending in years after a portfolio drop greater than 15%.
+- Flexible spending, if enabled, reduces spending 10% in years after the
+  portfolio's year-end total fell more than 15% versus the prior year end.
+  (The guard previously compared a year-end total to itself and never fired;
+  fixed 2026-06-10 in both engines.)
 
 ## Ask AI Context
 
@@ -150,6 +177,9 @@ The assistant is instructed to:
 - IRS 2026 retirement-plan and IRA contribution limits.
 - IRS RMD guidance and the 2022+ Uniform Lifetime Table.
 - CMS 2026 Medicare Part B, Part D, and IRMAA amounts.
-- NY retired-person tax guidance.
+- NY retired-person tax guidance and the FY2026 NY budget rate schedule
+  (bottom-five-bracket cuts of 0.1pp in 2026, 0.2pp from 2027).
+- SSA claiming rules (earliest claim 62, delayed credits through 70).
+- IRC §72(t) early-distribution rules and the Rule of 55.
 
 Update `src/App.jsx` and this document together when current-law tables change.
