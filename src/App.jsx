@@ -1,4 +1,4 @@
-import { Fragment, useState, useMemo, useEffect } from "react";
+import { Fragment, useState, useMemo, useEffect, useRef } from "react";
 import {
   Area,
   AreaChart,
@@ -1608,6 +1608,85 @@ function runSelfTests() {
         details: breach
           ? `year ${breach.year}: cash=${breach.cash} < floor=${breach.cashFloor}`
           : "household floor preserved; spendable cash above floor was used",
+      };
+    },
+  );
+
+  // --- Horizon-aware withdrawal guideline
+  test("guideline: 30-year horizon = 4%", safeWithdrawalGuideline(30), 0.04, (a, e) => Math.abs(a - e) < 1e-9);
+  test("guideline: 35-year horizon = 3.5%", safeWithdrawalGuideline(35), 0.035, (a, e) => Math.abs(a - e) < 1e-9);
+  test("guideline: 43-year horizon = 3.25%", safeWithdrawalGuideline(43), 0.0325, (a, e) => Math.abs(a - e) < 1e-9);
+
+  testScenario(
+    "Max sustainable spending: solved value actually funds the plan",
+    () => {
+      const dangerInputs = {
+        ...baseInputs,
+        currentAge: 60,
+        retirementAge: 61,
+        planThroughAge: 85,
+        balanceCash: 100000,
+        balanceTaxable: 200000,
+        balance401k: 600000,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        baseExpenses: 120000,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+      };
+      const before = computeShortfallInfo(simulate(dangerInputs));
+      if (before.status !== "danger")
+        return { passed: false, details: "setup plan was not in danger" };
+      const maxSpend = solveMaxSustainableSpending(dangerInputs);
+      if (maxSpend == null || maxSpend >= dangerInputs.baseExpenses)
+        return {
+          passed: false,
+          details: `solver returned ${maxSpend} (expected a cut below 120000)`,
+        };
+      const after = computeShortfallInfo(
+        simulate({ ...dangerInputs, baseExpenses: maxSpend }),
+      );
+      return {
+        passed: after.status !== "danger",
+        details: `maxSpend=${maxSpend}, status after cut=${after.status}`,
+      };
+    },
+  );
+
+  testScenario(
+    "Narrative: early-retiree plan reports lifetime 72(t) penalties",
+    () => {
+      const earlyInputs = {
+        ...baseInputs,
+        currentAge: 50,
+        retirementAge: 52,
+        planThroughAge: 60,
+        balanceCash: 0,
+        balanceTaxable: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        balanceTradIra: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+      };
+      const earlyResults = simulate(earlyInputs);
+      const n = generatePlanNarrative(earlyInputs, earlyResults, null);
+      const hasPenaltyItem = n.watchItems.some((w) =>
+        w.includes("early-withdrawal penalties"),
+      );
+      const defaultResults = simulate(baseInputs);
+      const nDefault = generatePlanNarrative(baseInputs, defaultResults, null);
+      const defaultHasIt = nDefault.watchItems.some((w) =>
+        w.includes("early-withdrawal penalties"),
+      );
+      return {
+        passed: hasPenaltyItem && !defaultHasIt,
+        details: `early plan flagged=${hasPenaltyItem}, default flagged=${defaultHasIt}`,
       };
     },
   );
@@ -3424,7 +3503,13 @@ function Section({
 // Always-visible plan-health banner. Red when the projection runs out of
 // money (with the exact age), amber when the plan is tight, slim green
 // confirmation when funded. Also included in the printed report.
-function PlanStatusBanner({ shortfall, planThroughAge, isCouple }) {
+function PlanStatusBanner({
+  shortfall,
+  planThroughAge,
+  isCouple,
+  maxSustainableSpending = null,
+  plannedSpending = null,
+}) {
   if (!shortfall) return null;
   const { status } = shortfall;
 
@@ -3463,6 +3548,23 @@ function PlanStatusBanner({ shortfall, planThroughAge, isCouple }) {
               retire later, adjust the Social Security claim age, or reduce
               Roth conversions in tight years.
             </p>
+            {maxSustainableSpending != null &&
+              plannedSpending != null &&
+              maxSustainableSpending < plannedSpending && (
+                <p className="text-sm mt-1 font-semibold text-white print:text-rose-700">
+                  Cutting lifestyle spending by ≈
+                  {fmtMoney(plannedSpending - maxSustainableSpending)}/yr (to ≈
+                  {fmtMoney(maxSustainableSpending)}) would keep this plan
+                  funded through age {planThroughAge}, all else equal.
+                </p>
+              )}
+            {maxSustainableSpending == null && (
+              <p className="text-sm mt-1 font-semibold text-white print:text-rose-700">
+                Even $0 lifestyle spending cannot fully fund this plan —
+                healthcare, debt, and taxes alone exceed the modeled
+                resources.
+              </p>
+            )}
             {shortfall.protectedReserveCash > 1000 && (
               <p className="text-sm mt-1 font-semibold text-white print:text-rose-700">
                 Note: about {fmtMoney(shortfall.protectedReserveCash)} sits in
@@ -3479,9 +3581,9 @@ function PlanStatusBanner({ shortfall, planThroughAge, isCouple }) {
 
   if (status === "warning") {
     const reasons = [];
-    if (shortfall.withdrawalRate >= 0.045) {
+    if (shortfall.withdrawalRate >= (shortfall.guideline || 0.04) + 0.005) {
       reasons.push(
-        `the Year-1 withdrawal rate is ${fmtPct(shortfall.withdrawalRate)} (above the 4% guideline)`,
+        `the Year-1 withdrawal rate is ${fmtPct(shortfall.withdrawalRate)} (above the ${fmtPct(shortfall.guideline || 0.04)} guideline for a ${shortfall.retirementYears}-year retirement)`,
       );
     }
     if (shortfall.endingVsRetirement < 0.3) {
@@ -4283,7 +4385,7 @@ function SpendableCashLedger({ rows }) {
   );
 }
 
-function CashFlowTooltip({ active, payload, isCouple }) {
+function CashFlowTooltip({ active, payload, isCouple, showNeedBreakdown = false }) {
   if (!active || !payload?.length) return null;
   const row = payload[0].payload;
   const visiblePayload = payload.filter((item) => item.value != null && item.value !== 0);
@@ -4300,6 +4402,37 @@ function CashFlowTooltip({ active, payload, isCouple }) {
           </div>
         ))}
       </div>
+      {showNeedBreakdown && row.spending > 0 && (
+        <div className="mt-2 border-t border-slate-200 pt-2 space-y-0.5">
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-slate-600">Need = Spending</span>
+            <span className="font-mono text-slate-900">
+              {fmtMoneyFull(row.spending)}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-slate-600">
+              + Tax
+              {row.earlyPenalty > 0
+                ? ` (incl. ${fmtMoneyFull(row.earlyPenalty)} penalty)`
+                : ""}
+            </span>
+            <span className="font-mono text-slate-900">
+              {fmtMoneyFull(row.tax)}
+            </span>
+          </div>
+          {row.conversion > 0 && (
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-indigo-700">
+                Roth conversion (taxed, not spending)
+              </span>
+              <span className="font-mono text-indigo-700">
+                {fmtMoneyFull(row.conversion)}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
       {isCouple && row.ownerDetails && (
         <div className="mt-3 border-t border-slate-200 pt-2">
           <CoupleOwnerDetailGrid ownerDetails={row.ownerDetails} />
@@ -4897,13 +5030,27 @@ function simulateWithReturns(inputs, yearlyReturns) {
     age: row.age,
     total: Math.max(0, row.total),
   }));
-  const depletedRow = result.yearlyData.find(
-    (row) => row.age >= displayInputs.retirementAge && (row.total <= 0 || row.unmetCashFlow > 0),
+  // Failure uses the same materiality standard as the plan banner.
+  // summary.depleted alone is too sensitive: sub-dollar rounding friction in
+  // the iterative solver can set it on plans that end with millions intact,
+  // which silently tanked couple-mode success rates.
+  const materialThreshold = Math.max(
+    100,
+    (result.summary.year1Spending || 0) * 0.001,
   );
+  const depletedRow = result.yearlyData.find(
+    (row) =>
+      row.age >= displayInputs.retirementAge &&
+      (row.total <= 0 || row.unmetCashFlow > materialThreshold),
+  );
+  const failed =
+    result.summary.portfolioAtEnd <= 0 ||
+    hasMaterialUnmetCashFlow(result.summary) ||
+    depletedRow != null;
   return {
     history,
     finalTotal: result.summary.portfolioAtEnd,
-    depleted: result.summary.depleted,
+    depleted: failed,
     depletedAge: depletedRow ? depletedRow.age : null,
   };
 }
@@ -4973,30 +5120,41 @@ function diagnoseSuccessRate(inputs, results, mcResults) {
   const factors = [];
   const s = results.summary;
 
-  // Factor 1: Withdrawal rate
+  // Factor 1: Withdrawal rate (guideline scales with the plan's horizon)
   const wdRate = s.year1WithdrawalRate;
-  if (wdRate > 0.06) {
+  const horizonYears = inputs.planThroughAge - inputs.retirementAge;
+  const wdGuideline = safeWithdrawalGuideline(horizonYears);
+  const wdGuidelinePct = `${(wdGuideline * 100).toFixed(2)}`.replace(/\.?0+$/u, "");
+  if (wdRate > wdGuideline + 0.02) {
     factors.push({
       impact: "negative",
       severity: "high",
       title: "Withdrawal rate is too high",
-      detail: `Pulling ${(wdRate * 100).toFixed(1)}% per year from your portfolio in Year 1 — the standard "safe" rate is 4%. Above 5% significantly raises failure risk, especially with a long retirement.`,
+      detail: `Pulling ${(wdRate * 100).toFixed(1)}% per year from your portfolio in Year 1 — the guideline for a ${horizonYears}-year retirement is about ${wdGuidelinePct}%. Rates this far above it significantly raise failure risk.`,
       fix: "Reduce spending, earn more part-time income, or delay retirement 2-3 years.",
     });
-  } else if (wdRate > 0.045) {
+  } else if (wdRate > wdGuideline + 0.005) {
     factors.push({
       impact: "negative",
       severity: "medium",
       title: "Withdrawal rate is above the safe zone",
-      detail: `Your ${(wdRate * 100).toFixed(1)}% Year-1 withdrawal is above the classic 4% rule. Still workable, but no margin for sequence-of-returns shocks.`,
+      detail: `Your ${(wdRate * 100).toFixed(1)}% Year-1 withdrawal is above the ~${wdGuidelinePct}% guideline for a ${horizonYears}-year retirement. Still workable, but little margin for sequence-of-returns shocks.`,
       fix: "Even small spending cuts or extra part-time income tighten this up significantly.",
     });
-  } else {
+  } else if (wdRate < wdGuideline) {
     factors.push({
       impact: "positive",
       severity: "high",
       title: "Low withdrawal rate",
-      detail: `Your Year-1 withdrawal rate is ${(wdRate * 100).toFixed(1)}% — well below the 4% "safe" guideline. This is the single biggest predictor of plan success.`,
+      detail: `Your Year-1 withdrawal rate is ${(wdRate * 100).toFixed(1)}% — below the ~${wdGuidelinePct}% guideline for a ${horizonYears}-year retirement. This is the single biggest predictor of plan success.`,
+      fix: null,
+    });
+  } else {
+    factors.push({
+      impact: "neutral",
+      severity: "medium",
+      title: "Withdrawal rate is right at the guideline",
+      detail: `Your ${(wdRate * 100).toFixed(1)}% Year-1 withdrawal sits at the ~${wdGuidelinePct}% guideline for a ${horizonYears}-year retirement — workable, but with no cushion.`,
       fix: null,
     });
   }
@@ -5022,7 +5180,8 @@ function diagnoseSuccessRate(inputs, results, mcResults) {
   }
 
   // Factor 3: Gap between retirement and Social Security
-  const gapYears = inputs.ssAge - inputs.retirementAge;
+  // (claim age floors at 62 in the engine; mirror that here)
+  const gapYears = Math.max(62, inputs.ssAge) - inputs.retirementAge;
   if (gapYears > 12) {
     factors.push({
       impact: "negative",
@@ -5058,7 +5217,7 @@ function diagnoseSuccessRate(inputs, results, mcResults) {
       severity: "low",
       title: "Limited part-time income buffer",
       detail: `Part-time income covers only ${(ptCoverage * 100).toFixed(0)}% of spending. Even a small amount of earned income during bad market years dramatically improves portfolio longevity.`,
-      fix: "Consider part-time massage therapy work — $15-25K/year makes a real difference.",
+      fix: "Even $15-25K/year of part-time income in the early years makes a real difference.",
     });
   }
 
@@ -5134,6 +5293,48 @@ function diagnoseSuccessRate(inputs, results, mcResults) {
   return { factors, verdict, verdictTone };
 }
 
+// Bisection on base lifestyle spending: the largest value (to the nearest
+// $500) where the plan does not run out of money, holding every other input
+// constant. Costs roughly 15-30 simulatePlan runs; callers must memoize.
+function solveMaxSustainableSpending(inputs) {
+  const withSpending = (value) => {
+    if (!isCoupleMode(inputs)) return { ...inputs, baseExpenses: value };
+    const couple = normalizeCoupleInputs(inputs.couple);
+    return {
+      ...inputs,
+      couple: { ...couple, shared: { ...couple.shared, baseExpenses: value } },
+    };
+  };
+  // Invalid inputs (mid-typing) produce an empty projection — no answer.
+  if (simulatePlan(inputs).yearlyData.length === 0) return null;
+  const isFunded = (value) =>
+    computeShortfallInfo(simulatePlan(withSpending(value))).status !== "danger";
+  if (!isFunded(0)) return null;
+  let lo = 0;
+  let hi = Math.max(getDisplayInputs(inputs).baseExpenses || 0, 50000);
+  let guard = 0;
+  while (isFunded(hi) && guard < 12) {
+    lo = hi;
+    hi *= 2;
+    guard++;
+  }
+  if (guard >= 12) return Math.round(lo / 500) * 500;
+  while (hi - lo > 500) {
+    const mid = (lo + hi) / 2;
+    if (isFunded(mid)) lo = mid;
+    else hi = mid;
+  }
+  return Math.round(lo / 500) * 500;
+}
+
+// Horizon-aware safe-withdrawal guideline. The classic 4% rule is calibrated
+// to ~30-year retirements; longer horizons warrant a lower starting rate.
+function safeWithdrawalGuideline(retirementYears) {
+  if (retirementYears > 40) return 0.0325;
+  if (retirementYears > 30) return 0.035;
+  return 0.04;
+}
+
 function hasMaterialUnmetCashFlow(summary) {
   const threshold = Math.max(1000, summary.year1Spending * 0.005);
   return summary.totalUnmetCashFlow > threshold;
@@ -5155,9 +5356,14 @@ function computeShortfallInfo(results) {
   const endingVsRetirement =
     s.portfolioAtRetirement > 0 ? s.portfolioAtEnd / s.portfolioAtRetirement : 0;
 
+  const retirementYears = rows.length;
+  const guideline = safeWithdrawalGuideline(retirementYears);
   let status = "ok";
   if (shortfallRows.length > 0 && material) status = "danger";
-  else if (s.year1WithdrawalRate >= 0.045 || endingVsRetirement < 0.3)
+  else if (
+    s.year1WithdrawalRate >= guideline + 0.005 ||
+    endingVsRetirement < 0.3
+  )
     status = "warning";
 
   // Cash sitting protected by the reserve floor while the plan shows a
@@ -5178,10 +5384,12 @@ function computeShortfallInfo(results) {
     withdrawalRate: s.year1WithdrawalRate,
     endingVsRetirement,
     protectedReserveCash,
+    guideline,
+    retirementYears,
   };
 }
 
-function generatePlanNarrative(inputs, results, mcResults) {
+function generatePlanNarrative(inputs, results, mcResults, maxSustainableSpending = null) {
   const s = results.summary;
   const retirementYears = inputs.planThroughAge - inputs.retirementAge;
   const ssBridgeYears = Math.max(0, inputs.ssAge - inputs.retirementAge);
@@ -5241,7 +5449,27 @@ function generatePlanNarrative(inputs, results, mcResults) {
     );
   }
 
+  if (
+    maxSustainableSpending != null &&
+    !materialDepletion &&
+    !materialFundingGap &&
+    maxSustainableSpending > inputs.baseExpenses
+  ) {
+    reasons.push(
+      `Spending headroom: lifestyle spending of up to ≈${fmtMoney(maxSustainableSpending)}/yr (vs ${fmtMoney(inputs.baseExpenses)} planned, holding everything else constant) stays funded through age ${inputs.planThroughAge}.`,
+    );
+  }
+
   const watchItems = [];
+  const totalEarlyPenalties = results.yearlyData.reduce(
+    (sum, d) => sum + (d.earlyPenalty || 0),
+    0,
+  );
+  if (totalEarlyPenalties > Math.max(5000, s.totalTaxesPaid * 0.01)) {
+    watchItems.push(
+      `This plan pays about ${fmtMoney(totalEarlyPenalties)} in 10% early-withdrawal penalties on retirement-account draws before age 59½ (PENALTY rows in the table). Retiring at 55 or later (Rule of 55) or covering those years from cash and taxable assets would avoid most of it.`,
+    );
+  }
   if (withdrawalRate > 0.04) {
     watchItems.push(
       `The withdrawal rate is above 4%, so spending cuts, more part-time income, or delaying retirement would materially improve the margin.`,
@@ -5521,10 +5749,12 @@ const CASH_STRATEGY_OPTIONS = [
 
 // Cash drawdown controls — used by the individual sidebar and, in couple
 // mode, the shared Household section (cash is a shared bucket).
-function CashStrategyInputs({ values, onChange }) {
+function CashStrategyInputs({ values, onChange, earlyRetirement = false }) {
   const strategy = values.cashStrategy || "cashFirst";
   const selected = CASH_STRATEGY_OPTIONS.find((o) => o.value === strategy);
   const reserveActive = strategy !== "cashFirst";
+  const penaltyRisk =
+    earlyRetirement && (strategy === "cashLast" || strategy === "proportional");
   return (
     <>
       <div className="mb-3">
@@ -5544,6 +5774,14 @@ function CashStrategyInputs({ values, onChange }) {
         </select>
         {selected && (
           <p className="text-xs text-slate-500 mt-1">{selected.blurb}</p>
+        )}
+        {penaltyRisk && (
+          <p className="text-xs text-amber-700 mt-1 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+            Heads up: retiring before 59½ with this strategy can route draws
+            into 401k/IRA territory, where the 10% early-withdrawal penalty
+            applies (PENALTY rows in the year table). Compare lifetime tax +
+            penalty before committing.
+          </p>
         )}
       </div>
       <NumberInput
@@ -5624,7 +5862,13 @@ function CoupleInputs({ couple, updateCouple }) {
           prefix="$"
           step={100}
         />
-        <CashStrategyInputs values={shared} onChange={sharedChange} />
+        <CashStrategyInputs
+          values={shared}
+          onChange={sharedChange}
+          earlyRetirement={
+            Math.min(primary.retirementAge, spouse.retirementAge) < 59.5
+          }
+        />
         <NumberInput
           label="Base Lifestyle Expenses"
           value={shared.baseExpenses}
@@ -5735,6 +5979,9 @@ export default function RetirementPlanner() {
   const [activeTab, setActiveTab] = useState("plan");
   const [mcRunning, setMcRunning] = useState(false);
   const [mcResults, setMcResults] = useState(null);
+  // Inputs snapshot at the moment Monte Carlo last ran. Any input change
+  // replaces the inputs object, so identity inequality means "stale".
+  const mcInputsRef = useRef(null);
   const [saveStatus, setSaveStatus] = useState("idle"); // idle | saving | saved | cleared
   const [diagnostics, setDiagnostics] = useState(null);
   // Named scenarios persisted in this browser only.
@@ -5757,9 +6004,23 @@ export default function RetirementPlanner() {
   const isCouple = isCoupleMode(inputs);
   const displayInputs = useMemo(() => getDisplayInputs(inputs), [inputs]);
   const results = useMemo(() => simulatePlan(inputs), [inputs]);
+  // "How much can I actually spend?" — one number, solved by bisection.
+  const maxSustainableSpending = useMemo(
+    () => solveMaxSustainableSpending(inputs),
+    [inputs],
+  );
+
+  // Stale MC results are withheld from the narrative so it never quotes a
+  // success rate computed from inputs that no longer exist.
   const planNarrative = useMemo(
-    () => generatePlanNarrative(displayInputs, results, mcResults),
-    [displayInputs, results, mcResults],
+    () =>
+      generatePlanNarrative(
+        displayInputs,
+        results,
+        mcResults && mcInputsRef.current === inputs ? mcResults : null,
+        maxSustainableSpending,
+      ),
+    [displayInputs, results, mcResults, inputs, maxSustainableSpending],
   );
 
   // Load the scenario store on mount and restore the active scenario's inputs.
@@ -5897,10 +6158,12 @@ export default function RetirementPlanner() {
     // Defer to next tick so UI can update
     setTimeout(() => {
       const result = runMonteCarlo(inputs, 500);
+      mcInputsRef.current = inputs;
       setMcResults(result);
       setMcRunning(false);
     }, 50);
   };
+  const mcStale = mcResults != null && mcInputsRef.current !== inputs;
 
   const update = (key) => (val) =>
     setInputs((prev) => {
@@ -5995,6 +6258,7 @@ export default function RetirementPlanner() {
       acaSubsidy: (row.acaSubsidy || 0) * factor,
       cashFloor: (row.cashFloor || 0) * factor,
       reserveUsed: (row.reserveUsed || 0) * factor,
+      earlyPenalty: (row.earlyPenalty || 0) * factor,
       ownerDetails: scaleOwnerDetails(row.ownerDetails, factor),
     };
   };
@@ -6178,6 +6442,30 @@ export default function RetirementPlanner() {
 
       {/* Metrics strip */}
       <div className="bg-white border-b border-slate-200 px-6 py-4 print:px-0 print:py-2 print-avoid-break">
+        <div className="max-w-[1800px] mx-auto flex justify-end mb-2 print:hidden">
+          <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg p-1">
+            <button
+              onClick={() => setShowRealDollars(false)}
+              className={`text-xs px-3 py-1 rounded font-medium transition ${
+                !showRealDollars
+                  ? "bg-indigo-600 text-white shadow-sm"
+                  : "text-slate-600 hover:text-slate-900"
+              }`}
+            >
+              Nominal $
+            </button>
+            <button
+              onClick={() => setShowRealDollars(true)}
+              className={`text-xs px-3 py-1 rounded font-medium transition ${
+                showRealDollars
+                  ? "bg-indigo-600 text-white shadow-sm"
+                  : "text-slate-600 hover:text-slate-900"
+              }`}
+            >
+              Today's $
+            </button>
+          </div>
+        </div>
         <div className="max-w-[1800px] mx-auto grid grid-cols-2 lg:grid-cols-4 gap-3">
           <MetricCard
             label={`Portfolio at ${displayInputs.retirementAge}`}
@@ -6190,7 +6478,16 @@ export default function RetirementPlanner() {
             sublabel={
               showRealDollars
                 ? `Inflation-adjusted — future dollars: ${fmtMoney(s.portfolioAtRetirement)}`
-                : `Up from ${fmtMoney(s.currentTotal)} today`
+                : `≈ ${fmtMoney(
+                    s.portfolioAtRetirement /
+                      Math.pow(
+                        1 + displayInputs.inflation,
+                        Math.max(
+                          0,
+                          displayInputs.retirementAge - displayInputs.currentAge,
+                        ),
+                      ),
+                  )} in today's dollars — up from ${fmtMoney(s.currentTotal)}`
             }
             tone="good"
           />
@@ -6211,7 +6508,16 @@ export default function RetirementPlanner() {
                   ? `Unmet cash flow: ${fmtMoney(s.totalUnmetCashFlow)}`
                 : showRealDollars
                   ? `Inflation-adjusted — future dollars: ${fmtMoney(s.portfolioAtEnd)}`
-                  : "Projected ending balance (future dollars)"
+                  : `Future dollars — ≈ ${fmtMoney(
+                      s.portfolioAtEnd /
+                        Math.pow(
+                          1 + displayInputs.inflation,
+                          Math.max(
+                            0,
+                            displayInputs.planThroughAge - displayInputs.currentAge,
+                          ),
+                        ),
+                    )} in today's purchasing power`
             }
             tone={
               shortfall.status === "danger" || s.portfolioAtEnd <= 0
@@ -6225,11 +6531,11 @@ export default function RetirementPlanner() {
             label="Year 1 Withdrawal Rate"
             value={fmtPct(s.year1WithdrawalRate)}
             sublabel={
-              s.year1WithdrawalRate < 0.04
-                ? "Below 4% — historically favorable"
-                : "Above 4% — historically higher risk"
+              s.year1WithdrawalRate < shortfall.guideline
+                ? `Below the ${fmtPct(shortfall.guideline)} guideline for a ${shortfall.retirementYears}-year retirement`
+                : `Above the ${fmtPct(shortfall.guideline)} guideline for a ${shortfall.retirementYears}-year retirement`
             }
-            tone={s.year1WithdrawalRate < 0.04 ? "good" : "warn"}
+            tone={s.year1WithdrawalRate < shortfall.guideline ? "good" : "warn"}
           />
           <MetricCard
             label="Total Roth Converted"
@@ -6244,6 +6550,8 @@ export default function RetirementPlanner() {
         shortfall={shortfall}
         planThroughAge={displayInputs.planThroughAge}
         isCouple={isCouple}
+        maxSustainableSpending={maxSustainableSpending}
+        plannedSpending={displayInputs.baseExpenses}
       />
 
       {/* Tab bar */}
@@ -6590,7 +6898,11 @@ export default function RetirementPlanner() {
             </Section>
 
             <Section title="Cash Strategy" badge="Drawdown">
-              <CashStrategyInputs values={inputs} onChange={update} />
+              <CashStrategyInputs
+                values={inputs}
+                onChange={update}
+                earlyRetirement={inputs.retirementAge < 59.5}
+              />
             </Section>
 
             <Section title="Returns & Inflation">
@@ -7102,7 +7414,11 @@ export default function RetirementPlanner() {
                 />
                 <Tooltip
                   content={(props) => (
-                    <CashFlowTooltip {...props} isCouple={isCouple} />
+                    <CashFlowTooltip
+                      {...props}
+                      isCouple={isCouple}
+                      showNeedBreakdown
+                    />
                   )}
                 />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
@@ -7129,92 +7445,129 @@ export default function RetirementPlanner() {
             {isCouple && <SpendableCashLedger rows={adjustedSpendableRows} />}
           </div>
 
-          {/* Phase Guide */}
+          {/* Phase Guide — ranges derived from the same boundaries the engine uses */}
           <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm print:shadow-none print:border-slate-300 print-avoid-break">
             <h2 className="text-lg font-bold text-slate-900 mb-1">
-              The Four Retirement Phases Explained
+              Your Retirement Phases Explained
             </h2>
             <p className="text-xs text-slate-500 mb-4">
               Each phase has different tax rules, available accounts, and
-              income sources. The strategy adapts to what's optimal at each
-              age.
+              income sources. Ages below come from your own inputs.
             </p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="border-l-4 border-amber-400 bg-amber-50 rounded p-3">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="bg-amber-100 text-amber-800 text-xs font-medium px-2 py-0.5 rounded">
-                    Bridge
-                  </span>
-                  <span className="text-xs font-semibold text-slate-700">
-                    Ages 55–59
-                  </span>
-                </div>
-                <p className="text-xs text-slate-700 leading-relaxed">
-                  "Bridging" the gap until 59½ when retirement accounts become
-                  fully accessible without penalty. Live off{" "}
-                  <span className="font-medium">cash + part-time income</span>.
-                  Use <span className="font-medium">Rule of 55</span> for 401k
-                  if needed. Begin{" "}
-                  <span className="font-medium">Roth conversions</span> while
-                  in a low tax bracket.
-                </p>
-              </div>
+            {(() => {
+              const ssClaim = Math.max(62, displayInputs.ssAge);
+              const rmdAge =
+                s.rmdStartAge ||
+                displayInputs.rmdStartAge ||
+                defaultRmdStartAge(displayInputs.currentAge);
+              const retireAge = displayInputs.retirementAge;
+              return (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {retireAge < 60 && (
+                    <div className="border-l-4 border-amber-400 bg-amber-50 rounded p-3">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="bg-amber-100 text-amber-800 text-xs font-medium px-2 py-0.5 rounded">
+                          Bridge
+                        </span>
+                        <span className="text-xs font-semibold text-slate-700">
+                          Ages {retireAge}–59
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-700 leading-relaxed">
+                        "Bridging" the gap until 59½ when retirement accounts
+                        become fully accessible without penalty. Live off{" "}
+                        <span className="font-medium">
+                          cash, taxable assets + part-time income
+                        </span>
+                        .{" "}
+                        {retireAge >= 55 ? (
+                          <>
+                            The <span className="font-medium">Rule of 55</span>{" "}
+                            makes your 401k penalty-free if needed.
+                          </>
+                        ) : (
+                          <>
+                            Retiring before 55 means 401k/IRA draws in this
+                            phase carry a{" "}
+                            <span className="font-medium">10% penalty</span>{" "}
+                            (flagged PENALTY in the table below).
+                          </>
+                        )}{" "}
+                        Begin{" "}
+                        <span className="font-medium">Roth conversions</span>{" "}
+                        while in a low tax bracket.
+                      </p>
+                    </div>
+                  )}
 
-              <div className="border-l-4 border-emerald-400 bg-emerald-50 rounded p-3">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="bg-emerald-100 text-emerald-800 text-xs font-medium px-2 py-0.5 rounded">
-                    Flex
-                  </span>
-                  <span className="text-xs font-semibold text-slate-700">
-                    Ages 60–64
-                  </span>
-                </div>
-                <p className="text-xs text-slate-700 leading-relaxed">
-                  "Flexibility" — all retirement accounts now penalty-free. Draw from{" "}
-                  <span className="font-medium">taxable brokerage</span> (often
-                  0% capital gains tax at this income level). Continue{" "}
-                  <span className="font-medium">Roth conversions</span> aggressively — no SS yet means room in low brackets.
-                </p>
-              </div>
+                  {retireAge < 65 && (
+                    <div className="border-l-4 border-emerald-400 bg-emerald-50 rounded p-3">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="bg-emerald-100 text-emerald-800 text-xs font-medium px-2 py-0.5 rounded">
+                          Flex
+                        </span>
+                        <span className="text-xs font-semibold text-slate-700">
+                          Ages {Math.max(60, retireAge)}–64
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-700 leading-relaxed">
+                        "Flexibility" — all retirement accounts now penalty-free. Draw from{" "}
+                        <span className="font-medium">taxable brokerage</span>{" "}
+                        (often 0% capital gains tax at this income level).
+                        Continue{" "}
+                        <span className="font-medium">Roth conversions</span>{" "}
+                        — no SS yet means room in low brackets.
+                      </p>
+                    </div>
+                  )}
 
-              <div className="border-l-4 border-sky-400 bg-sky-50 rounded p-3">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="bg-sky-100 text-sky-800 text-xs font-medium px-2 py-0.5 rounded">
-                    Medicare
-                  </span>
-                  <span className="text-xs font-semibold text-slate-700">
-                    Ages 65–66
-                  </span>
-                </div>
-                <p className="text-xs text-slate-700 leading-relaxed">
-                  Medicare starts — healthcare costs drop dramatically (from
-                  ~$28K/yr to ~$8K/yr). Last window for{" "}
-                  <span className="font-medium">Roth conversions</span> before
-                  Social Security starts pushing up your taxable income. Watch
-                  for <span className="font-medium">IRMAA</span>
-                  <TermInfo text={TERM_HELP.irmaa} /> (Medicare
-                  premium surcharges based on income).
-                </p>
-              </div>
+                  {ssClaim > 65 && (
+                    <div className="border-l-4 border-sky-400 bg-sky-50 rounded p-3">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="bg-sky-100 text-sky-800 text-xs font-medium px-2 py-0.5 rounded">
+                          Medicare
+                        </span>
+                        <span className="text-xs font-semibold text-slate-700">
+                          Ages 65{ssClaim - 1 > 65 ? `–${ssClaim - 1}` : ""}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-700 leading-relaxed">
+                        Medicare starts — healthcare costs typically drop
+                        (your inputs: {fmtMoney(displayInputs.healthcarePre65)}{" "}
+                        → {fmtMoney(displayInputs.healthcarePost65)} per
+                        year). Last window for{" "}
+                        <span className="font-medium">Roth conversions</span>{" "}
+                        before Social Security starts pushing up your taxable
+                        income. Watch for{" "}
+                        <span className="font-medium">IRMAA</span>
+                        <TermInfo text={TERM_HELP.irmaa} /> (Medicare premium
+                        surcharges based on income).
+                      </p>
+                    </div>
+                  )}
 
-              <div className="border-l-4 border-indigo-400 bg-indigo-50 rounded p-3">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="bg-indigo-100 text-indigo-800 text-xs font-medium px-2 py-0.5 rounded">
-                    SS
-                  </span>
-                  <span className="text-xs font-semibold text-slate-700">
-                    Ages 67+
-                  </span>
+                  <div className="border-l-4 border-indigo-400 bg-indigo-50 rounded p-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="bg-indigo-100 text-indigo-800 text-xs font-medium px-2 py-0.5 rounded">
+                        SS
+                      </span>
+                      <span className="text-xs font-semibold text-slate-700">
+                        Ages {ssClaim}+
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-700 leading-relaxed">
+                      <span className="font-medium">Social Security</span>{" "}
+                      starts at your claim age. SS + 401k/IRA withdrawals
+                      cover spending.{" "}
+                      <span className="font-medium">Roth stays untouched</span>{" "}
+                      — it grows tax-free and becomes a legacy asset or
+                      longevity hedge. At {rmdAge}, RMDs begin from
+                      401k/Traditional IRA.
+                    </p>
+                  </div>
                 </div>
-                <p className="text-xs text-slate-700 leading-relaxed">
-                  <span className="font-medium">Social Security</span> kicks
-                  in at full benefit. SS + 401k/IRA withdrawals cover spending.{" "}
-                  <span className="font-medium">Roth stays untouched</span> — it
-                  grows tax-free and becomes a legacy asset or longevity
-                  hedge. At 73, RMDs begin from 401k/Traditional IRA.
-                </p>
-              </div>
-            </div>
+              );
+            })()}
           </div>
 
           {/* Year-by-year table */}
@@ -7254,7 +7607,11 @@ export default function RetirementPlanner() {
                     ACA
                   </span>
                   <TermInfo text={TERM_HELP.aca} />{" "}
-                  = ACA subsidy active. Hover for details.
+                  = ACA subsidy active,{" "}
+                  <span className="text-[10px] font-bold bg-orange-600 text-white px-1.5 py-0.5 rounded">
+                    PENALTY
+                  </span>{" "}
+                  = 10% early-withdrawal penalty before 59½. Hover for details.
                 </p>
               </div>
               <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg p-1">
@@ -7472,6 +7829,14 @@ export default function RetirementPlanner() {
                                   RESERVE
                                 </span>
                               )}
+                              {d.earlyPenalty > 0 && (
+                                <span
+                                  className="text-[10px] font-bold bg-orange-600 text-white px-1.5 py-0.5 rounded"
+                                  title={`10% early-withdrawal penalty: ${fmtMoney(d.earlyPenalty)} included in this year's Tax. Applies to 401k/IRA (and modeled Roth) draws before age 59½.`}
+                                >
+                                  PENALTY
+                                </span>
+                              )}
                             </div>
                           </td>
                           <td className="px-3 py-1.5 text-right bg-slate-50 border-l border-slate-200">
@@ -7643,10 +8008,13 @@ export default function RetirementPlanner() {
             </div>
           </div>
 
-          {/* Explaining the ending balance / inheritance */}
+          {/* Explaining the ending balance / inheritance — only when the
+              plan actually ends above today's total, otherwise it reads as
+              mockery of a struggling plan */}
+          {s.portfolioAtEnd > s.currentTotal && (
           <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm print-avoid-break">
             <h2 className="text-lg font-bold text-slate-900 mb-1">
-              "Wait — I end up richer at 90 than I am today?"
+              "Wait — I end up richer at {displayInputs.planThroughAge} than I am today?"
             </h2>
             <p className="text-xs text-slate-500 mb-4">
               A common surprise, and a great question. Here's what's going on.
@@ -7658,9 +8026,10 @@ export default function RetirementPlanner() {
                   1. You're withdrawing less than your growth
                 </p>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  At a ~2.5% withdrawal rate against 5.5% growth, your
-                  portfolio keeps compounding even while you draw from it.
-                  The math tilts heavily in your favor.
+                  At a {fmtPct(s.year1WithdrawalRate)} year-one withdrawal
+                  rate against {fmtPct(displayInputs.postReturn)} assumed
+                  growth, the portfolio can keep compounding even while you
+                  draw from it.
                 </p>
               </div>
 
@@ -7669,11 +8038,29 @@ export default function RetirementPlanner() {
                   2. Inflation makes the numbers look bigger
                 </p>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  $1 today ≈ $2.81 in 2065 (at 3% inflation). That $7M+ at
-                  age 90 in nominal dollars is worth roughly{" "}
-                  <span className="font-medium">$2.5M in today's
-                  purchasing power</span>. Toggle "Today's $" above to see
-                  it clearly.
+                  $1 today ≈ $
+                  {Math.pow(
+                    1 + displayInputs.inflation,
+                    displayInputs.planThroughAge - displayInputs.currentAge,
+                  ).toFixed(2)}{" "}
+                  in{" "}
+                  {PROJECTION_START_YEAR +
+                    (displayInputs.planThroughAge - displayInputs.currentAge)}{" "}
+                  at your {fmtPct(displayInputs.inflation)} inflation
+                  assumption. The {fmtMoney(s.portfolioAtEnd)} at age{" "}
+                  {displayInputs.planThroughAge} is roughly{" "}
+                  <span className="font-medium">
+                    {fmtMoney(
+                      s.portfolioAtEnd /
+                        Math.pow(
+                          1 + displayInputs.inflation,
+                          displayInputs.planThroughAge -
+                            displayInputs.currentAge,
+                        ),
+                    )}{" "}
+                    in today's purchasing power
+                  </span>
+                  . Toggle "Today's $" to see every number that way.
                 </p>
               </div>
 
@@ -7682,9 +8069,9 @@ export default function RetirementPlanner() {
                   3. Yes — it's your heirs' inheritance
                 </p>
                 <p className="text-xs text-slate-700 leading-relaxed">
-                  If you pass at 90 with that balance, your husband (or
-                  other heirs) inherits it. The mix matters for taxes,
-                  though — see below.
+                  If you pass at {displayInputs.planThroughAge} with that
+                  balance, your spouse or other heirs inherit it. The mix
+                  matters for taxes, though — see below.
                 </p>
               </div>
             </div>
@@ -7732,17 +8119,27 @@ export default function RetirementPlanner() {
 
             <div className="mt-4 bg-indigo-50 border border-indigo-200 rounded p-3">
               <p className="text-xs text-indigo-900 leading-relaxed">
-                <span className="font-semibold">The key insight:</span> This
-                is why the Roth conversion strategy matters so much. The
-                model shows you converting ~$880K of your 401k into Roth
-                over 12 years — paying modest taxes at 12% brackets to
-                convert. By age 90, that Roth has grown enormously and
-                passes to heirs completely tax-free. The conversion strategy
-                isn't just for your benefit — it's a massive tax gift to
-                whoever inherits.
+                <span className="font-semibold">The key insight:</span>{" "}
+                {s.totalConverted > 0 ? (
+                  <>
+                    This plan converts {fmtMoney(s.totalConverted)} from
+                    tax-deferred accounts into Roth during low-tax years —
+                    paying some tax now so that growth compounds tax-free. By
+                    age {displayInputs.planThroughAge} that Roth balance
+                    passes to heirs with no income tax at all.
+                  </>
+                ) : (
+                  <>
+                    This plan currently makes no Roth conversions. Adding
+                    conversions in low-tax years (sidebar → Roth Conversions)
+                    shifts more of the ending balance into the tax-free Roth
+                    bucket — usually the most valuable account to inherit.
+                  </>
+                )}
               </p>
             </div>
           </div>
+          )}
 
           {/* Notes */}
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-xs text-amber-900 print-avoid-break">
@@ -7787,6 +8184,23 @@ export default function RetirementPlanner() {
                 post-IRA applicable-percentage formula. Real subsidies depend
                 on state, plan choice, age, and specific FPL tables.
               </li>
+              {!isCouple && (
+                <li>
+                  Individual mode still uses married-filing-jointly tax
+                  brackets — a single filer's actual federal tax would be
+                  meaningfully higher than shown.
+                </li>
+              )}
+              <li>
+                Social Security earnings test not modeled: claiming before
+                full retirement age while earning part-time income would
+                temporarily reduce real benefits.
+              </li>
+              <li>
+                Couple mode assumes both spouses live through the full plan —
+                survivor benefits, widow(er) filing status, and first-death
+                expense changes are not modeled.
+              </li>
               <li>
                 Not modeled: TCJA sunset after 2025, tax-exempt interest in
                 provisional income, state tax law changes, long-term care
@@ -7820,6 +8234,7 @@ export default function RetirementPlanner() {
               inputs={displayInputs}
               results={results}
               mcResults={mcResults}
+              mcStale={mcStale}
               runMC={runMC}
               mcRunning={mcRunning}
               adjust={adjust}
@@ -7896,13 +8311,6 @@ function ScenarioComparison({
           Each row is a retirement age. Each column is a spending level. The
           number shows your ending portfolio at age {displayInputs.planThroughAge}.
         </p>
-        {!couple && (
-        <p className="text-xs text-slate-600 mb-4 bg-indigo-50 border border-indigo-200 rounded p-3">
-          <span className="font-semibold">Your husband's age shown in parentheses</span> — he's
-          5 years older than you, so when you're 50 he's 55, when you're 55
-          he's 60, etc. This matters for shared active years.
-        </p>
-        )}
         {couple && (
           <p className="text-xs text-slate-600 mb-4 bg-indigo-50 border border-indigo-200 rounded p-3">
             <span className="font-semibold">Ages are primary / spouse.</span>{" "}
@@ -8511,6 +8919,7 @@ function RiskAnalysis({
   inputs,
   results,
   mcResults,
+  mcStale = false,
   runMC,
   mcRunning,
   adjust,
@@ -8546,10 +8955,12 @@ function RiskAnalysis({
           market sequences to see how often it succeeds.
         </p>
         <p className="text-xs text-slate-500 italic mb-4">
-          Note: Monte Carlo uses a simplified flat tax-drag approximation (not
-          the full bracket/RMD/IRMAA engine used in the main plan). This keeps
-          500 simulations fast in the browser but means MC tax numbers are less
-          precise than the deterministic year-by-year view.
+          Each simulation feeds randomized retirement-year returns into the
+          same full engine as the main plan — taxes, RMDs, IRMAA, early
+          withdrawal penalties, and your cash strategy all apply, and flexible
+          spending (if enabled) reacts to drops. Returns are drawn
+          independently from a normal distribution, so prolonged bear markets
+          and fat-tail crashes are represented only approximately.
         </p>
 
         <div className="flex items-center gap-3 mb-4">
@@ -8558,7 +8969,11 @@ function RiskAnalysis({
             disabled={mcRunning}
             className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-4 py-2 rounded font-medium transition disabled:opacity-50"
           >
-            {mcRunning ? "Running 500 simulations..." : "Run Monte Carlo (500 sims)"}
+            {mcRunning
+              ? "Running 500 simulations..."
+              : mcStale && mcResults
+                ? "Re-run Monte Carlo (inputs changed)"
+                : "Run Monte Carlo (500 sims)"}
           </button>
           {mcResults && (
             <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg p-1 ml-auto">
@@ -8593,6 +9008,23 @@ function RiskAnalysis({
 
         {mcResults && (
           <>
+            {mcStale && (
+              <div
+                role="alert"
+                className="mb-4 bg-amber-100 border border-amber-300 rounded p-3 flex items-start gap-2"
+              >
+                <span className="text-amber-700 font-bold" aria-hidden="true">
+                  ⚠
+                </span>
+                <p className="text-xs text-amber-900 leading-relaxed">
+                  <span className="font-semibold">
+                    Inputs changed since this simulation ran.
+                  </span>{" "}
+                  The results below reflect your previous inputs — re-run
+                  Monte Carlo to update them.
+                </p>
+              </div>
+            )}
             {/* Volatility context banner */}
             <div className="mb-4 bg-sky-50 border border-sky-200 rounded p-3">
               <p className="text-xs text-sky-900 leading-relaxed">
@@ -8613,11 +9045,13 @@ function RiskAnalysis({
                 <span className="font-semibold">
                   {fmtPct(inputs.taxableAnnualTaxDrag)}
                 </span>
-                . Both are adjustable in the sidebar under "Risk Assumptions" — try lower volatility (10-11%) if your 2035 TDF is properly balanced.
+                . Both are adjustable in the sidebar under "Risk Assumptions" — roughly 9-11% suits a balanced target-date-style mix, ~15% all equities.
               </p>
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+            <div
+              className={`grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 ${mcStale ? "opacity-60" : ""}`}
+            >
               <MetricCard
                 label="Success Rate"
                 value={fmtPct(mcResults.successRate)}
@@ -8676,7 +9110,9 @@ function RiskAnalysis({
 
             {/* Why is the success rate what it is? */}
             {diagnosis && (
-              <div className="mb-5 bg-white border border-slate-200 rounded-lg overflow-hidden">
+              <div
+                className={`mb-5 bg-white border border-slate-200 rounded-lg overflow-hidden ${mcStale ? "opacity-60" : ""}`}
+              >
                 <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
                   <h3 className="text-sm font-bold text-slate-900">
                     Why is your success rate {fmtPct(mcResults.successRate)}?

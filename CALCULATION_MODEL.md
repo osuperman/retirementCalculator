@@ -172,6 +172,22 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 - `totalUnmetCashFlow` accumulates uncovered spending/tax needs.
 - HSA balances remain part of total assets, but healthcare withdrawals now make them spendable for qualifying healthcare expenses.
 
+## Decision Support
+
+- The always-visible plan banner, narrative, and withdrawal-rate metric use a
+  horizon-aware safe-withdrawal guideline: 4% for retirements up to 30 years,
+  3.5% for 31-40 years, 3.25% beyond 40 years.
+- `solveMaxSustainableSpending` bisects base lifestyle spending (to the
+  nearest $500) over the full projection engine to find the largest value that
+  avoids depletion, holding all other inputs constant. It feeds the
+  "spending headroom" narrative line and the required-cut line in the red
+  shortfall banner.
+- Monte Carlo results are tied to the exact inputs they were computed from;
+  any input change marks them stale in the Risk tab and removes the success
+  rate from the narrative until re-run.
+- Early-withdrawal penalties are surfaced per year (PENALTY badge), in the
+  cash-flow tooltip, and as a lifetime total in the narrative when material.
+
 ## Monte Carlo
 
 - Monte Carlo runs feed randomized annual retirement returns into the same deterministic engine used by the main projection.
