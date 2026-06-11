@@ -3428,15 +3428,18 @@ function Section({
   info,
   badgeInfo,
   variant = "default",
+  icon,
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const variantStyles = {
     default: {
-      wrapper: "border-b border-slate-200 last:border-b-0 py-3",
-      button: "w-full flex justify-between items-center text-left group",
-      title: "text-xs font-semibold text-slate-700 uppercase tracking-wider",
-      badge: "text-xs text-indigo-600 font-medium bg-indigo-50 px-2 py-0.5 rounded",
-      body: "mt-3",
+      wrapper:
+        "my-2.5 first:mt-0 rounded-lg border border-slate-200 bg-white overflow-hidden",
+      button:
+        "w-full flex justify-between items-center text-left group bg-slate-100 hover:bg-slate-200/60 px-3 py-2.5 transition",
+      title: "text-xs font-bold text-slate-800 uppercase tracking-wider",
+      badge: "text-xs text-indigo-700 font-medium bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded",
+      body: "px-3 pt-3 pb-2",
       icon: null,
     },
     household: {
@@ -3480,7 +3483,9 @@ function Section({
         className={styles.button}
       >
         <div className="flex items-center gap-2">
-          {styles.icon && <span className="text-base leading-none">{styles.icon}</span>}
+          {(icon || styles.icon) && (
+            <span className="text-base leading-none">{icon || styles.icon}</span>
+          )}
           <h3 className={styles.title}>
             {info ? <TermLabel info={info}>{title}</TermLabel> : title}
           </h3>
@@ -3491,9 +3496,16 @@ function Section({
             </span>
           )}
         </div>
-        <span className="text-slate-400 text-lg group-hover:text-slate-600 transition">
-          {open ? "−" : "+"}
-        </span>
+        <svg
+          className={`w-4 h-4 text-slate-400 group-hover:text-slate-600 transition-transform ${open ? "rotate-180" : ""}`}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2.5}
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
       </button>
       {open && <div className={styles.body}>{children}</div>}
     </div>
@@ -5720,6 +5732,196 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
   );
 }
 
+// One always-visible slider+number pair. Slider for exploration (continuous
+// live feedback), number input for exact entry — both bound to the same state.
+function LeverRow({ label, value, onChange, min, max, step, isPercent = false, prefix }) {
+  const display = isPercent ? Math.round(value * 10000) / 100 : value;
+  const emit = (n) => {
+    if (Number.isNaN(n)) return;
+    onChange(isPercent ? n / 100 : n);
+  };
+  const clamped = Math.min(max, Math.max(min, display));
+  return (
+    <div className="mb-2.5 last:mb-0">
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-xs font-medium text-slate-600">{label}</label>
+        <div className="relative">
+          {prefix && (
+            <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-slate-400 text-[11px] pointer-events-none">
+              {prefix}
+            </span>
+          )}
+          <input
+            type="number"
+            value={display}
+            step={step}
+            onChange={(e) => emit(Number(e.target.value))}
+            className={`w-24 text-right rounded border border-slate-300 bg-white text-slate-900 text-xs py-0.5 pr-1.5 ${prefix ? "pl-4" : "pl-1.5"} focus:outline-none focus:ring-1 focus:ring-indigo-500`}
+          />
+        </div>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={clamped}
+        onChange={(e) => emit(Number(e.target.value))}
+        className="w-full accent-indigo-600 mt-1 cursor-pointer"
+        aria-label={label}
+      />
+    </div>
+  );
+}
+
+// The handful of inputs that drive most outcomes, pinned at the top of the
+// sidebar so users can drag them and watch the results bar react. Every
+// lever also exists in the detailed sections below — same state, two views.
+const LEVERS_OPEN_KEY = "retirement-planner-levers-open";
+
+function KeyLevers({ inputs, isCouple, update, updateCouple }) {
+  const couple = isCouple ? normalizeCoupleInputs(inputs.couple) : null;
+  // Collapsed state persists across visits so the panel stays out of the way
+  // for users who prefer working in the detailed sections.
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem(LEVERS_OPEN_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const toggle = () => {
+    const next = !open;
+    try {
+      localStorage.setItem(LEVERS_OPEN_KEY, next ? "1" : "0");
+    } catch {
+      // Private mode — preference just won't persist.
+    }
+    setOpen(next);
+  };
+  return (
+    <div className="bg-white rounded-lg border border-indigo-300 shadow-sm mb-4 lg:sticky lg:top-0 lg:z-20 overflow-hidden">
+      <button
+        onClick={toggle}
+        className="w-full flex items-center justify-between gap-2 text-left px-4 py-2.5 bg-indigo-50 hover:bg-indigo-100 transition"
+        title={open ? "Collapse the key levers" : "Expand the key levers"}
+      >
+        <span className="flex items-center gap-2">
+          <span className="text-base leading-none">🎚️</span>
+          <span className="text-sm font-semibold text-slate-900">
+            Key levers
+          </span>
+          <span className="text-[10px] uppercase tracking-wider text-indigo-600 font-semibold">
+            Live
+          </span>
+        </span>
+        <svg
+          className={`w-4 h-4 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2.5}
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {open && (
+      <div className="p-4 pt-3">
+      <p className="text-xs text-slate-500 mb-3">
+        The inputs that move the plan most — drag and watch the results react.
+        Everything else is in the sections below.
+      </p>
+      {isCouple ? (
+        <>
+          <LeverRow
+            label="Primary retires at"
+            value={couple.primary.retirementAge}
+            onChange={updateCouple("primary", "retirementAge")}
+            min={50}
+            max={75}
+            step={1}
+          />
+          <LeverRow
+            label="Spouse retires at"
+            value={couple.spouse.retirementAge}
+            onChange={updateCouple("spouse", "retirementAge")}
+            min={50}
+            max={75}
+            step={1}
+          />
+          <LeverRow
+            label="Household spending / yr"
+            value={couple.shared.baseExpenses}
+            onChange={updateCouple("shared", "baseExpenses")}
+            min={20000}
+            max={200000}
+            step={5000}
+            prefix="$"
+          />
+          <LeverRow
+            label="Return in retirement %"
+            value={couple.shared.postReturn}
+            onChange={updateCouple("shared", "postReturn")}
+            min={2}
+            max={10}
+            step={0.25}
+            isPercent
+          />
+        </>
+      ) : (
+        <>
+          <LeverRow
+            label="Retire at age"
+            value={inputs.retirementAge}
+            onChange={update("retirementAge")}
+            min={50}
+            max={75}
+            step={1}
+          />
+          <LeverRow
+            label="Spending / yr"
+            value={inputs.baseExpenses}
+            onChange={update("baseExpenses")}
+            min={20000}
+            max={200000}
+            step={5000}
+            prefix="$"
+          />
+          <LeverRow
+            label="SS claim age"
+            value={inputs.ssAge}
+            onChange={update("ssAge")}
+            min={62}
+            max={70}
+            step={1}
+          />
+          <LeverRow
+            label="Return before retiring %"
+            value={inputs.preReturn}
+            onChange={update("preReturn")}
+            min={2}
+            max={10}
+            step={0.25}
+            isPercent
+          />
+          <LeverRow
+            label="Return in retirement %"
+            value={inputs.postReturn}
+            onChange={update("postReturn")}
+            min={2}
+            max={10}
+            step={0.25}
+            isPercent
+          />
+        </>
+      )}
+      </div>
+      )}
+    </div>
+  );
+}
+
 const CASH_STRATEGY_OPTIONS = [
   {
     value: "cashFirst",
@@ -5977,6 +6179,15 @@ export default function RetirementPlanner() {
   const [inputs, setInputs] = useState(() => normalizeInputs(DEFAULT_INPUTS));
   const [showRealDollars, setShowRealDollars] = useState(false);
   const [activeTab, setActiveTab] = useState("plan");
+  // Slim fixed results bar appears once the full metrics strip scrolls away,
+  // so edits anywhere in the long input list show instant feedback.
+  const [pageScrolled, setPageScrolled] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setPageScrolled(window.scrollY > 180);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
   const [mcRunning, setMcRunning] = useState(false);
   const [mcResults, setMcResults] = useState(null);
   // Inputs snapshot at the moment Monte Carlo last ran. Any input change
@@ -6332,6 +6543,77 @@ export default function RetirementPlanner() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
+      {/* Slim live results bar — fixed overlay once the metrics strip is
+          scrolled out of view. Mirrors the headline numbers + plan status. */}
+      {pageScrolled && (
+        <div className="fixed top-0 inset-x-0 z-40 bg-white border-b border-slate-300 shadow-sm print:hidden">
+          <div className="max-w-[1800px] mx-auto px-6 py-2 flex items-center gap-x-5 gap-y-1 flex-wrap text-xs">
+            <span
+              className={`inline-flex items-center gap-1.5 font-semibold ${
+                shortfall.status === "danger"
+                  ? "text-rose-700"
+                  : shortfall.status === "warning"
+                    ? "text-amber-700"
+                    : "text-emerald-700"
+              }`}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  shortfall.status === "danger"
+                    ? "bg-rose-500 animate-pulse"
+                    : shortfall.status === "warning"
+                      ? "bg-amber-500"
+                      : "bg-emerald-500"
+                }`}
+              ></span>
+              {shortfall.status === "danger"
+                ? `Shortfall at age ${shortfall.firstShortfallAge ?? "—"}`
+                : shortfall.status === "warning"
+                  ? "Funded — thin margin"
+                  : `On track to ${displayInputs.planThroughAge}`}
+            </span>
+            <span>
+              <span className="text-slate-500">
+                At {displayInputs.retirementAge}:
+              </span>{" "}
+              <span className="font-bold">
+                {fmtMoney(
+                  adjust(
+                    s.portfolioAtRetirement,
+                    currentYear +
+                      (displayInputs.retirementAge - displayInputs.currentAge),
+                  ),
+                )}
+              </span>
+            </span>
+            <span>
+              <span className="text-slate-500">
+                At {displayInputs.planThroughAge}:
+              </span>{" "}
+              <span
+                className={`font-bold ${
+                  shortfall.status === "danger" ? "text-rose-700" : ""
+                }`}
+              >
+                {fmtMoney(
+                  adjust(
+                    s.portfolioAtEnd,
+                    currentYear +
+                      (displayInputs.planThroughAge - displayInputs.currentAge),
+                  ),
+                )}
+              </span>
+            </span>
+            <span>
+              <span className="text-slate-500">Rate:</span>{" "}
+              <span className="font-bold">{fmtPct(s.year1WithdrawalRate)}</span>
+            </span>
+            <span className="text-slate-400 hidden md:inline">
+              {showRealDollars ? "today's $" : "nominal $"}
+            </span>
+          </div>
+        </div>
+      )}
       {/* Print-specific styles */}
       <style>{`
         @media print {
@@ -6385,26 +6667,50 @@ export default function RetirementPlanner() {
               Tax-aware projection • Roth conversion strategy • NY State
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            {activeScenario && saveStatus === "idle" && !isDirty && (
-              <span className="text-xs text-emerald-300 flex items-center gap-1">
-                <span className="inline-block w-2 h-2 rounded-full bg-emerald-400"></span>
-                {activeScenario.name}
-              </span>
-            )}
-            {activeScenario && saveStatus === "idle" && isDirty && (
-              <span className="text-xs text-amber-200 flex items-center gap-1">
-                <span className="inline-block w-2 h-2 rounded-full bg-amber-300"></span>
-                {activeScenario.name} • unsaved
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            {/* Scenario switcher lives here — always visible, like a
+                document picker — instead of buried in the sidebar. */}
+            <label className="flex items-center gap-1.5 text-xs text-indigo-200">
+              <span className="hidden sm:inline font-medium">Scenario:</span>
+              <select
+                value={activeScenarioId ?? ""}
+                onChange={(e) => handleSelectScenario(e.target.value)}
+                aria-label="Active scenario"
+                className="max-w-[200px] text-xs bg-white/10 hover:bg-white/20 border border-white/30 rounded px-2 py-1.5 text-white focus:outline-none focus:ring-2 focus:ring-white/50 [&>option]:text-slate-900 cursor-pointer"
+                title="Switch between saved scenarios. Scenarios live only in this browser — nothing is uploaded."
+              >
+                {!hasSavedScenarios && (
+                  <option value="">No saved scenarios yet</option>
+                )}
+                {activeScenarioId === null && hasSavedScenarios && (
+                  <option value="">Built-in defaults (unsaved)</option>
+                )}
+                {savedScenarios.map((sc) => (
+                  <option key={sc.id} value={sc.id}>
+                    {sc.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {activeScenario && saveStatus === "idle" && (
+              <span
+                className={`text-xs flex items-center gap-1 ${
+                  isDirty ? "text-amber-200" : "text-emerald-300"
+                }`}
+              >
+                <span
+                  className={`inline-block w-2 h-2 rounded-full ${
+                    isDirty ? "bg-amber-300" : "bg-emerald-400"
+                  }`}
+                ></span>
+                {isDirty ? "unsaved" : "saved"}
               </span>
             )}
             {saveStatus === "saving" && (
               <span className="text-xs text-amber-200">Saving...</span>
             )}
             {saveStatus === "saved" && (
-              <span className="text-xs text-emerald-300 flex items-center gap-1">
-                ✓ Saved
-              </span>
+              <span className="text-xs text-emerald-300">✓ Saved</span>
             )}
             {saveStatus === "loaded" && (
               <span className="text-xs text-emerald-300">Loaded</span>
@@ -6414,15 +6720,51 @@ export default function RetirementPlanner() {
             )}
             <button
               onClick={handleSaveScenario}
-              className="text-xs bg-indigo-500 hover:bg-indigo-400 text-white px-3 py-1.5 rounded border border-indigo-400 transition font-medium"
+              disabled={saveStatus === "saving"}
+              className="text-xs bg-indigo-500 hover:bg-indigo-400 text-white px-3 py-1.5 rounded border border-indigo-400 transition font-medium disabled:opacity-50"
               title={
                 activeScenario
                   ? "Save current inputs into the selected scenario"
                   : "Save current inputs as a new named scenario"
               }
             >
-              {activeScenario ? "Save" : "Save Scenario"}
+              {activeScenario
+                ? isDirty
+                  ? "Save changes"
+                  : "Save"
+                : "Save Scenario"}
             </button>
+            <button
+              onClick={handleSaveAsScenario}
+              className="text-xs bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded border border-white/20 transition"
+              title="Save the current inputs as a new named scenario"
+            >
+              Save as new…
+            </button>
+            {activeScenario && (
+              <button
+                onClick={handleRenameScenario}
+                aria-label="Rename scenario"
+                className="text-sm leading-none bg-white/10 hover:bg-white/20 px-2 py-1.5 rounded border border-white/20 transition"
+                title="Rename the active scenario"
+              >
+                ✎
+              </button>
+            )}
+            {activeScenario && (
+              <button
+                onClick={handleDeleteScenario}
+                aria-label="Delete scenario"
+                className="text-sm leading-none bg-white/10 hover:bg-rose-500/50 px-2 py-1.5 rounded border border-white/20 transition"
+                title="Delete the active scenario (this browser only)"
+              >
+                🗑
+              </button>
+            )}
+            <span
+              className="w-px h-5 bg-white/20 mx-1 hidden sm:block"
+              aria-hidden="true"
+            ></span>
             <button
               onClick={() => window.print()}
               className="text-xs bg-emerald-500 hover:bg-emerald-400 text-white px-3 py-1.5 rounded border border-emerald-400 transition font-medium"
@@ -6582,197 +6924,15 @@ export default function RetirementPlanner() {
 
       {/* Main layout */}
       <div className="max-w-[1800px] mx-auto grid grid-cols-1 lg:grid-cols-16 gap-6 p-6 print:p-0 print:gap-2">
-        {/* Inputs sidebar */}
-        <aside className="lg:col-span-4 2xl:col-span-3 print:hidden">
-          {/* Preferences card */}
-          <div className="bg-gradient-to-br from-indigo-50 to-white rounded-lg border border-indigo-200 p-4 shadow-sm mb-4">
-            <div className="flex items-start gap-2 mb-2">
-              <svg
-                className="w-4 h-4 text-indigo-600 mt-0.5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M5 13l4 4L19 7"
-                />
-              </svg>
-              <div className="flex-1">
-                <h3 className="text-sm font-semibold text-slate-900">
-                  Scenarios
-                </h3>
-                <p className="text-xs text-slate-600 mt-0.5">
-                  Saved only in this browser — nothing is uploaded. Keep multiple
-                  named scenarios and switch between them. Changes aren't saved
-                  automatically; click <span className="font-medium">Save</span>{" "}
-                  after edits.
-                </p>
-              </div>
-            </div>
-
-            {/* Scenario selector */}
-            <div className="mt-3">
-              <label className="block text-[11px] font-medium text-slate-500 mb-1">
-                Active scenario
-              </label>
-              <select
-                value={activeScenarioId ?? ""}
-                onChange={(e) => handleSelectScenario(e.target.value)}
-                className="w-full text-xs bg-white border border-slate-300 rounded px-2 py-1.5 text-slate-800"
-              >
-                {!hasSavedScenarios && (
-                  <option value="">No saved scenarios yet</option>
-                )}
-                {activeScenarioId === null && hasSavedScenarios && (
-                  <option value="">Built-in defaults (unsaved)</option>
-                )}
-                {savedScenarios.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="flex flex-wrap gap-2 mt-3">
-              <button
-                onClick={handleSaveScenario}
-                disabled={saveStatus === "saving"}
-                className="text-xs bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded font-medium transition disabled:opacity-50"
-                title={
-                  activeScenario
-                    ? "Save current inputs into the selected scenario"
-                    : "Save current inputs as a new named scenario"
-                }
-              >
-                {saveStatus === "saving"
-                  ? "Saving..."
-                  : activeScenario
-                    ? isDirty
-                      ? "Save changes"
-                      : "Saved ✓"
-                    : "Save scenario"}
-              </button>
-              <button
-                onClick={handleSaveAsScenario}
-                className="text-xs bg-white hover:bg-slate-50 text-slate-700 px-3 py-1.5 rounded border border-slate-300 transition"
-                title="Save the current inputs as a new named scenario"
-              >
-                Save as new…
-              </button>
-              {activeScenario && (
-                <button
-                  onClick={handleRenameScenario}
-                  className="text-xs bg-white hover:bg-slate-50 text-slate-700 px-3 py-1.5 rounded border border-slate-300 transition"
-                  title="Rename the active scenario"
-                >
-                  Rename
-                </button>
-              )}
-              {activeScenario && (
-                <button
-                  onClick={handleDeleteScenario}
-                  className="text-xs bg-white hover:bg-red-50 text-red-600 px-3 py-1.5 rounded border border-red-200 transition"
-                  title="Delete the active scenario (this browser only)"
-                >
-                  Delete
-                </button>
-              )}
-              <button
-                onClick={handleResetToDefaults}
-                className="text-xs bg-white hover:bg-slate-50 text-slate-700 px-3 py-1.5 rounded border border-slate-300 transition"
-                title="Reset the working inputs to built-in defaults (keeps your saved scenarios)"
-              >
-                Reset to defaults
-              </button>
-              <button
-                onClick={() => setDiagnostics(runSelfTests())}
-                className="text-xs bg-white hover:bg-slate-50 text-slate-700 px-3 py-1.5 rounded border border-slate-300 transition ml-auto"
-                title="Run self-tests to validate tax helpers, RMD table, SS provisional income, waterfall, and solver"
-              >
-                Run Diagnostics
-              </button>
-            </div>
-            {diagnostics && (
-              <div className="mt-3 bg-white border border-slate-200 rounded p-3">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="text-xs font-semibold text-slate-800">
-                    Self-Test Results:{" "}
-                    <span
-                      className={
-                        diagnostics.failed === 0
-                          ? "text-emerald-700"
-                          : "text-rose-700"
-                      }
-                    >
-                      {diagnostics.passed}/{diagnostics.total} passed
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => setDiagnostics(null)}
-                    className="text-xs text-slate-400 hover:text-slate-600"
-                  >
-                    ✕ Close
-                  </button>
-                </div>
-                <div className="max-h-64 overflow-y-auto">
-                  <table className="w-full text-[11px]">
-                    <thead className="bg-slate-50 sticky top-0">
-                      <tr>
-                        <th className="px-2 py-1 text-left font-medium text-slate-600">
-                          Test
-                        </th>
-                        <th className="px-2 py-1 text-right font-medium text-slate-600">
-                          Expected
-                        </th>
-                        <th className="px-2 py-1 text-right font-medium text-slate-600">
-                          Actual
-                        </th>
-                        <th className="px-2 py-1 text-center font-medium text-slate-600">
-                          Status
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {diagnostics.results.map((r, i) => (
-                        <tr
-                          key={i}
-                          className={
-                            r.passed
-                              ? "border-b border-slate-100"
-                              : "border-b border-rose-200 bg-rose-50"
-                          }
-                        >
-                          <td className="px-2 py-1 text-slate-700">{r.name}</td>
-                          <td className="px-2 py-1 text-right text-slate-600 font-mono">
-                            {r.expected}
-                          </td>
-                          <td className="px-2 py-1 text-right text-slate-600 font-mono">
-                            {r.actual}
-                          </td>
-                          <td className="px-2 py-1 text-center">
-                            {r.passed ? (
-                              <span className="text-emerald-600 font-bold">
-                                ✓
-                              </span>
-                            ) : (
-                              <span className="text-rose-600 font-bold">
-                                ✗
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </div>
-
+        {/* Inputs sidebar — its own scroll container on desktop so the
+            input list and the results never fight over one scrollbar. */}
+        <aside className="lg:col-span-4 2xl:col-span-3 print:hidden lg:sticky lg:top-12 lg:self-start lg:max-h-[calc(100vh-3.5rem)] lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
+          <KeyLevers
+            inputs={inputs}
+            isCouple={isCouple}
+            update={update}
+            updateCouple={updateCouple}
+          />
           <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm">
             <h2 className="text-base font-bold text-slate-900 mb-1">
               Your Inputs
@@ -6816,7 +6976,7 @@ export default function RetirementPlanner() {
             ) : (
               <>
 
-            <Section title="Timing">
+            <Section title="Timing" icon="🗓️">
               <NumberInput
                 label="Current Age"
                 value={inputs.currentAge}
@@ -6835,7 +6995,7 @@ export default function RetirementPlanner() {
               />
             </Section>
 
-            <Section title="Current Balances">
+            <Section title="Current Balances" icon="💰">
               <NumberInput
                 label="Cash / HYSA"
                 value={inputs.balanceCash}
@@ -6897,7 +7057,7 @@ export default function RetirementPlanner() {
               />
             </Section>
 
-            <Section title="Cash Strategy" badge="Drawdown">
+            <Section title="Cash Strategy" badge="Drawdown" icon="🏦">
               <CashStrategyInputs
                 values={inputs}
                 onChange={update}
@@ -6905,7 +7065,7 @@ export default function RetirementPlanner() {
               />
             </Section>
 
-            <Section title="Returns & Inflation">
+            <Section title="Returns & Inflation" icon="📈">
               <PctInput
                 label="Pre-Retirement Return"
                 value={inputs.preReturn}
@@ -6931,7 +7091,7 @@ export default function RetirementPlanner() {
               />
             </Section>
 
-            <Section title="Risk Assumptions" badge="Monte Carlo">
+            <Section title="Risk Assumptions" badge="Monte Carlo" icon="🎲">
               <PctInput
                 label="Portfolio Volatility"
                 value={inputs.portfolioVolatility}
@@ -6969,7 +7129,7 @@ export default function RetirementPlanner() {
               </div>
             </Section>
 
-            <Section title="Contributions (Pre-Retirement)">
+            <Section title="Contributions (Pre-Retirement)" icon="💼">
               <NumberInput
                 label="401k Employee"
                 value={inputs.contrib401k}
@@ -6997,7 +7157,7 @@ export default function RetirementPlanner() {
               />
             </Section>
 
-            <Section title="Spending (in retirement year 1)">
+            <Section title="Spending (in retirement year 1)" icon="🛒">
               <NumberInput
                 label="Base Lifestyle Expenses"
                 value={inputs.baseExpenses}
@@ -7025,7 +7185,7 @@ export default function RetirementPlanner() {
               />
             </Section>
 
-            <Section title="Income">
+            <Section title="Income" icon="💵">
               <NumberInput
                 label="Part-Time Income / Year"
                 value={inputs.partTimeIncome}
@@ -7058,6 +7218,7 @@ export default function RetirementPlanner() {
 
             <Section
               title="Pension (Optional)"
+              icon="🏛️"
               badge={inputs.pensionIncome > 0 ? "Active" : "Off"}
               defaultOpen={inputs.pensionIncome > 0}
             >
@@ -7138,7 +7299,7 @@ export default function RetirementPlanner() {
               )}
             </Section>
 
-            <Section title="Roth Conversions" badge="Strategy">
+            <Section title="Roth Conversions" badge="Strategy" icon="🔄">
               {(() => {
                 // Warn if annual conversion targets are a large % of 401k balance
                 // This prevents the "conversion destroys small portfolio" failure mode
@@ -7191,6 +7352,7 @@ export default function RetirementPlanner() {
 
             <Section
               title="Advanced Tax Model"
+              icon="⚙️"
               badge="RMD / ACA / IRMAA"
               badgeInfo={`${TERM_HELP.rmd} ${TERM_HELP.aca} ${TERM_HELP.irmaa}`}
               defaultOpen={false}
@@ -7243,6 +7405,100 @@ export default function RetirementPlanner() {
               </div>
             </Section>
               </>
+            )}
+          </div>
+
+          {/* Utilities: privacy note + self-test runner. Scenario switching
+              moved to the always-visible header bar. */}
+          <div className="bg-white rounded-lg border border-slate-200 p-4 shadow-sm mt-4">
+            <div className="flex items-start justify-between gap-3">
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Scenarios and inputs are saved only in this browser — nothing
+                is uploaded. Switch, save, rename, or delete scenarios from
+                the bar at the top of the page.
+              </p>
+              <button
+                onClick={() => setDiagnostics(runSelfTests())}
+                className="shrink-0 text-xs bg-white hover:bg-slate-50 text-slate-700 px-3 py-1.5 rounded border border-slate-300 transition"
+                title="Run self-tests to validate tax helpers, RMD table, SS provisional income, waterfall, and solver"
+              >
+                Run Diagnostics
+              </button>
+            </div>
+            {diagnostics && (
+              <div className="mt-3 bg-white border border-slate-200 rounded p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-xs font-semibold text-slate-800">
+                    Self-Test Results:{" "}
+                    <span
+                      className={
+                        diagnostics.failed === 0
+                          ? "text-emerald-700"
+                          : "text-rose-700"
+                      }
+                    >
+                      {diagnostics.passed}/{diagnostics.total} passed
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setDiagnostics(null)}
+                    className="text-xs text-slate-400 hover:text-slate-600"
+                  >
+                    ✕ Close
+                  </button>
+                </div>
+                <div className="max-h-64 overflow-y-auto">
+                  <table className="w-full text-[11px]">
+                    <thead className="bg-slate-50 sticky top-0">
+                      <tr>
+                        <th className="px-2 py-1 text-left font-medium text-slate-600">
+                          Test
+                        </th>
+                        <th className="px-2 py-1 text-right font-medium text-slate-600">
+                          Expected
+                        </th>
+                        <th className="px-2 py-1 text-right font-medium text-slate-600">
+                          Actual
+                        </th>
+                        <th className="px-2 py-1 text-center font-medium text-slate-600">
+                          Status
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {diagnostics.results.map((r, i) => (
+                        <tr
+                          key={i}
+                          className={
+                            r.passed
+                              ? "border-b border-slate-100"
+                              : "border-b border-rose-200 bg-rose-50"
+                          }
+                        >
+                          <td className="px-2 py-1 text-slate-700">{r.name}</td>
+                          <td className="px-2 py-1 text-right text-slate-600 font-mono">
+                            {r.expected}
+                          </td>
+                          <td className="px-2 py-1 text-right text-slate-600 font-mono">
+                            {r.actual}
+                          </td>
+                          <td className="px-2 py-1 text-center">
+                            {r.passed ? (
+                              <span className="text-emerald-600 font-bold">
+                                ✓
+                              </span>
+                            ) : (
+                              <span className="text-rose-600 font-bold">
+                                ✗
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             )}
           </div>
         </aside>
