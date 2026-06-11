@@ -354,11 +354,22 @@ function totalTax(
   return fedOrd + fedLtcg + niit + ny;
 }
 
+// User-selectable cash drawdown behavior. "cashFirst" reproduces the original
+// waterfall exactly; the other strategies respect an inflation-adjusted
+// minimum cash reserve that is only spendable via the last-resort toggle.
+const CASH_POLICY_DEFAULT = {
+  strategy: "cashFirst", // cashFirst | preserveReserve | proportional | cashLast
+  reserveNominal: 0, // this year's reserve floor in nominal dollars
+  allowReserve: false, // may the reserve be spent when everything else is empty?
+};
+
 // Single consistent withdrawal waterfall — replaces prior age-hardcoded logic
 // `preSs` = true if age < ssAge (prioritize cash/taxable, preserve Roth)
 // `preSs` = false if SS is flowing (prioritize 401k/IRA, preserve Roth)
-function doWithdrawalWaterfall(grossNeed, state, preSs) {
-  const w = { wCash: 0, wTaxable: 0, w401k: 0, wIra: 0, wRoth: 0 };
+// `cashPolicy` controls where cash sits in the order and how much of it is
+// reachable. Returned `reserveUsed` is included in `wCash`.
+function doWithdrawalWaterfall(grossNeed, state, preSs, cashPolicy = CASH_POLICY_DEFAULT) {
+  const w = { wCash: 0, wTaxable: 0, w401k: 0, wIra: 0, wRoth: 0, reserveUsed: 0 };
   let rem = grossNeed;
   const take = (bucketKey, available) => {
     const t = Math.min(rem, Math.max(0, available));
@@ -366,8 +377,53 @@ function doWithdrawalWaterfall(grossNeed, state, preSs) {
     rem -= t;
     return t;
   };
-  if (preSs) {
-    take("wCash", state.bCash);
+  const strategy = cashPolicy.strategy || "cashFirst";
+  // "Use cash first" is the legacy mode: the reserve floor is not applied.
+  const reserve =
+    strategy === "cashFirst" ? 0 : Math.max(0, cashPolicy.reserveNominal || 0);
+  const spendableCash = () => Math.max(0, state.bCash - reserve - w.wCash);
+
+  if (strategy === "proportional") {
+    // Split the need across cash-above-reserve, taxable, and tax-deferred in
+    // proportion to available balances; Roth stays preserved until last.
+    const buckets = [
+      ["wCash", spendableCash()],
+      ["wTaxable", Math.max(0, state.bTaxable)],
+      ["w401k", Math.max(0, state.b401k)],
+      ["wIra", Math.max(0, state.bTradIra)],
+    ];
+    const totalAvail = buckets.reduce((sum, [, b]) => sum + b, 0);
+    if (totalAvail > 0 && rem > 0) {
+      const target = Math.min(rem, totalAvail);
+      for (const [key, bal] of buckets) {
+        const share = Math.min((bal / totalAvail) * target, bal, rem);
+        w[key] += share;
+        rem -= share;
+      }
+      // Sweep float residue through the same buckets in order.
+      take("wCash", spendableCash());
+      take("wTaxable", state.bTaxable - w.wTaxable);
+      take("w401k", state.b401k - w.w401k);
+      take("wIra", state.bTradIra - w.wIra);
+    }
+    take("wRoth", state.bRoth);
+  } else if (strategy === "cashLast") {
+    // Cash is used only when other spendable sources are exhausted, but still
+    // ahead of Roth (Roth preservation is the model's standing philosophy).
+    if (preSs) {
+      take("wTaxable", state.bTaxable);
+      take("w401k", state.b401k);
+      take("wIra", state.bTradIra);
+    } else {
+      take("w401k", state.b401k);
+      take("wIra", state.bTradIra);
+      take("wTaxable", state.bTaxable);
+    }
+    take("wCash", spendableCash());
+    take("wRoth", state.bRoth);
+  } else if (preSs) {
+    // cashFirst (reserve = 0) and preserveReserve share this order.
+    take("wCash", spendableCash());
     take("wTaxable", state.bTaxable);
     take("w401k", state.b401k);
     take("wIra", state.bTradIra);
@@ -376,8 +432,16 @@ function doWithdrawalWaterfall(grossNeed, state, preSs) {
     take("w401k", state.b401k);
     take("wIra", state.bTradIra);
     take("wTaxable", state.bTaxable);
-    take("wCash", state.bCash);
+    take("wCash", spendableCash());
     take("wRoth", state.bRoth);
+  }
+
+  // Last resort: dip into the protected reserve only if explicitly allowed.
+  if (rem > 0 && reserve > 0 && cashPolicy.allowReserve) {
+    const fromReserve = Math.min(rem, Math.max(0, state.bCash - w.wCash));
+    w.wCash += fromReserve;
+    w.reserveUsed = fromReserve;
+    rem -= fromReserve;
   }
   return w;
 }
@@ -406,16 +470,17 @@ function solveGrossedUpWithdrawals({
   inflation,
   minimumRmd = 0,
   penaltyFree401k = false,
+  cashPolicy = CASH_POLICY_DEFAULT,
 }) {
   let tax = 0;
-  let withdrawals = { wCash: 0, wTaxable: 0, w401k: 0, wIra: 0, wRoth: 0 };
+  let withdrawals = { wCash: 0, wTaxable: 0, w401k: 0, wIra: 0, wRoth: 0, reserveUsed: 0 };
   let realizedGain = 0;
   let taxableSs = 0;
   let ordIncome = 0;
   let earlyPenalty = 0;
   for (let iter = 0; iter < 10; iter++) {
     const grossNeed = Math.max(0, netNeed + tax);
-    withdrawals = doWithdrawalWaterfall(grossNeed, state, preSs);
+    withdrawals = doWithdrawalWaterfall(grossNeed, state, preSs, cashPolicy);
 
     // Enforce RMD inside the convergence loop so tax reflects forced withdrawals.
     // If w401k + wIra < minimumRmd, force additional withdrawal from tax-deferred
@@ -1364,6 +1429,189 @@ function runSelfTests() {
     },
   );
 
+  // --- Cash withdrawal strategy & minimum reserve ---
+  const reserveState = {
+    bCash: 300000,
+    bTaxable: 0,
+    bTaxableBasis: 0,
+    b401k: 0,
+    bTradIra: 0,
+    bRoth: 0,
+  };
+  // ACCEPTANCE TEST: $300K cash, $100K reserve -> at most $200K of cash used,
+  // the remaining $100K preserved unless explicitly allowed.
+  const wfReserve = doWithdrawalWaterfall(250000, reserveState, true, {
+    strategy: "preserveReserve",
+    reserveNominal: 100000,
+    allowReserve: false,
+  });
+  test(
+    "ACCEPTANCE cash reserve: $300K cash, $100K floor, $250K need -> $200K used",
+    wfReserve.wCash,
+    200000,
+  );
+  test(
+    "ACCEPTANCE cash reserve: protected floor untouched (reserveUsed = 0)",
+    wfReserve.reserveUsed,
+    0,
+  );
+  const wfReserveAllowed = doWithdrawalWaterfall(250000, reserveState, true, {
+    strategy: "preserveReserve",
+    reserveNominal: 100000,
+    allowReserve: true,
+  });
+  test(
+    "cash reserve: last-resort toggle lets the reserve be spent",
+    wfReserveAllowed.wCash,
+    250000,
+  );
+  test(
+    "cash reserve: reserveUsed reports the dip into the floor",
+    wfReserveAllowed.reserveUsed,
+    50000,
+  );
+  const wfLegacy = doWithdrawalWaterfall(250000, reserveState, true, {
+    strategy: "cashFirst",
+    reserveNominal: 100000,
+    allowReserve: false,
+  });
+  test(
+    "cashFirst: reserve floor ignored (legacy drain-cash behavior)",
+    wfLegacy.wCash,
+    250000,
+  );
+
+  // cashLast: taxable/tax-deferred drained before cash; Roth still last
+  const wfCashLast = doWithdrawalWaterfall(
+    60000,
+    {
+      bCash: 100000,
+      bTaxable: 50000,
+      bTaxableBasis: 0,
+      b401k: 0,
+      bTradIra: 0,
+      bRoth: 50000,
+    },
+    true,
+    { strategy: "cashLast", reserveNominal: 0, allowReserve: false },
+  );
+  test("cashLast: taxable used before cash", wfCashLast.wTaxable, 50000);
+  test("cashLast: cash covers the remainder", wfCashLast.wCash, 10000);
+  test("cashLast: Roth still preserved last", wfCashLast.wRoth, 0);
+
+  // proportional: pro-rata by available balances across cash/taxable/401k/IRA
+  const wfProp = doWithdrawalWaterfall(
+    100000,
+    {
+      bCash: 100000,
+      bTaxable: 100000,
+      bTaxableBasis: 70000,
+      b401k: 200000,
+      bTradIra: 0,
+      bRoth: 0,
+    },
+    true,
+    { strategy: "proportional", reserveNominal: 0, allowReserve: false },
+  );
+  test("proportional: cash takes its 25% share", wfProp.wCash, 25000, pctEq);
+  test(
+    "proportional: taxable takes its 25% share",
+    wfProp.wTaxable,
+    25000,
+    pctEq,
+  );
+  test("proportional: 401k takes its 50% share", wfProp.w401k, 50000, pctEq);
+
+  testScenario(
+    "Cash reserve: inflation-adjusted floor is never breached in a full plan",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        currentAge: 60,
+        retirementAge: 61,
+        planThroughAge: 75,
+        balanceCash: 300000,
+        balanceTaxable: 50000,
+        balance401k: 0,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        ssIncome: 20000,
+        ssAge: 67,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+        cashStrategy: "preserveReserve",
+        cashReserveFloor: 100000,
+        allowReserveAsLastResort: false,
+      });
+      const breach = r.yearlyData.find(
+        (d) => d.phase !== "accumulation" && d.cash < d.cashFloor - 1,
+      );
+      const inflated = r.yearlyData.some((d) => d.cashFloor > 100000);
+      return {
+        passed: !breach && inflated,
+        details: breach
+          ? `age ${breach.age}: cash=${breach.cash} < floor=${breach.cashFloor}`
+          : "floor preserved in every year and grows with inflation",
+      };
+    },
+  );
+
+  testScenario(
+    "Couple: shared cash reserve respected by household waterfall",
+    () => {
+      const zeros = {
+        balance401k: 0,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        ssIncome: 0,
+        pensionIncome: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        contrib401k: 0,
+        contribMatch: 0,
+        contribHsa: 0,
+        healthcarePre65: 10000,
+        healthcarePost65: 5000,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+        rmdStartAge: 99,
+        currentAge: 60,
+        retirementAge: 61,
+        planThroughAge: 70,
+      };
+      const couple = normalizeCoupleInputs({
+        primary: { ...DEFAULT_COUPLE_INPUTS.primary, ...zeros },
+        spouse: { ...DEFAULT_COUPLE_INPUTS.spouse, ...zeros },
+        shared: {
+          ...DEFAULT_COUPLE_INPUTS.shared,
+          balanceCash: 300000,
+          balanceTaxable: 0,
+          baseExpenses: 80000,
+          cashStrategy: "preserveReserve",
+          cashReserveFloor: 100000,
+          allowReserveAsLastResort: false,
+        },
+      });
+      const r = simulateCouple(couple);
+      const breach = r.yearlyData.find(
+        (d) => d.phase !== "accumulation" && d.cash < d.cashFloor - 1,
+      );
+      const usedSomeCash = r.yearlyData.some((d) => d.fromCash > 0);
+      return {
+        passed: !breach && usedSomeCash,
+        details: breach
+          ? `year ${breach.year}: cash=${breach.cash} < floor=${breach.cashFloor}`
+          : "household floor preserved; spendable cash above floor was used",
+      };
+    },
+  );
+
   const passed = results.filter((r) => r.passed).length;
   const failed = results.filter((r) => !r.passed).length;
   return { passed, failed, total: results.length, results };
@@ -1415,6 +1663,9 @@ function simulate(inputs, options = {}) {
     conversionBridge,
     conversionMid,
     conversionFinal,
+    cashStrategy = "cashFirst",
+    cashReserveFloor = 0,
+    allowReserveAsLastResort = false,
   } = inputs;
 
   // Guard against invalid inputs during manual typing
@@ -1567,6 +1818,8 @@ function simulate(inputs, options = {}) {
         acaSubsidy: 0,
         hsaWithdrawal: 0,
         earlyPenalty: 0,
+        cashFloor: 0,
+        reserveUsed: 0,
         unmetCashFlow: Math.round(unpaidDebt),
         contribution401kApplied: Math.round(applied401k),
         contributionMatchApplied: Math.round(appliedMatch),
@@ -1655,6 +1908,16 @@ function simulate(inputs, options = {}) {
     };
 
     const preSs = age < ssClaimAge;
+    // Reserve floor is entered in today's dollars and inflates on the same
+    // clock as spending, so it keeps its purchasing power across the plan.
+    const cashPolicy = {
+      strategy: cashStrategy,
+      reserveNominal:
+        cashStrategy === "cashFirst"
+          ? 0
+          : Math.round(Math.max(0, cashReserveFloor) * inflMult),
+      allowReserve: allowReserveAsLastResort,
+    };
 
     // === Converged solve: withdrawals, tax, RMD, and IRMAA all converge together ===
     // Outer loop: iterate IRMAA (and ACA pre-65) until spending stabilizes.
@@ -1693,6 +1956,7 @@ function simulate(inputs, options = {}) {
         inflation,
         minimumRmd: rmdAmount,
         penaltyFree401k,
+        cashPolicy,
       });
 
       finalSpending = effectiveSpending;
@@ -1762,6 +2026,7 @@ function simulate(inputs, options = {}) {
         inflation,
         minimumRmd: rmdAmount,
         penaltyFree401k,
+        cashPolicy,
       });
     }
 
@@ -1870,6 +2135,8 @@ function simulate(inputs, options = {}) {
       irmaaTriggered,
       acaSubsidy: Math.round(acaSubsidy),
       earlyPenalty: solve.earlyPenalty,
+      cashFloor: cashPolicy.reserveNominal,
+      reserveUsed: Math.round(solve.withdrawals.reserveUsed || 0),
       unmetCashFlow: Math.round(unmetCashFlow),
     });
   }
@@ -1963,7 +2230,13 @@ function enforcePersonRmd(withdrawals, prefix, state, rmdAmount) {
   );
 }
 
-function doCoupleWithdrawalWaterfall(grossNeed, state, preHouseholdSs, rmds) {
+function doCoupleWithdrawalWaterfall(
+  grossNeed,
+  state,
+  preHouseholdSs,
+  rmds,
+  cashPolicy = CASH_POLICY_DEFAULT,
+) {
   const withdrawals = {
     cash: 0,
     taxable: 0,
@@ -1985,9 +2258,67 @@ function doCoupleWithdrawalWaterfall(grossNeed, state, preHouseholdSs, rmds) {
   const take = (key, available) => {
     remaining = takeFromBalance(withdrawals, key, available, remaining);
   };
+  const strategy = cashPolicy.strategy || "cashFirst";
+  // "Use cash first" is the legacy mode: the reserve floor is not applied.
+  const reserve =
+    strategy === "cashFirst" ? 0 : Math.max(0, cashPolicy.reserveNominal || 0);
+  // Cap passed to takeFromBalance: cash balance minus the protected floor.
+  const spendableCashCap = Math.max(0, state.cash - reserve);
+  let reserveUsed = 0;
 
-  if (preHouseholdSs) {
-    take("cash", state.cash);
+  if (strategy === "proportional") {
+    // Pro-rata across cash-above-reserve, taxable, and both spouses'
+    // tax-deferred accounts; Roth stays preserved until last.
+    const buckets = [
+      ["cash", spendableCashCap],
+      ["taxable", Math.max(0, state.taxable)],
+      ["primary401k", Math.max(0, state.primary401k)],
+      ["spouse401k", Math.max(0, state.spouse401k)],
+      ["primaryIra", Math.max(0, state.primaryTradIra)],
+      ["spouseIra", Math.max(0, state.spouseTradIra)],
+    ];
+    const avail = buckets.map(([key, cap]) =>
+      Math.max(0, cap - (withdrawals[key] || 0)),
+    );
+    const totalAvail = avail.reduce((sum, b) => sum + b, 0);
+    if (totalAvail > 0 && remaining > 0) {
+      const target = Math.min(remaining, totalAvail);
+      buckets.forEach(([key], i) => {
+        const share = Math.min((avail[i] / totalAvail) * target, avail[i], remaining);
+        withdrawals[key] += share;
+        remaining -= share;
+      });
+      // Sweep float residue through the same buckets in order.
+      take("cash", spendableCashCap);
+      take("taxable", state.taxable);
+      take("primary401k", state.primary401k);
+      take("spouse401k", state.spouse401k);
+      take("primaryIra", state.primaryTradIra);
+      take("spouseIra", state.spouseTradIra);
+    }
+    take("primaryRoth", state.primaryRoth);
+    take("spouseRoth", state.spouseRoth);
+  } else if (strategy === "cashLast") {
+    // Cash only when other spendable sources are exhausted, but before Roth.
+    if (preHouseholdSs) {
+      take("taxable", state.taxable);
+      take("primary401k", state.primary401k);
+      take("spouse401k", state.spouse401k);
+      take("primaryIra", state.primaryTradIra);
+      take("spouseIra", state.spouseTradIra);
+    } else {
+      take("primary401k", state.primary401k);
+      take("spouse401k", state.spouse401k);
+      take("primaryIra", state.primaryTradIra);
+      take("spouseIra", state.spouseTradIra);
+      take("taxable", state.taxable);
+    }
+    take("cash", spendableCashCap);
+    take("primaryRoth", state.primaryRoth);
+    take("spouseRoth", state.spouseRoth);
+  } else if (preHouseholdSs) {
+    // cashFirst (reserve = 0) and preserveReserve share this order.
+    take("cash", spendableCashCap);
     take("taxable", state.taxable);
     take("primary401k", state.primary401k);
     take("spouse401k", state.spouse401k);
@@ -2001,11 +2332,22 @@ function doCoupleWithdrawalWaterfall(grossNeed, state, preHouseholdSs, rmds) {
     take("primaryIra", state.primaryTradIra);
     take("spouseIra", state.spouseTradIra);
     take("taxable", state.taxable);
-    take("cash", state.cash);
+    take("cash", spendableCashCap);
     take("primaryRoth", state.primaryRoth);
     take("spouseRoth", state.spouseRoth);
   }
 
+  // Last resort: dip into the protected reserve only if explicitly allowed.
+  if (remaining > 0 && reserve > 0 && cashPolicy.allowReserve) {
+    const fromReserve = Math.min(
+      remaining,
+      Math.max(0, state.cash - withdrawals.cash),
+    );
+    withdrawals.cash += fromReserve;
+    reserveUsed = fromReserve;
+    remaining -= fromReserve;
+  }
+  withdrawals.reserveUsed = reserveUsed;
   return withdrawals;
 }
 
@@ -2020,9 +2362,10 @@ function solveCoupleGrossedUpWithdrawals({
   ages,
   inflation,
   penaltyFree401k = { primary: false, spouse: false },
+  cashPolicy = CASH_POLICY_DEFAULT,
 }) {
   let tax = 0;
-  let withdrawals = doCoupleWithdrawalWaterfall(0, state, preHouseholdSs, rmds);
+  let withdrawals = doCoupleWithdrawalWaterfall(0, state, preHouseholdSs, rmds, cashPolicy);
   let realizedGain = 0;
   let taxableSs = 0;
   let ordIncome = 0;
@@ -2035,6 +2378,7 @@ function solveCoupleGrossedUpWithdrawals({
       state,
       preHouseholdSs,
       rmds,
+      cashPolicy,
     );
     realizedGain = computeRealizedGain(
       withdrawals.taxable,
@@ -2359,6 +2703,8 @@ function simulateCouple(coupleInputs, options = {}) {
         irmaaTriggered: false,
         acaSubsidy: 0,
         earlyPenalty: 0,
+        cashFloor: 0,
+        reserveUsed: 0,
         unmetCashFlow: Math.round(unpaidDebt),
         ownerDetails: {
           primary: {
@@ -2484,6 +2830,16 @@ function simulateCouple(coupleInputs, options = {}) {
       primary: primary.retirementAge >= 55,
       spouse: spouse.retirementAge >= 55,
     };
+    // Cash is a shared bucket, so the cash strategy and inflation-adjusted
+    // reserve floor come from shared household settings.
+    const coupleCashPolicy = {
+      strategy: shared.cashStrategy || "cashFirst",
+      reserveNominal:
+        (shared.cashStrategy || "cashFirst") === "cashFirst"
+          ? 0
+          : Math.round(Math.max(0, shared.cashReserveFloor || 0) * inflMult),
+      allowReserve: !!shared.allowReserveAsLastResort,
+    };
     let netNeed = Math.max(0, spending - hsaWithdrawal - incomeTotal);
     let solve = solveCoupleGrossedUpWithdrawals({
       netNeed,
@@ -2515,6 +2871,7 @@ function simulateCouple(coupleInputs, options = {}) {
       ages: { primary: primaryAge, spouse: spouseAge },
       inflation: shared.inflation,
       penaltyFree401k: couplePenaltyFree401k,
+      cashPolicy: coupleCashPolicy,
     });
     let acaSubsidy = 0;
     const pre65HealthcareSticker =
@@ -2570,6 +2927,7 @@ function simulateCouple(coupleInputs, options = {}) {
         ages: { primary: primaryAge, spouse: spouseAge },
         inflation: shared.inflation,
         penaltyFree401k: couplePenaltyFree401k,
+        cashPolicy: coupleCashPolicy,
       });
     }
 
@@ -2630,6 +2988,7 @@ function simulateCouple(coupleInputs, options = {}) {
           ages: { primary: primaryAge, spouse: spouseAge },
           inflation: shared.inflation,
           penaltyFree401k: couplePenaltyFree401k,
+          cashPolicy: coupleCashPolicy,
         });
       }
       spending = Math.round(baseSpendingBeforeIrmaa + irmaaSurcharge);
@@ -2745,6 +3104,8 @@ function simulateCouple(coupleInputs, options = {}) {
       irmaaTriggered: irmaaSurcharge > 0,
       acaSubsidy: Math.round(acaSubsidy),
       earlyPenalty: solve.earlyPenalty,
+      cashFloor: coupleCashPolicy.reserveNominal,
+      reserveUsed: Math.round(withdrawals.reserveUsed || 0),
       unmetCashFlow: Math.round(unmetCashFlow),
       ownerDetails: {
         primary: {
@@ -3102,6 +3463,14 @@ function PlanStatusBanner({ shortfall, planThroughAge, isCouple }) {
               retire later, adjust the Social Security claim age, or reduce
               Roth conversions in tight years.
             </p>
+            {shortfall.protectedReserveCash > 1000 && (
+              <p className="text-sm mt-1 font-semibold text-white print:text-rose-700">
+                Note: about {fmtMoney(shortfall.protectedReserveCash)} sits in
+                your protected cash reserve. Enable "Allow reserve as last
+                resort" under Cash Strategy if you want the plan to spend it
+                before failing.
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -3374,6 +3743,15 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
         ["Taxable Brokerage", fmtMoney(coupleExport.shared.balanceTaxable)],
         ["Taxable Cost Basis %", fmtPct(coupleExport.shared.taxableBasisPct)],
         ["Credit Card Debt", fmtMoney(coupleExport.shared.creditCardDebt)],
+        [
+          "Cash Withdrawal Strategy",
+          (CASH_STRATEGY_OPTIONS.find((o) => o.value === (coupleExport.shared.cashStrategy || "cashFirst"))?.label || "Use cash first (default)"),
+        ],
+        ["Minimum Cash Reserve", fmtMoney(coupleExport.shared.cashReserveFloor || 0)],
+        [
+          "Allow Reserve As Last Resort",
+          fmtBool(coupleExport.shared.allowReserveAsLastResort === true),
+        ],
       ],
     },
     {
@@ -3418,6 +3796,20 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
         ["Roth IRA", fmtMoney(exportInputs.balanceRoth)],
         ["HSA", fmtMoney(exportInputs.balanceHsa)],
         ["Credit Card Debt", fmtMoney(exportInputs.creditCardDebt)],
+      ],
+    },
+    {
+      title: "Cash Strategy",
+      rows: [
+        [
+          "Cash Withdrawal Strategy",
+          (CASH_STRATEGY_OPTIONS.find((o) => o.value === (exportInputs.cashStrategy || "cashFirst"))?.label || "Use cash first (default)"),
+        ],
+        ["Minimum Cash Reserve", fmtMoney(exportInputs.cashReserveFloor || 0)],
+        [
+          "Allow Reserve As Last Resort",
+          fmtBool(exportInputs.allowReserveAsLastResort === true),
+        ],
       ],
     },
     {
@@ -3975,6 +4367,19 @@ const DEFAULT_INPUTS = {
   // ACA subsidy estimation (pre-65 healthcare cost sensitivity to MAGI)
   useAcaSubsidyEstimate: false, // Off by default — opt-in
   householdSize: 1, // For FPL calculation
+  // Cash drawdown strategy:
+  //   cashFirst       — legacy: spend cash before anything else (no reserve)
+  //   preserveReserve — cash first, but never below the reserve floor
+  //   proportional    — split draws across cash/taxable/tax-deferred pro-rata
+  //   cashLast        — touch cash only when other sources (except Roth) are empty
+  cashStrategy: "cashFirst",
+  // Minimum cash to keep on hand, in today's dollars (inflation-adjusted in
+  // the projection). Ignored under the "cashFirst" strategy.
+  cashReserveFloor: 0,
+  // If true, the reserve may be spent when every other account is empty
+  // (flagged in the year-by-year table). If false, the plan shows a shortfall
+  // instead of touching the reserve.
+  allowReserveAsLastResort: false,
   conversionBridge: 0,
   conversionMid: 0,
   conversionFinal: 0,
@@ -4060,6 +4465,9 @@ const DEFAULT_COUPLE_INPUTS = {
     householdSize: DEFAULT_INPUTS.householdSize,
     portfolioVolatility: DEFAULT_INPUTS.portfolioVolatility,
     flexibleSpending: DEFAULT_INPUTS.flexibleSpending,
+    cashStrategy: DEFAULT_INPUTS.cashStrategy,
+    cashReserveFloor: DEFAULT_INPUTS.cashReserveFloor,
+    allowReserveAsLastResort: DEFAULT_INPUTS.allowReserveAsLastResort,
   },
 };
 
@@ -4752,6 +5160,13 @@ function computeShortfallInfo(results) {
   else if (s.year1WithdrawalRate >= 0.045 || endingVsRetirement < 0.3)
     status = "warning";
 
+  // Cash sitting protected by the reserve floor while the plan shows a
+  // shortfall — surfaced in the banner so users know the lever exists.
+  const protectedReserveCash =
+    status === "danger" && first && (first.cashFloor || 0) > 0
+      ? Math.min(first.cash || 0, first.cashFloor || 0)
+      : 0;
+
   return {
     status,
     firstShortfallAge: first ? first.age : null,
@@ -4762,6 +5177,7 @@ function computeShortfallInfo(results) {
     endAge: lastRow ? lastRow.age : null,
     withdrawalRate: s.year1WithdrawalRate,
     endingVsRetirement,
+    protectedReserveCash,
   };
 }
 
@@ -5076,6 +5492,100 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
   );
 }
 
+const CASH_STRATEGY_OPTIONS = [
+  {
+    value: "cashFirst",
+    label: "Use cash first (default)",
+    blurb:
+      "Spend cash before other accounts. The reserve floor is not applied in this mode.",
+  },
+  {
+    value: "preserveReserve",
+    label: "Preserve cash reserve",
+    blurb:
+      "Spend cash first, but never draw it below the Minimum Cash Reserve.",
+  },
+  {
+    value: "proportional",
+    label: "Use cash proportionally",
+    blurb:
+      "Split each year's draw across cash (above the reserve), taxable, and 401k/IRA in proportion to balances. Roth stays last.",
+  },
+  {
+    value: "cashLast",
+    label: "Use cash only if required",
+    blurb:
+      "Tap taxable and retirement accounts first; cash (above the reserve) is the final buffer before Roth.",
+  },
+];
+
+// Cash drawdown controls — used by the individual sidebar and, in couple
+// mode, the shared Household section (cash is a shared bucket).
+function CashStrategyInputs({ values, onChange }) {
+  const strategy = values.cashStrategy || "cashFirst";
+  const selected = CASH_STRATEGY_OPTIONS.find((o) => o.value === strategy);
+  const reserveActive = strategy !== "cashFirst";
+  return (
+    <>
+      <div className="mb-3">
+        <label className="block text-xs font-medium text-slate-600 mb-1">
+          Cash Withdrawal Strategy
+        </label>
+        <select
+          value={strategy}
+          onChange={(e) => onChange("cashStrategy")(e.target.value)}
+          className="w-full rounded-md border border-slate-300 bg-white text-slate-900 text-sm py-1.5 px-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
+        >
+          {CASH_STRATEGY_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        {selected && (
+          <p className="text-xs text-slate-500 mt-1">{selected.blurb}</p>
+        )}
+      </div>
+      <NumberInput
+        label="Minimum Cash Reserve"
+        value={values.cashReserveFloor || 0}
+        onChange={onChange("cashReserveFloor")}
+        prefix="$"
+        step={5000}
+        hint={
+          reserveActive
+            ? "Today's dollars — the floor grows with inflation in the projection."
+            : 'Ignored under "Use cash first" — pick another strategy to protect a reserve.'
+        }
+      />
+      {reserveActive && (values.cashReserveFloor || 0) > 0 && (
+        <div className="mb-3 mt-2 p-2 bg-slate-50 rounded border border-slate-200">
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={values.allowReserveAsLastResort === true}
+              onChange={(e) =>
+                onChange("allowReserveAsLastResort")(e.target.checked)
+              }
+              className="mt-0.5"
+            />
+            <div>
+              <div className="text-xs font-medium text-slate-700">
+                Allow reserve as last resort
+              </div>
+              <div className="text-xs text-slate-500 mt-0.5">
+                If every other account is empty, the reserve may be spent
+                (flagged RESERVE in the year table). When off, the plan shows a
+                shortfall instead of touching the reserve.
+              </div>
+            </div>
+          </label>
+        </div>
+      )}
+    </>
+  );
+}
+
 function CoupleInputs({ couple, updateCouple }) {
   const { primary, spouse, shared } = normalizeCoupleInputs(couple);
   const sharedChange = (key) => updateCouple("shared", key);
@@ -5114,6 +5624,7 @@ function CoupleInputs({ couple, updateCouple }) {
           prefix="$"
           step={100}
         />
+        <CashStrategyInputs values={shared} onChange={sharedChange} />
         <NumberInput
           label="Base Lifestyle Expenses"
           value={shared.baseExpenses}
@@ -5482,6 +5993,8 @@ export default function RetirementPlanner() {
       taxableBasisEnd: (row.taxableBasisEnd || 0) * factor,
       irmaaSurcharge: (row.irmaaSurcharge || 0) * factor,
       acaSubsidy: (row.acaSubsidy || 0) * factor,
+      cashFloor: (row.cashFloor || 0) * factor,
+      reserveUsed: (row.reserveUsed || 0) * factor,
       ownerDetails: scaleOwnerDetails(row.ownerDetails, factor),
     };
   };
@@ -6074,6 +6587,10 @@ export default function RetirementPlanner() {
                 step={100}
                 hint="Reduces net worth; assumed paid off before retirement"
               />
+            </Section>
+
+            <Section title="Cash Strategy" badge="Drawdown">
+              <CashStrategyInputs values={inputs} onChange={update} />
             </Section>
 
             <Section title="Returns & Inflation">
@@ -6945,6 +7462,14 @@ export default function RetirementPlanner() {
                                   title={`Unfunded need this year: ${fmtMoney(d.unmetCashFlow)}. Spending + taxes exceed available withdrawals.`}
                                 >
                                   SHORTFALL
+                                </span>
+                              )}
+                              {d.reserveUsed > 0 && (
+                                <span
+                                  className="text-[10px] font-bold bg-amber-500 text-white px-1.5 py-0.5 rounded"
+                                  title={`Dipped into the protected cash reserve: ${fmtMoney(d.reserveUsed)} (floor this year: ${fmtMoney(d.cashFloor)}). All other accounts were exhausted.`}
+                                >
+                                  RESERVE
                                 </span>
                               )}
                             </div>

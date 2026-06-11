@@ -143,6 +143,29 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
   filing status, inherited-account rules, estate outcomes, or account titling
   beyond spouse-specific retirement/HSA buckets.
 
+## Cash Withdrawal Strategy
+
+- The user selects how cash participates in the withdrawal order:
+  - `cashFirst` (default, legacy): cash is spent before other accounts and the
+    reserve floor is not applied.
+  - `preserveReserve`: cash is spent first, but never below the minimum cash
+    reserve.
+  - `proportional`: each year's draw is split across cash-above-reserve,
+    taxable, and tax-deferred accounts in proportion to balances; Roth stays
+    last.
+  - `cashLast`: taxable and tax-deferred accounts are tapped first; cash
+    (above the reserve) is the final buffer before Roth.
+- The minimum cash reserve is entered in today's dollars and inflates on the
+  same clock as spending, so the floor keeps its purchasing power.
+- The protected reserve is spendable only when "allow reserve as last resort"
+  is enabled and every other account is empty; such draws are reported in the
+  `reserveUsed` row field and flagged RESERVE in the year table. With the
+  toggle off, the plan records unmet cash flow (a shortfall) instead of
+  touching the reserve, and the shortfall banner notes the protected amount.
+- Required minimum distributions are forced regardless of cash strategy.
+- In married-couple mode, cash is a shared bucket, so the strategy, reserve
+  floor, and last-resort toggle are shared household settings.
+
 ## Depletion And Success
 
 - A plan is marked depleted if total modeled assets fall to zero or if spending plus taxes cannot be covered by modeled withdrawals.
