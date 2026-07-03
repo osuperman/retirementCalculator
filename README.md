@@ -2,7 +2,7 @@
 
 A Vite + React retirement projection tool focused on tax-aware drawdowns, Roth conversion planning, RMDs, healthcare costs, and sequence-of-returns risk.
 
-The active app is `src/App.jsx`. The older `src/retirement_planner.jsx` file is not mounted by `src/main.jsx`.
+The active app is `src/App.jsx`. (The unused legacy `src/retirement_planner.jsx` and `src/config/defaults.json` were removed — built-in defaults live in `DEFAULT_INPUTS` inside `src/App.jsx`.)
 
 ## Run Locally
 

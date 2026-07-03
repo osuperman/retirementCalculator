@@ -7,6 +7,10 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 - Projection starts in the current calendar year from `new Date().getFullYear()`.
 - Accumulation years are `age < retirementAge`.
 - The retirement year itself is the first distribution year.
+- A retirement age at or below the current age is valid: it means the user is
+  retiring this year or is already retired, and year 1 of the projection is a
+  distribution year. The year-1 withdrawal-rate denominator is today's total
+  balance in that case.
 - Projection rows run through `planThroughAge`, inclusive.
 - Individual mode preserves the original single-person flat input model.
 - Married-couple mode projects each spouse by calendar year with independent
@@ -50,6 +54,16 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 - Future federal brackets and deductions are projected from the last known table year using the input inflation rate.
 - Long-term capital gains use the remaining standard deduction before applying preferential brackets.
 - NIIT is modeled at 3.8% above the non-indexed $250,000 MFJ MAGI threshold.
+- The age-65+ additional standard deduction ($1,650 per MFJ spouse 65+ in
+  2026, indexed) and the OBBBA senior deduction ($6,000 per person 65+ for
+  tax years 2025-2028 only, not indexed, phased out at 6% of MAGI above
+  $150K MFJ) are applied. The household 65+ count mirrors the IRMAA
+  enrollee assumption in individual mode and uses each spouse's age in
+  couple mode.
+- Cash/HYSA interest (start-of-year balance x cash return) is taxed as
+  ordinary income and included in Social Security provisional income, MAGI,
+  ACA, and IRMAA calculations. Taxable-brokerage dividends remain modeled
+  only as the annual return drag.
 - NY tax excludes taxable Social Security and applies a simplified public-pension/private-retirement-income treatment.
 - NY brackets and the MFJ standard deduction are projected from their 2024 statutory values by the input inflation rate, consistent with how federal brackets are projected (previously NY was left unindexed, causing one-sided bracket creep).
 - The NY middle-class rate cut (Ch. 59, Laws of 2025) is applied: the bottom
@@ -114,7 +128,12 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 - ACA subsidy estimation is optional and approximate.
 - Under current 2026 law, the model restores the 400% FPL subsidy cliff after the enhanced-credit period.
 - IRMAA uses 2026 MFJ Part B and Part D surcharge tiers and applies an inflation projection after 2026.
-- Real IRMAA uses a two-year MAGI lookback; the model uses same-year MAGI as an approximation.
+- IRMAA uses the projected MAGI from two years earlier (the real lookback)
+  whenever the projection has one — i.e., from the third retirement year on.
+  The first two retirement years fall back to same-year MAGI because
+  working-year (salary) MAGI is out of scope.
+- The Federal Poverty Level is household-size aware: $15,060 for the first
+  person plus $5,380 per additional person (2024 base, inflation projected).
 - In married-couple mode, lifestyle spending is shared, but healthcare costs
   are spouse-specific because Medicare/ACA eligibility depends on each spouse's
   age. ACA subsidy and IRMAA estimates remain household-level approximations
@@ -126,7 +145,12 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
   through the configured horizon.
 - Shared financial elements are cash, taxable brokerage, cost basis, debt,
   base lifestyle spending, returns, inflation, taxes, ACA/IRMAA assumptions,
-  and Monte Carlo risk assumptions.
+  and Monte Carlo risk assumptions. Household size floors at 2 in couple
+  mode (drives the family HSA limit, FPL, and Medicare enrollee counts).
+- While one spouse still works, that spouse's salary is assumed to cover
+  only their own contributions; the full shared lifestyle budget is drawn
+  from savings once the first spouse retires. This is disclosed in the UI
+  and is conservative for staggered retirements.
 - Individual financial elements are retirement accounts, HSA balances,
   contributions, pensions, Social Security, RMD timing, Roth conversion
   targets, healthcare costs, and retirement dates.
@@ -187,6 +211,14 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
   rate from the narrative until re-run.
 - Early-withdrawal penalties are surfaced per year (PENALTY badge), in the
   cash-flow tooltip, and as a lifetime total in the narrative when material.
+- Plans retiring before 59 1/2 get an "Accessing Money Before 59 1/2" panel:
+  per-person Rule of 55 eligibility (with the current-employer-plan-only
+  caveat), per-account penalty treatment, bridge-year funding totals drawn
+  from the same projection rows as the charts, the recommended withdrawal
+  order, tax implications, and alternatives (work to 55, SEPP/72(t), Roth
+  contribution basis, part-time income, spending cuts).
+- Scenario-comparison retirement ages always derive from the user's own
+  retirement age in both modes.
 
 ## Monte Carlo
 
@@ -197,6 +229,8 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
   portfolio's year-end total fell more than 15% versus the prior year end.
   (The guard previously compared a year-end total to itself and never fired;
   fixed 2026-06-10 in both engines.)
+- Depletion detection keys off distribution-phase rows (not the primary's
+  age), so couple plans where the spouse retires first are scored correctly.
 
 ## Ask AI Context
 
