@@ -50,22 +50,34 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 
 ## Taxes
 
-- Federal ordinary-income and long-term-capital-gain calculations use official 2026 MFJ parameters where available.
+- Taxes are computed per filing status. Individual mode uses the selected
+  status — single (default) or married filing jointly; couple mode always
+  uses married filing jointly. Head-of-household is not modeled;
+  qualifying-surviving-spouse years can be modeled as married-joint.
+- Federal ordinary-income and long-term-capital-gain calculations use
+  official 2026 parameters for both MFJ and single where available
+  (2026 single: $16,100 standard deduction; brackets to $12,400 / $50,400 /
+  $105,700 / $201,775 / $256,225 / $640,600; LTCG breakpoints $49,450 and
+  $545,500).
 - Future federal brackets and deductions are projected from the last known table year using the input inflation rate.
 - Long-term capital gains use the remaining standard deduction before applying preferential brackets.
-- NIIT is modeled at 3.8% above the non-indexed $250,000 MFJ MAGI threshold.
-- The age-65+ additional standard deduction ($1,650 per MFJ spouse 65+ in
-  2026, indexed) and the OBBBA senior deduction ($6,000 per person 65+ for
-  tax years 2025-2028 only, not indexed, phased out at 6% of MAGI above
-  $150K MFJ) are applied. The household 65+ count mirrors the IRMAA
-  enrollee assumption in individual mode and uses each spouse's age in
-  couple mode.
+- NIIT is modeled at 3.8% above the non-indexed MAGI threshold:
+  $250,000 MFJ / $200,000 single.
+- The age-65+ additional standard deduction ($1,650 per MFJ spouse /
+  $2,050 single in 2026, indexed) and the OBBBA senior deduction ($6,000
+  per person 65+ for tax years 2025-2028 only, not indexed, phased out at
+  6% of MAGI above $150K MFJ / $75K single) are applied. Single filers
+  count one senior; MFJ mirrors the IRMAA enrollee assumption in
+  individual mode and uses each spouse's age in couple mode.
 - Cash/HYSA interest (start-of-year balance x cash return) is taxed as
   ordinary income and included in Social Security provisional income, MAGI,
   ACA, and IRMAA calculations. Taxable-brokerage dividends remain modeled
   only as the annual return drag.
 - NY tax excludes taxable Social Security and applies a simplified public-pension/private-retirement-income treatment.
-- NY brackets and the MFJ standard deduction are projected from their 2024 statutory values by the input inflation rate, consistent with how federal brackets are projected (previously NY was left unindexed, causing one-sided bracket creep).
+- NY brackets and standard deductions (MFJ $16,050 / single $8,000, 2024
+  base) are projected from their 2024 statutory values by the input
+  inflation rate, consistent with how federal brackets are projected
+  (previously NY was left unindexed, causing one-sided bracket creep).
 - The NY middle-class rate cut (Ch. 59, Laws of 2025) is applied: the bottom
   five rates drop 0.1pp in tax year 2026 and 0.2pp total from 2027 onward.
 - The NY $20,000 pension/annuity exclusion is gated at age 59½ (the annual
@@ -79,10 +91,12 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
   The penalty appears in each row's `earlyPenalty` field and is included in
   `tax`.
 - Tax is solved iteratively so withdrawals cover both spending needs and tax created by those withdrawals.
-- Married-couple mode uses the same MFJ tax engine as individual mode. It sums
-  household ordinary income, LTCG, taxable Social Security, MAGI, pensions,
-  RMDs, Roth conversions, and withdrawals before calculating federal and NY
-  tax. Filing-status changes after a spouse's death are not modeled.
+- Married-couple mode uses the same tax engine with the MFJ parameter set. It
+  sums household ordinary income, LTCG, taxable Social Security, MAGI,
+  pensions, RMDs, Roth conversions, and withdrawals before calculating
+  federal and NY tax. Filing-status changes after a spouse's death are not
+  modeled inside couple mode; a survivor can continue planning in Individual
+  mode with the Single filing status.
 
 ## Social Security
 
@@ -92,7 +106,10 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
   (exact only for those born 1960+).
 - Claiming before FRA reduces the benefit using SSA-style monthly reduction factors.
 - Claiming after FRA increases the benefit by 8% per year up to 36 delayed months.
-- Taxable Social Security uses MFJ provisional-income thresholds of $32,000 and $44,000, which are not inflation-indexed.
+- Taxable Social Security uses provisional-income thresholds by filing
+  status ($32,000/$44,000 MFJ; $25,000/$34,000 single), not
+  inflation-indexed. The second-tier add-on caps at half the threshold
+  span ($6,000 MFJ / $4,500 single).
 - In married-couple mode, each spouse has their own FRA benefit and claim age.
   The model sums gross household Social Security and applies MFJ taxable
   Social Security rules to the combined benefit. Spousal, survivor, divorced,
@@ -127,7 +144,10 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 - HSA withdrawals are applied against healthcare spending before taxable account withdrawals.
 - ACA subsidy estimation is optional and approximate.
 - Under current 2026 law, the model restores the 400% FPL subsidy cliff after the enhanced-credit period.
-- IRMAA uses 2026 MFJ Part B and Part D surcharge tiers and applies an inflation projection after 2026.
+- IRMAA uses 2026 Part B and Part D surcharge tiers for the plan's filing
+  status (MFJ thresholds $218K-$750K; single thresholds $109K-$500K) and
+  applies an inflation projection after 2026. Single filers are charged
+  for one Medicare enrollee.
 - IRMAA uses the projected MAGI from two years earlier (the real lookback)
   whenever the projection has one — i.e., from the third retirement year on.
   The first two retirement years fall back to same-year MAGI because

@@ -17,34 +17,89 @@ import {
 
 const PROJECTION_START_YEAR = new Date().getFullYear();
 
-const FEDERAL_TAX_TABLES_MFJ = {
-  2024: {
-    standardDeduction: 29200,
-    ordinaryBrackets: [
-      [0, 23200, 0.1],
-      [23200, 94300, 0.12],
-      [94300, 201050, 0.22],
-      [201050, 383900, 0.24],
-      [383900, 487450, 0.32],
-      [487450, 731200, 0.35],
-      [731200, Infinity, 0.37],
-    ],
-    ltcgZeroTop: 94050,
-    ltcgFifteenTop: 583750,
+// Federal parameters by filing status. "mfj" = married filing jointly;
+// "single" = single filer (used by widowed, divorced, or never-married
+// planners). Qualifying-surviving-spouse years can be modeled as "mfj".
+const FEDERAL_TAX_TABLES = {
+  mfj: {
+    2024: {
+      standardDeduction: 29200,
+      ordinaryBrackets: [
+        [0, 23200, 0.1],
+        [23200, 94300, 0.12],
+        [94300, 201050, 0.22],
+        [201050, 383900, 0.24],
+        [383900, 487450, 0.32],
+        [487450, 731200, 0.35],
+        [731200, Infinity, 0.37],
+      ],
+      ltcgZeroTop: 94050,
+      ltcgFifteenTop: 583750,
+    },
+    2026: {
+      standardDeduction: 32200,
+      ordinaryBrackets: [
+        [0, 24800, 0.1],
+        [24800, 100800, 0.12],
+        [100800, 211400, 0.22],
+        [211400, 403550, 0.24],
+        [403550, 512450, 0.32],
+        [512450, 768700, 0.35],
+        [768700, Infinity, 0.37],
+      ],
+      ltcgZeroTop: 98900,
+      ltcgFifteenTop: 613700,
+    },
   },
-  2026: {
-    standardDeduction: 32200,
-    ordinaryBrackets: [
-      [0, 24800, 0.1],
-      [24800, 100800, 0.12],
-      [100800, 211400, 0.22],
-      [211400, 403550, 0.24],
-      [403550, 512450, 0.32],
-      [512450, 768700, 0.35],
-      [768700, Infinity, 0.37],
-    ],
-    ltcgZeroTop: 98900,
-    ltcgFifteenTop: 613700,
+  single: {
+    2024: {
+      standardDeduction: 14600,
+      ordinaryBrackets: [
+        [0, 11600, 0.1],
+        [11600, 47150, 0.12],
+        [47150, 100525, 0.22],
+        [100525, 191950, 0.24],
+        [191950, 243725, 0.32],
+        [243725, 609350, 0.35],
+        [609350, Infinity, 0.37],
+      ],
+      ltcgZeroTop: 47025,
+      ltcgFifteenTop: 518900,
+    },
+    2026: {
+      standardDeduction: 16100,
+      ordinaryBrackets: [
+        [0, 12400, 0.1],
+        [12400, 50400, 0.12],
+        [50400, 105700, 0.22],
+        [105700, 201775, 0.24],
+        [201775, 256225, 0.32],
+        [256225, 640600, 0.35],
+        [640600, Infinity, 0.37],
+      ],
+      ltcgZeroTop: 49450,
+      ltcgFifteenTop: 545500,
+    },
+  },
+};
+
+// Per-status statutory (non-indexed) thresholds and senior-deduction bases.
+const FILING_STATUS_PARAMS = {
+  mfj: {
+    ssThreshold1: 32000,
+    ssThreshold2: 44000,
+    niitThreshold: 250000,
+    // Age-65+ additional standard deduction per person (2026 base, indexed)
+    seniorExtraStdDed2026: 1650,
+    // OBBBA senior deduction MAGI phase-out start (2025-2028, not indexed)
+    obbbaPhaseOutStart: 150000,
+  },
+  single: {
+    ssThreshold1: 25000,
+    ssThreshold2: 34000,
+    niitThreshold: 200000,
+    seniorExtraStdDed2026: 2050,
+    obbbaPhaseOutStart: 75000,
   },
 };
 
@@ -69,14 +124,24 @@ const ACA_APPLICABLE_PERCENTAGES_2026 = [
   [3.0, 4.0, 0.0996, 0.0996],
 ];
 
-const IRMAA_2026_MFJ = [
-  { top: 218000, monthlyPartB: 0, monthlyPartD: 0 },
-  { top: 274000, monthlyPartB: 81.2, monthlyPartD: 14.5 },
-  { top: 342000, monthlyPartB: 202.9, monthlyPartD: 37.5 },
-  { top: 410000, monthlyPartB: 324.6, monthlyPartD: 60.4 },
-  { top: 750000, monthlyPartB: 446.3, monthlyPartD: 83.3 },
-  { top: Infinity, monthlyPartB: 487, monthlyPartD: 91 },
-];
+const IRMAA_2026 = {
+  mfj: [
+    { top: 218000, monthlyPartB: 0, monthlyPartD: 0 },
+    { top: 274000, monthlyPartB: 81.2, monthlyPartD: 14.5 },
+    { top: 342000, monthlyPartB: 202.9, monthlyPartD: 37.5 },
+    { top: 410000, monthlyPartB: 324.6, monthlyPartD: 60.4 },
+    { top: 750000, monthlyPartB: 446.3, monthlyPartD: 83.3 },
+    { top: Infinity, monthlyPartB: 487, monthlyPartD: 91 },
+  ],
+  single: [
+    { top: 109000, monthlyPartB: 0, monthlyPartD: 0 },
+    { top: 137000, monthlyPartB: 81.2, monthlyPartD: 14.5 },
+    { top: 171000, monthlyPartB: 202.9, monthlyPartD: 37.5 },
+    { top: 205000, monthlyPartB: 324.6, monthlyPartD: 60.4 },
+    { top: 500000, monthlyPartB: 446.3, monthlyPartD: 83.3 },
+    { top: Infinity, monthlyPartB: 487, monthlyPartD: 91 },
+  ],
+};
 
 function projectedFromKnownTable(table, year, inflation) {
   if (table[year]) return { baseYear: year, base: table[year], factor: 1 };
@@ -89,8 +154,9 @@ function projectedFromKnownTable(table, year, inflation) {
   return { baseYear, base, factor };
 }
 
-function getFederalTaxParams(year, inflation = 0.03) {
-  const projected = projectedFromKnownTable(FEDERAL_TAX_TABLES_MFJ, year, inflation);
+function getFederalTaxParams(year, inflation = 0.03, filingStatus = "mfj") {
+  const table = FEDERAL_TAX_TABLES[filingStatus] || FEDERAL_TAX_TABLES.mfj;
+  const projected = projectedFromKnownTable(table, year, inflation);
   const { base, factor } = projected;
   return {
     standardDeduction: base.standardDeduction * factor,
@@ -155,12 +221,16 @@ function adjustedSocialSecurityBenefit(fraBenefit, claimAge, fullRetirementAge =
 }
 
 // ============================================================
-// TAX CALCULATIONS (MFJ, inflation-adjusted from 2024 brackets)
+// TAX CALCULATIONS (per filing status: MFJ or single)
 // ============================================================
 
-function fedOrdinaryTaxMFJ(taxableIncome, year, inflation = 0.03) {
+function fedOrdinaryTax(taxableIncome, year, inflation = 0.03, filingStatus = "mfj") {
   if (taxableIncome <= 0) return 0;
-  const { ordinaryBrackets: brackets } = getFederalTaxParams(year, inflation);
+  const { ordinaryBrackets: brackets } = getFederalTaxParams(
+    year,
+    inflation,
+    filingStatus,
+  );
   let tax = 0;
   for (const [low, high, rate] of brackets) {
     if (taxableIncome > low) {
@@ -171,10 +241,16 @@ function fedOrdinaryTaxMFJ(taxableIncome, year, inflation = 0.03) {
   return tax;
 }
 
-function fedLtcgTaxMFJ(ltcg, ordinaryTaxable, year, inflation = 0.03) {
+function fedLtcgTax(
+  ltcg,
+  ordinaryTaxable,
+  year,
+  inflation = 0.03,
+  filingStatus = "mfj",
+) {
   if (ltcg <= 0) return 0;
   const { ltcgZeroTop: zeroTop, ltcgFifteenTop: fifteenTop } =
-    getFederalTaxParams(year, inflation);
+    getFederalTaxParams(year, inflation, filingStatus);
   let start = Math.max(0, ordinaryTaxable);
   let tax = 0;
   let remaining = ltcg;
@@ -193,35 +269,62 @@ function fedLtcgTaxMFJ(ltcg, ordinaryTaxable, year, inflation = 0.03) {
   return tax;
 }
 
-// NY brackets and the MFJ standard deduction are projected from their ~2024
+// NY brackets and standard deductions are projected from their ~2024
 // statutory values by the input inflation rate, mirroring how federal brackets
 // are projected in getFederalTaxParams. Without this, only the federal side
 // indexed and NY suffered unbounded bracket creep over a multi-decade horizon,
 // overstating NY tax and understating ending balances in later years.
 const NY_TAX_BASE_YEAR = 2024;
-function nyStateTaxMFJ(taxableIncome, year = NY_TAX_BASE_YEAR, inflation = 0.03) {
+// NY 2024 statutory schedules per filing status. The five lowest rates
+// (4% through 6%) receive the FY2026 middle-class cut in both schedules.
+const NY_TAX_PARAMS = {
+  mfj: {
+    standardDeduction: 16050,
+    brackets: [
+      [0, 17150, 0.04],
+      [17150, 23600, 0.045],
+      [23600, 27900, 0.0525],
+      [27900, 161550, 0.055],
+      [161550, 323200, 0.06],
+      [323200, 2155350, 0.0685],
+      [2155350, 5000000, 0.0965],
+      [5000000, 25000000, 0.103],
+      [25000000, Infinity, 0.109],
+    ],
+  },
+  single: {
+    standardDeduction: 8000,
+    brackets: [
+      [0, 8500, 0.04],
+      [8500, 11700, 0.045],
+      [11700, 13900, 0.0525],
+      [13900, 80650, 0.055],
+      [80650, 215400, 0.06],
+      [215400, 1077550, 0.0685],
+      [1077550, 5000000, 0.0965],
+      [5000000, 25000000, 0.103],
+      [25000000, Infinity, 0.109],
+    ],
+  },
+};
+function nyStateTax(
+  taxableIncome,
+  year = NY_TAX_BASE_YEAR,
+  inflation = 0.03,
+  filingStatus = "mfj",
+) {
   if (taxableIncome <= 0) return 0;
+  const params = NY_TAX_PARAMS[filingStatus] || NY_TAX_PARAMS.mfj;
   const factor = Math.pow(1 + inflation, Math.max(0, year - NY_TAX_BASE_YEAR));
-  const stdDed = 16050 * factor;
+  const stdDed = params.standardDeduction * factor;
   const nyTaxable = Math.max(0, taxableIncome - stdDed);
   // FY2026 NY budget (Ch. 59, Laws of 2025) cuts the bottom five rates by
   // 0.1pp in tax year 2026 and 0.2pp total from 2027 onward (permanent).
   const midClassCut = year >= 2027 ? 0.002 : year >= 2026 ? 0.001 : 0;
-  const baseBrackets = [
-    [0, 17150, 0.04 - midClassCut],
-    [17150, 23600, 0.045 - midClassCut],
-    [23600, 27900, 0.0525 - midClassCut],
-    [27900, 161550, 0.055 - midClassCut],
-    [161550, 323200, 0.06 - midClassCut],
-    [323200, 2155350, 0.0685],
-    [2155350, 5000000, 0.0965],
-    [5000000, 25000000, 0.103],
-    [25000000, Infinity, 0.109],
-  ];
-  const brackets = baseBrackets.map(([low, high, rate]) => [
+  const brackets = params.brackets.map(([low, high, rate], index) => [
     low * factor,
     high === Infinity ? Infinity : high * factor,
-    rate,
+    index < 5 ? rate - midClassCut : rate,
   ]);
   let tax = 0;
   for (const [low, high, rate] of brackets) {
@@ -233,25 +336,29 @@ function nyStateTaxMFJ(taxableIncome, year = NY_TAX_BASE_YEAR, inflation = 0.03)
   return tax;
 }
 
-// Taxable Social Security benefits (MFJ provisional income rules)
-// Thresholds ($32K / $44K) are NOT inflation-adjusted by statute.
+// Taxable Social Security benefits (provisional income rules).
+// Thresholds are NOT inflation-adjusted by statute:
+//   MFJ $32K / $44K; single $25K / $34K.
 // Returns the amount of SS benefits that is taxable (0 to 85% of gross SS).
 // `otherIncome` = AGI before SS + tax-exempt interest (we assume 0 tax-exempt)
-function taxableSocialSecurity(ssGross, otherIncome) {
+function taxableSocialSecurity(ssGross, otherIncome, filingStatus = "mfj") {
   if (ssGross <= 0) return 0;
+  const { ssThreshold1: threshold1, ssThreshold2: threshold2 } =
+    FILING_STATUS_PARAMS[filingStatus] || FILING_STATUS_PARAMS.mfj;
   const halfSs = ssGross * 0.5;
   const provisional = Math.max(0, otherIncome) + halfSs;
-  const threshold1 = 32000; // MFJ statutory
-  const threshold2 = 44000; // MFJ statutory
   if (provisional <= threshold1) return 0;
   let taxable;
   if (provisional <= threshold2) {
     // Up to 50% of SS taxable (lesser of half SS or half the excess)
     taxable = Math.min(halfSs, (provisional - threshold1) * 0.5);
   } else {
-    // Above $44K: 85% of excess + lesser of $6K or 50% of SS
+    // Above the second threshold: 85% of that excess, plus the lesser of the
+    // first-tier maximum (half the threshold span: $6K MFJ / $4.5K single)
+    // or half the benefit.
     const excess85 = (provisional - threshold2) * 0.85;
-    const plus = Math.min(6000, halfSs);
+    const firstTierCap = (threshold2 - threshold1) * 0.5;
+    const plus = Math.min(firstTierCap, halfSs);
     taxable = excess85 + plus;
   }
   return Math.max(0, Math.min(taxable, ssGross * 0.85));
@@ -330,18 +437,27 @@ function totalTax(
   nySocialSecurityExempt = 0,
   nyPensionAnnuityExclusion = 0,
   seniors65 = 0,
+  filingStatus = "mfj",
 ) {
-  const { standardDeduction: baseStdDed } = getFederalTaxParams(year, inflation);
+  const statusParams =
+    FILING_STATUS_PARAMS[filingStatus] || FILING_STATUS_PARAMS.mfj;
+  const { standardDeduction: baseStdDed } = getFederalTaxParams(
+    year,
+    inflation,
+    filingStatus,
+  );
   const magi = ordinaryIncome + ltcg;
   // Age-65+ additional standard deduction (permanent law): $1,650 per MFJ
-  // spouse 65+ in 2026, indexed — projected on the same clock as brackets.
+  // spouse / $2,050 unmarried in 2026, indexed on the bracket clock.
   const seniorFactor = Math.pow(1 + inflation, Math.max(0, year - 2026));
-  const extraStdDed65 = seniors65 * 1650 * seniorFactor;
+  const extraStdDed65 =
+    seniors65 * statusParams.seniorExtraStdDed2026 * seniorFactor;
   // OBBBA senior deduction: $6,000 per person 65+ for tax years 2025-2028
-  // only (not indexed), phased out at 6% of MAGI above $150K MFJ.
+  // only (not indexed), phased out at 6% of MAGI above $150K MFJ / $75K single.
   let seniorBonusDeduction = 0;
   if (seniors65 > 0 && year >= 2025 && year <= 2028) {
-    const phaseOut = 0.06 * Math.max(0, magi - 150000);
+    const phaseOut =
+      0.06 * Math.max(0, magi - statusParams.obbbaPhaseOutStart);
     seniorBonusDeduction = Math.max(0, seniors65 * 6000 - phaseOut);
   }
   const stdDed = baseStdDed + extraStdDed65 + seniorBonusDeduction;
@@ -349,10 +465,17 @@ function totalTax(
   // Apply any unused standard deduction to reduce taxable LTCG
   const unusedStdDed = Math.max(0, stdDed - ordinaryIncome);
   const taxableLtcg = Math.max(0, ltcg - unusedStdDed);
-  const fedOrd = fedOrdinaryTaxMFJ(taxableOrdinary, year, inflation);
-  const fedLtcg = fedLtcgTaxMFJ(taxableLtcg, taxableOrdinary, year, inflation);
-  // NIIT: 3.8% on investment income when MAGI > $250K MFJ (threshold not indexed)
-  const niitThreshold = 250000;
+  const fedOrd = fedOrdinaryTax(taxableOrdinary, year, inflation, filingStatus);
+  const fedLtcg = fedLtcgTax(
+    taxableLtcg,
+    taxableOrdinary,
+    year,
+    inflation,
+    filingStatus,
+  );
+  // NIIT: 3.8% on investment income above $250K MFJ / $200K single MAGI
+  // (thresholds not indexed by statute)
+  const niitThreshold = statusParams.niitThreshold;
   const niit =
     magi > niitThreshold
       ? Math.min(ltcg, magi - niitThreshold) * 0.038
@@ -364,7 +487,7 @@ function totalTax(
       nySocialSecurityExempt -
       nyPensionAnnuityExclusion,
   );
-  const ny = nyStateTaxMFJ(nyOrdinary + ltcg, year, inflation);
+  const ny = nyStateTax(nyOrdinary + ltcg, year, inflation, filingStatus);
   return fedOrd + fedLtcg + niit + ny;
 }
 
@@ -491,6 +614,8 @@ function solveGrossedUpWithdrawals({
   // Number of household members 65+ (drives the extra standard deduction
   // and the 2025-2028 OBBBA senior deduction).
   seniors65 = 0,
+  // Tax filing status: "mfj" or "single".
+  filingStatus = "mfj",
 }) {
   let tax = 0;
   let withdrawals = { wCash: 0, wTaxable: 0, w401k: 0, wIra: 0, wRoth: 0, reserveUsed: 0 };
@@ -534,7 +659,7 @@ function solveGrossedUpWithdrawals({
       withdrawals.wIra +
       conversion +
       realizedGain; // LTCG counts in provisional income
-    taxableSs = taxableSocialSecurity(ssGross, incomeBeforeSs);
+    taxableSs = taxableSocialSecurity(ssGross, incomeBeforeSs, filingStatus);
     ordIncome =
       ptIncome +
       taxableSs +
@@ -578,6 +703,7 @@ function solveGrossedUpWithdrawals({
         taxableSs,
         nyPensionAnnuityExclusion,
         seniors65,
+        filingStatus,
       ) + earlyPenalty;
     if (Math.abs(newTax - tax) < 1) {
       tax = newTax;
@@ -595,14 +721,25 @@ function solveGrossedUpWithdrawals({
   };
 }
 
-// Compute annual Medicare Part B + Part D IRMAA surcharge for a MFJ household.
-function computeIrmaaSurcharge(magi, year, inflation = 0.03, medicareEnrollees = 2) {
+// Compute annual Medicare Part B + Part D IRMAA surcharge for the household,
+// using the tier table for the given filing status.
+function computeIrmaaSurcharge(
+  magi,
+  year,
+  inflation = 0.03,
+  medicareEnrollees = 2,
+  filingStatus = "mfj",
+) {
+  const tiers = IRMAA_2026[filingStatus] || IRMAA_2026.mfj;
   const factor = Math.pow(1 + inflation, Math.max(0, year - 2026));
   const coveredPeople = Math.max(1, Math.min(2, medicareEnrollees || 1));
-  for (const tier of IRMAA_2026_MFJ) {
+  for (let i = 0; i < tiers.length; i++) {
+    const tier = tiers[i];
     const threshold = tier.top === Infinity ? Infinity : tier.top * factor;
+    // The boundary into the top tier ($750K MFJ / $500K single) is exclusive:
+    // a MAGI at or above it belongs to the highest tier.
     const atExclusiveTopTierBoundary =
-      tier.top === 750000 && magi >= threshold;
+      i === tiers.length - 2 && magi >= threshold;
     if (!atExclusiveTopTierBoundary && magi <= threshold) {
       return (tier.monthlyPartB + tier.monthlyPartD) * 12 * coveredPeople * factor;
     }
@@ -638,19 +775,19 @@ function runSelfTests() {
   // $100K taxable: 10% on first 23200 + 12% on next 71100 + 22% on last 5700
   // = 2320 + 8532 + 1254 = 12,106
   test(
-    "fedOrdinaryTaxMFJ: $100K taxable in 2024",
-    fedOrdinaryTaxMFJ(100000, 2024, 0.03),
+    "fedOrdinaryTax: $100K taxable in 2024",
+    fedOrdinaryTax(100000, 2024, 0.03),
     12106,
     pctEq,
   );
   test(
-    "fedOrdinaryTaxMFJ: $0 taxable = $0",
-    fedOrdinaryTaxMFJ(0, 2024, 0.03),
+    "fedOrdinaryTax: $0 taxable = $0",
+    fedOrdinaryTax(0, 2024, 0.03),
     0,
   );
   test(
-    "fedOrdinaryTaxMFJ: $23200 (top of 10% bracket) = $2320",
-    fedOrdinaryTaxMFJ(23200, 2024, 0.03),
+    "fedOrdinaryTax: $23200 (top of 10% bracket) = $2320",
+    fedOrdinaryTax(23200, 2024, 0.03),
     2320,
     pctEq,
   );
@@ -658,14 +795,14 @@ function runSelfTests() {
   // --- Federal LTCG (MFJ, 2024)
   // $50K LTCG + $0 ordinary: all in 0% bracket (below $94,050)
   test(
-    "fedLtcgTaxMFJ: $50K LTCG, $0 ordinary = $0 (0% bracket)",
-    fedLtcgTaxMFJ(50000, 0, 2024, 0.03),
+    "fedLtcgTax: $50K LTCG, $0 ordinary = $0 (0% bracket)",
+    fedLtcgTax(50000, 0, 2024, 0.03),
     0,
   );
   // $50K LTCG + $100K ordinary: ordinary taxable is above $94,050, so all LTCG at 15%
   test(
-    "fedLtcgTaxMFJ: $50K LTCG, $100K ordinary = $7500 (15%)",
-    fedLtcgTaxMFJ(50000, 100000, 2024, 0.03),
+    "fedLtcgTax: $50K LTCG, $100K ordinary = $7500 (15%)",
+    fedLtcgTax(50000, 100000, 2024, 0.03),
     7500,
     pctEq,
   );
@@ -902,6 +1039,84 @@ function runSelfTests() {
     2,
   );
 
+  // ============================================================
+  // SINGLE-FILER TAX TESTS (verified against IRS Rev. Proc. 2025-32,
+  // CMS 2026 IRMAA, and NY single schedules)
+  // ============================================================
+  // $60K taxable, single, 2026: 10%x12,400 + 12%x38,000 + 22%x9,600
+  // = 1,240 + 4,560 + 2,112 = 7,912
+  test(
+    "fedOrdinaryTax single 2026: $60K taxable = $7,912",
+    fedOrdinaryTax(60000, 2026, 0.03, "single"),
+    7912,
+    pctEq,
+  );
+  // Single LTCG 2026: 0% bracket tops at $49,450
+  test(
+    "fedLtcgTax single 2026: $40K LTCG, $0 ordinary = $0 (0% bracket)",
+    fedLtcgTax(40000, 0, 2026, 0.03, "single"),
+    0,
+  );
+  test(
+    "fedLtcgTax single 2026: $60K LTCG, $0 ordinary = 15% x $10,550",
+    fedLtcgTax(60000, 0, 2026, 0.03, "single"),
+    (60000 - 49450) * 0.15,
+    pctEq,
+  );
+  // Single SS thresholds $25K/$34K; first-tier cap $4,500.
+  // SS $20K, other $30K -> provisional $40K: 0.85 x $6K + min($4.5K, $10K) = $9,600
+  test(
+    "taxableSS single: SS=$20K, other=$30K -> $9,600",
+    taxableSocialSecurity(20000, 30000, "single"),
+    9600,
+    pctEq,
+  );
+  // Same income taxed as single must exceed MFJ (narrower brackets, half
+  // the standard deduction): $100K ordinary, 2026.
+  test(
+    "totalTax: single > MFJ at $100K ordinary (2026)",
+    totalTax(100000, 0, 2026, 0, 0.03, 0, 0, 0, "single") >
+      totalTax(100000, 0, 2026, 0, 0.03, 0, 0, 0, "mfj")
+      ? 1
+      : 0,
+    1,
+  );
+  // Single senior deductions at $80K ordinary (22% bracket). The OBBBA
+  // bonus phases out above $75K single MAGI: $6,000 - 6% x $5,000 = $5,700.
+  // ($2,050 + $5,700) x 22% = $1,705 federal savings.
+  test(
+    "totalTax single: senior deductions save 22% x $7,750 at $80K (2026)",
+    totalTax(80000, 0, 2026, 0, 0.03, 0, 0, 0, "single") -
+      totalTax(80000, 0, 2026, 0, 0.03, 0, 0, 1, "single"),
+    1705,
+    pctEq,
+  );
+  // Single IRMAA 2026: $300K MAGI lands in the $205K-$500K tier;
+  // one enrollee: (446.30 + 83.30) x 12 = $6,355.20
+  test(
+    "IRMAA single 2026: $300K MAGI, 1 enrollee = $6,355",
+    computeIrmaaSurcharge(300000, 2026, 0.03, 1, "single"),
+    6355.2,
+    pctEq,
+  );
+  // NY default (no status arg) must still be the MFJ schedule — regression
+  // guard for every legacy call site.
+  test(
+    "nyStateTax default stays MFJ: $100K in 2024 = $4,284.75",
+    nyStateTax(100000, 2024, 0),
+    4284.75,
+    pctEq,
+  );
+  // NY single: $8,000 std ded and single brackets. $100K NY income, 2024:
+  // taxable 92,000 -> 8,500x4% + 3,200x4.5% + 2,200x5.25% + 66,750x5.5%
+  // + 11,350x6% = 340 + 144 + 115.50 + 3,671.25 + 681 = $4,951.75
+  test(
+    "nyStateTax single 2024: $100K (single schedule) = $4,951.75",
+    nyStateTax(100000, 2024, 0, "single"),
+    4951.75,
+    pctEq,
+  );
+
   // --- ACA: below 150% FPL = full subsidy (pays only ~$2K OOP floor)
   const lowMagiCost = estimateAcaHealthcareCost(
     28000,
@@ -1133,6 +1348,32 @@ function runSelfTests() {
     },
   );
 
+  // --- Scenario: single filer pays more tax than MFJ on identical inputs
+  testScenario(
+    "Filing status: single-filer plan pays more tax than MFJ (same inputs)",
+    () => {
+      const base = {
+        ...baseInputs,
+        currentAge: 60,
+        retirementAge: 61,
+        planThroughAge: 70,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+        conversionMid: 40000,
+        conversionFinal: 40000,
+      };
+      const asMfj = simulate({ ...base, filingStatus: "mfj" });
+      const asSingle = simulate({ ...base, filingStatus: "single" });
+      const ok =
+        asSingle.summary.totalTaxesPaid > asMfj.summary.totalTaxesPaid;
+      return {
+        passed: ok,
+        details: `single lifetime tax=${asSingle.summary.totalTaxesPaid}, MFJ=${asMfj.summary.totalTaxesPaid}`,
+      };
+    },
+  );
+
   // --- Scenario: already-retired user (retirementAge <= currentAge)
   testScenario(
     "Already retired: currentAge 70 / retirementAge 65 produces a live plan",
@@ -1333,14 +1574,14 @@ function runSelfTests() {
   // drop 0.1pp in 2026 and 0.2pp total from 2027. $100K taxable, 0% inflation:
   // 2027 = 17150(3.8%) + 6450(4.3%) + 4300(5.05%) + 56050(5.3%) = $4,116.85
   test(
-    "nyStateTaxMFJ: 2027 middle-class rate cut applied",
-    nyStateTaxMFJ(100000, 2027, 0),
+    "nyStateTax: 2027 middle-class rate cut applied",
+    nyStateTax(100000, 2027, 0),
     4116.85,
     pctEq,
   );
   test(
-    "nyStateTaxMFJ: 2024 pre-cut rates unchanged",
-    nyStateTaxMFJ(100000, 2024, 0),
+    "nyStateTax: 2024 pre-cut rates unchanged",
+    nyStateTax(100000, 2024, 0),
     4284.75,
     pctEq,
   );
@@ -1987,6 +2228,10 @@ function simulate(inputs, options = {}) {
   const currentYear = PROJECTION_START_YEAR;
   const retirementYear = currentYear + (retirementAge - currentAge);
   const endYear = currentYear + (planThroughAge - currentAge);
+  // Filing status drives federal/NY brackets and deductions, SS taxation
+  // thresholds, NIIT, senior deductions, and IRMAA tiers. Defaults to MFJ
+  // for backward compatibility with direct engine calls.
+  const filingStatus = inputs.filingStatus === "single" ? "single" : "mfj";
   const effectiveRmdStartAge =
     rmdStartAge ?? defaultRmdStartAge(currentAge, currentYear);
   // Benefits cannot start before 62 even if the user types a lower age.
@@ -2215,9 +2460,17 @@ function simulate(inputs, options = {}) {
     // Taxable interest on the Cash/HYSA balance (start-of-year balance).
     // Counted as ordinary income, provisional income, and MAGI.
     const cashInterestIncome = Math.max(0, bCash * cashReturn);
-    // People 65+ in the household for the senior standard deductions. Mirrors
-    // the IRMAA enrollee assumption: household members share the modeled age.
-    const seniors65 = age >= 65 ? Math.max(1, Math.min(2, householdSize)) : 0;
+    // People 65+ for the senior standard deductions. A single filer counts
+    // only themselves; MFJ mirrors the IRMAA enrollee assumption (household
+    // members share the modeled age).
+    const seniors65 =
+      age >= 65
+        ? filingStatus === "single"
+          ? 1
+          : Math.max(1, Math.min(2, householdSize))
+        : 0;
+    const medicareEnrollees =
+      filingStatus === "single" ? 1 : Math.min(2, householdSize);
 
     // === Converged solve: withdrawals, tax, RMD, and IRMAA all converge together ===
     // Outer loop: iterate IRMAA (and ACA pre-65) until spending stabilizes.
@@ -2259,6 +2512,7 @@ function simulate(inputs, options = {}) {
         cashPolicy,
         interestIncome: cashInterestIncome,
         seniors65,
+        filingStatus,
       });
 
       finalSpending = effectiveSpending;
@@ -2289,7 +2543,8 @@ function simulate(inputs, options = {}) {
         irmaaMagi,
         year,
         inflation,
-        Math.min(2, householdSize),
+        medicareEnrollees,
+        filingStatus,
       );
 
       // Converged when IRMAA tier is stable
@@ -2339,6 +2594,7 @@ function simulate(inputs, options = {}) {
         cashPolicy,
         interestIncome: cashInterestIncome,
         seniors65,
+        filingStatus,
       });
     }
 
@@ -3575,9 +3831,9 @@ const TERM_HELP = {
   magi:
     "Modified Adjusted Gross Income. A tax-income measure used for ACA subsidies, IRMAA, and other thresholds. Roth conversions increase MAGI.",
   mfj:
-    "Married Filing Jointly. The tax model uses married-joint federal brackets and thresholds.",
+    "Married Filing Jointly. Couple mode always uses married-joint brackets and thresholds; Individual mode uses your selected filing status (Single or Married joint).",
   niit:
-    "Net Investment Income Tax. A 3.8% surtax on investment income above the $250K MFJ MAGI threshold.",
+    "Net Investment Income Tax. A 3.8% surtax on investment income above the MAGI threshold: $250K married filing jointly, $200K single.",
   rmd:
     "Required Minimum Distribution. Mandatory withdrawals from tax-deferred retirement accounts after the applicable start age.",
   ruleOf55:
@@ -4168,6 +4424,12 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
     {
       title: "Timing",
       rows: [
+        [
+          "Filing Status",
+          exportInputs.filingStatus === "mfj"
+            ? "Married filing jointly"
+            : "Single",
+        ],
         ["Current Age", fmtNum(exportInputs.currentAge)],
         ["Retirement Age", fmtNum(exportInputs.retirementAge)],
         ["Plan Through Age", fmtNum(exportInputs.planThroughAge)],
@@ -4755,6 +5017,14 @@ function EarlyAccessStrategyPanel({
   const strategyBest = cashStrategyImpact
     ? bestCashStrategyAlternative(cashStrategyImpact, activeStrategy)
     : null;
+  const strategyBestLabel = strategyBest
+    ? CASH_STRATEGY_OPTIONS.find((o) => o.value === strategyBest.value)?.label ||
+      strategyBest.value
+    : null;
+  // Penalties exist but a zero-penalty withdrawal order is available: the
+  // user has enough penalty-free money — the order alone causes the cost.
+  const orderCausedPenalty =
+    strategyBest != null && strategyBest.penaltyTotal <= 0;
 
   const people = isCouple
     ? [
@@ -4934,16 +5204,32 @@ function EarlyAccessStrategyPanel({
             all {bridgeYearCount} bridge year{bridgeYearCount === 1 ? "" : "s"}{" "}
             without touching retirement accounts early.
           </span>
+        ) : orderCausedPenalty ? (
+          <span>
+            <span className="font-semibold">
+              You have enough penalty-free money to reach 59½ — but your
+              selected withdrawal order doesn't use it that way.
+            </span>{" "}
+            The "{CASH_STRATEGY_OPTIONS.find((o) => o.value === activeStrategy)
+              ?.label || activeStrategy}" setting sends{" "}
+            {fmtMoney(penaltyDraws)} through retirement accounts before 59½,
+            costing about {fmtMoney(totalPenalties)} in{" "}
+            <em>avoidable</em> 10% penalties. Switching the Cash Withdrawal
+            Strategy (sidebar → Cash Strategy) to "{strategyBestLabel}"
+            eliminates them entirely — these penalties are a consequence of
+            the chosen order, not of your finances.
+          </span>
         ) : (
           <span>
             <span className="font-semibold">
-              Caution: penalty-free money is not enough in this plan.
+              Caution: penalty-free money alone is not enough in this plan —
+              no withdrawal order avoids the penalty.
             </span>{" "}
             The projection is forced to pull {fmtMoney(penaltyDraws)} from
             retirement accounts before 59½, costing about{" "}
             {fmtMoney(totalPenalties)} in extra 10% penalties (rows flagged
             PENALTY in the table). The strategies at the bottom of this panel
-            can shrink or eliminate that.
+            can shrink that gap.
           </span>
         )}
       </div>
@@ -5182,9 +5468,7 @@ function EarlyAccessStrategyPanel({
               </span>{" "}
               — verified against your projection: switching the Cash
               Withdrawal Strategy (sidebar → Cash Strategy) to "
-              {CASH_STRATEGY_OPTIONS.find((o) => o.value === strategyBest.value)
-                ?.label || strategyBest.value}
-              "{" "}
+              {strategyBestLabel}"{" "}
               {strategyBest.penaltyTotal <= 0
                 ? "eliminates the projected early-withdrawal penalties entirely."
                 : `cuts the projected early-withdrawal penalties by about ${Math.round(
@@ -5273,6 +5557,10 @@ function EarlyAccessStrategyPanel({
 // every field is meant to be overwritten with the visitor's own numbers.
 const DEFAULT_INPUTS = {
   mode: "single",
+  // Tax filing status for Individual mode: "single" or "mfj".
+  // Individual plans default to single-filer taxes; a married person modeling
+  // only their own accounts can switch to MFJ. Couple mode is always MFJ.
+  filingStatus: "single",
   currentAge: 45,
   retirementAge: 60,
   planThroughAge: 95,
@@ -5681,6 +5969,7 @@ function getDisplayInputs(inputs) {
     ...DEFAULT_INPUTS,
     ...shared,
     mode: "couple",
+    filingStatus: "mfj",
     currentAge: primary.currentAge,
     retirementAge: firstRetirementAge,
     planThroughAge: finalPrimaryAge,
@@ -5724,6 +6013,7 @@ function normalizeInputs(rawInputs) {
   return {
     ...merged,
     mode: merged.mode === "couple" ? "couple" : "single",
+    filingStatus: merged.filingStatus === "mfj" ? "mfj" : "single",
     couple: normalizeCoupleInputs(merged.couple),
     rmdStartAge: wasLegacyDefaultRmd
       ? computedRmdStartAge
@@ -6929,6 +7219,21 @@ function CashStrategyInputs({
                 : ""}
               , the PENALTY rows in the table).
             </p>
+            {best && best.penaltyTotal <= 0 && (
+              <p>
+                <span className="font-semibold">
+                  To be clear: you are not short of money.
+                </span>{" "}
+                Your penalty-free funds (cash, taxable, income) are enough to
+                reach 59½ without touching retirement accounts at all — this
+                penalty exists only because of the withdrawal order
+                {strategy !== "cashFirst" &&
+                (values.cashReserveFloor || 0) > 0
+                  ? " and reserve floor"
+                  : ""}{" "}
+                selected here, not because of your finances.
+              </p>
+            )}
             {best ? (
               <p>
                 <span className="font-semibold">
@@ -6941,7 +7246,7 @@ function CashStrategyInputs({
                 {fmtMoney(current.endBalance)} → {fmtMoney(best.endBalance)}).
                 {best.value === "cashFirst" &&
                 (values.cashReserveFloor || 0) > 0
-                  ? ' Note: "Use cash first" ignores your protected reserve floor — the savings come from letting that cash be spent.'
+                  ? ' Note: "Use cash first" ignores your protected reserve floor — the savings come from letting that cash be spent. If keeping the reserve matters more to you than the penalty, that is a legitimate choice; the numbers above show its exact price.'
                   : ""}
               </p>
             ) : (
@@ -7969,14 +8274,49 @@ export default function RetirementPlanner() {
                 </button>
               </div>
               {!isCouple && (
-                <p className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs leading-relaxed text-amber-900">
-                  <span className="font-semibold">Tax note:</span> this tool
-                  currently figures all taxes using{" "}
-                  <TermLabel info={TERM_HELP.mfj}>married-filing-jointly</TermLabel>{" "}
-                  rules. If you file as single, your real federal and NY taxes
-                  will be <span className="font-semibold">higher</span> than
-                  shown — treat after-tax results as a best case.
-                </p>
+                <div className="mt-3">
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    I file federal taxes as
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => update("filingStatus")("single")}
+                      className={`rounded border px-3 py-2 text-xs font-semibold transition ${
+                        inputs.filingStatus !== "mfj"
+                          ? "border-indigo-600 bg-indigo-600 text-white"
+                          : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      Single
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => update("filingStatus")("mfj")}
+                      className={`rounded border px-3 py-2 text-xs font-semibold transition ${
+                        inputs.filingStatus === "mfj"
+                          ? "border-indigo-600 bg-indigo-600 text-white"
+                          : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      Married (joint)
+                    </button>
+                  </div>
+                  <p className="mt-1.5 text-xs text-slate-500 leading-relaxed">
+                    {inputs.filingStatus === "mfj"
+                      ? "All taxes use married-filing-jointly brackets — for married people modeling only their own accounts."
+                      : "All taxes use single-filer federal and NY brackets, thresholds, and Medicare (IRMAA) tiers."}
+                  </p>
+                  <p className="mt-1.5 rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs leading-relaxed text-slate-600">
+                    <span className="font-semibold">Recently widowed?</span>{" "}
+                    You can usually still file jointly for the year your
+                    spouse passed, and — if you have a dependent child — as a
+                    qualifying surviving spouse (joint rates) for up to two
+                    more years. Model those years with "Married (joint)",
+                    then switch to "Single". Ask your tax preparer which
+                    applies to you.
+                  </p>
+                </div>
               )}
             </div>
 
@@ -8356,7 +8696,7 @@ export default function RetirementPlanner() {
                 onChange={update("conversionBridge")}
                 prefix="$"
                 step={5000}
-                hint="Tip: many people size this so taxable income stays inside the 12% federal bracket (about $100,800 for a couple in 2026)"
+                hint={`Tip: many people size this so taxable income stays inside the 12% federal bracket (about ${inputs.filingStatus === "mfj" ? "$100,800 for a couple" : "$50,400 for a single filer"} in 2026)`}
               />
               <NumberInput
                 label="Ages 60-64 / Year"
@@ -9449,9 +9789,16 @@ export default function RetirementPlanner() {
             <p className="font-semibold mb-2">Model Assumptions & Caveats</p>
             <ul className="space-y-1 list-disc list-inside">
               <li>
-                Tax: <TermLabel info={TERM_HELP.mfj}>MFJ</TermLabel> federal
-                brackets + NY State, inflation-adjusted from 2024 using your
-                selected inflation rate
+                Tax: federal + NY brackets for your selected filing status —{" "}
+                {isCouple
+                  ? "couple mode always uses married filing jointly"
+                  : displayInputs.filingStatus === "mfj"
+                    ? "married filing jointly"
+                    : "single filer"}{" "}
+                — inflation-adjusted from the latest published tables using
+                your selected inflation rate. Head-of-household is not
+                modeled; qualifying-surviving-spouse years can be modeled as
+                married-joint.
               </li>
               <li>
                 Taxable account gains use tracked cost basis (not flat 60%
@@ -9460,8 +9807,9 @@ export default function RetirementPlanner() {
               </li>
               <li>
                 Social Security taxation uses provisional-income rules (0-85%
-                taxable depending on other income). Thresholds $32K/$44K are
-                not indexed to inflation — this is statutory, not a bug.
+                taxable depending on other income). Thresholds ($32K/$44K
+                joint, $25K/$34K single) are not indexed to inflation — this
+                is statutory, not a bug.
               </li>
               <li>
                 Taxes solved iteratively (gross-up converges so final
@@ -9476,14 +9824,15 @@ export default function RetirementPlanner() {
               </li>
               <li>
                 <TermLabel info={TERM_HELP.niit}>NIIT</TermLabel> (3.8%)
-                modeled above $250K <TermLabel info={TERM_HELP.mfj}>MFJ</TermLabel>{" "}
-                <TermLabel info={TERM_HELP.magi}>MAGI</TermLabel>. Threshold
+                modeled above $250K joint / $200K single{" "}
+                <TermLabel info={TERM_HELP.magi}>MAGI</TermLabel>. Thresholds
                 not indexed (statutory).
               </li>
               <li>
-                Age-65+ extra standard deduction and the OBBBA senior
-                deduction ($6,000/person 65+, 2025-2028, phased out above
-                $150K MFJ MAGI) are modeled.
+                Age-65+ extra standard deduction ($1,650/spouse joint,
+                $2,050 single, indexed) and the OBBBA senior deduction
+                ($6,000/person 65+, 2025-2028, phased out above $150K joint /
+                $75K single MAGI) are modeled.
               </li>
               <li>
                 Cash/HYSA interest is taxed as ordinary income and counts
@@ -9502,13 +9851,6 @@ export default function RetirementPlanner() {
                 post-IRA applicable-percentage formula. Real subsidies depend
                 on state, plan choice, age, and specific FPL tables.
               </li>
-              {!isCouple && (
-                <li>
-                  Individual mode still uses married-filing-jointly tax
-                  brackets — a single filer's actual federal tax would be
-                  meaningfully higher than shown.
-                </li>
-              )}
               <li>
                 Social Security earnings test not modeled: claiming before
                 full retirement age while earning part-time income would
@@ -9517,7 +9859,10 @@ export default function RetirementPlanner() {
               <li>
                 Couple mode assumes both spouses live through the full plan —
                 survivor benefits, widow(er) filing status, and first-death
-                expense changes are not modeled.
+                expense changes are not modeled. A surviving spouse can plan
+                forward by switching to Individual mode with the Single
+                filing status (or Married-joint for qualifying
+                surviving-spouse years).
               </li>
               <li>
                 HSA withdrawals are modeled for healthcare only. In reality,
