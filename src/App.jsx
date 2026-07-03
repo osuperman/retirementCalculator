@@ -4933,53 +4933,153 @@ function SpendableCashLedger({ rows }) {
   );
 }
 
+// Small color chip matching the series color used in the chart + legend.
+function SeriesSwatch({ color }) {
+  return (
+    <span
+      className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm border border-black/10"
+      style={{ background: color }}
+      aria-hidden="true"
+    />
+  );
+}
+
+// Chart hover tooltip, shared by the portfolio-composition and cash-flow
+// charts. Rendered as a table with a color swatch per row (matching the
+// legend), grouped into income vs. account withdrawals on the cash-flow
+// chart, with subtotals and the spending+tax "Need" breakdown.
 function CashFlowTooltip({ active, payload, isCouple, showNeedBreakdown = false }) {
   if (!active || !payload?.length) return null;
   const row = payload[0].payload;
-  const visiblePayload = payload.filter((item) => item.value != null && item.value !== 0);
+  const visiblePayload = payload.filter(
+    (item) => item.value != null && item.value !== 0,
+  );
+  const seriesColor = (item) => item.color || item.fill || "#64748b";
+  const NEED_NAME = "Need (Spending + Tax)";
+  const INCOME_NAMES = new Set(["Part-Time", "Social Security", "Pension"]);
+
+  const incomeItems = [];
+  const accountItems = [];
+  const spendingItems = []; // "Annual Spending" line on the composition chart
+  let needItem = null;
+  for (const item of visiblePayload) {
+    const name = String(item.name ?? item.dataKey);
+    if (name === NEED_NAME) needItem = item;
+    else if (name === "Annual Spending") spendingItems.push(item);
+    else if (INCOME_NAMES.has(name)) incomeItems.push(item);
+    else accountItems.push(item);
+  }
+  const sum = (items) => items.reduce((acc, i) => acc + (i.value || 0), 0);
+
+  const seriesRow = (item) => (
+    <tr key={item.dataKey}>
+      <td className="py-0.5 pr-4">
+        <span className="inline-flex items-center gap-1.5 text-slate-600">
+          <SeriesSwatch color={seriesColor(item)} />
+          {item.name || item.dataKey}
+        </span>
+      </td>
+      <td className="py-0.5 text-right font-mono tabular-nums text-slate-900">
+        {fmtMoneyFull(item.value)}
+      </td>
+    </tr>
+  );
+  const groupHeader = (label) => (
+    <tr>
+      <td
+        colSpan={2}
+        className="pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400"
+      >
+        {label}
+      </td>
+    </tr>
+  );
+  const subtotalRow = (label, value, keySuffix) => (
+    <tr key={`subtotal-${keySuffix}`} className="border-t border-slate-200">
+      <td className="py-0.5 pr-4 pl-4 text-slate-500">{label}</td>
+      <td className="py-0.5 text-right font-mono tabular-nums font-semibold text-slate-900">
+        {fmtMoneyFull(value)}
+      </td>
+    </tr>
+  );
+
   return (
     <div className="max-w-sm rounded border border-slate-300 bg-white p-3 text-xs shadow-lg">
-      <div className="mb-2 font-semibold text-slate-900">
+      <div className="mb-1.5 font-semibold text-slate-900">
         {formatYearAgeLabel(row, isCouple)}
       </div>
-      <div className="space-y-1">
-        {visiblePayload.map((item) => (
-          <div key={item.dataKey} className="flex items-center justify-between gap-4">
-            <span className="text-slate-600">{item.name || item.dataKey}</span>
-            <span className="font-mono text-slate-900">{fmtMoneyFull(item.value)}</span>
-          </div>
-        ))}
-      </div>
-      {showNeedBreakdown && row.spending > 0 && (
-        <div className="mt-2 border-t border-slate-200 pt-2 space-y-0.5">
-          <div className="flex items-center justify-between gap-4">
-            <span className="text-slate-600">Need = Spending</span>
-            <span className="font-mono text-slate-900">
-              {fmtMoneyFull(row.spending)}
-            </span>
-          </div>
-          <div className="flex items-center justify-between gap-4">
-            <span className="text-slate-600">
-              + Tax
-              {row.earlyPenalty > 0
-                ? ` (incl. ${fmtMoneyFull(row.earlyPenalty)} penalty)`
-                : ""}
-            </span>
-            <span className="font-mono text-slate-900">
-              {fmtMoneyFull(row.tax)}
-            </span>
-          </div>
-          {row.conversion > 0 && (
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-indigo-700">
-                Roth conversion (taxed, not spending)
-              </span>
-              <span className="font-mono text-indigo-700">
-                {fmtMoneyFull(row.conversion)}
-              </span>
-            </div>
+      <table className="w-full border-collapse text-xs">
+        <tbody>
+          {showNeedBreakdown ? (
+            <>
+              {incomeItems.length > 0 && groupHeader("Income")}
+              {incomeItems.map(seriesRow)}
+              {incomeItems.length > 1 &&
+                subtotalRow("Income total", sum(incomeItems), "income")}
+              {accountItems.length > 0 && groupHeader("Withdrawn from accounts")}
+              {accountItems.map(seriesRow)}
+              {accountItems.length > 1 &&
+                subtotalRow("Withdrawals total", sum(accountItems), "accounts")}
+            </>
+          ) : (
+            <>
+              {accountItems.map(seriesRow)}
+              {accountItems.length > 1 &&
+                row.total != null &&
+                subtotalRow("Total portfolio", row.total, "portfolio")}
+              {[...incomeItems, ...spendingItems].map(seriesRow)}
+            </>
           )}
-        </div>
+        </tbody>
+      </table>
+      {showNeedBreakdown && row.spending > 0 && (
+        <table className="mt-2 w-full border-collapse border-t border-slate-200 pt-2 text-xs">
+          <tbody>
+            <tr>
+              <td className="pt-1.5 pr-4 pb-0.5">
+                <span className="inline-flex items-center gap-1.5 font-semibold text-slate-900">
+                  <SeriesSwatch
+                    color={needItem ? seriesColor(needItem) : "#ef4444"}
+                  />
+                  {NEED_NAME}
+                </span>
+              </td>
+              <td className="pt-1.5 pb-0.5 text-right font-mono tabular-nums font-semibold text-slate-900">
+                {fmtMoneyFull(row.spending + row.tax)}
+              </td>
+            </tr>
+            <tr>
+              <td className="py-0.5 pr-4 pl-4 text-slate-500">= Spending</td>
+              <td className="py-0.5 text-right font-mono tabular-nums text-slate-900">
+                {fmtMoneyFull(row.spending)}
+              </td>
+            </tr>
+            <tr>
+              <td className="py-0.5 pr-4 pl-4 text-slate-500">
+                + Tax
+                {row.earlyPenalty > 0
+                  ? ` (incl. ${fmtMoneyFull(row.earlyPenalty)} penalty)`
+                  : ""}
+              </td>
+              <td className="py-0.5 text-right font-mono tabular-nums text-slate-900">
+                {fmtMoneyFull(row.tax)}
+              </td>
+            </tr>
+            {row.conversion > 0 && (
+              <tr>
+                <td className="py-0.5 pr-4 text-indigo-700">
+                  <span className="inline-flex items-center gap-1.5">
+                    <SeriesSwatch color="#6366f1" />
+                    Roth conversion (taxed, not spending)
+                  </span>
+                </td>
+                <td className="py-0.5 text-right font-mono tabular-nums text-indigo-700">
+                  {fmtMoneyFull(row.conversion)}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       )}
       {isCouple && row.ownerDetails && (
         <div className="mt-3 border-t border-slate-200 pt-2">
