@@ -219,6 +219,14 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
   contribution basis, part-time income, spending cuts).
 - Scenario-comparison retirement ages always derive from the user's own
   retirement age in both modes.
+- For plans retiring before 59 1/2, the full projection is re-run under all
+  four cash-withdrawal orders. The Cash Strategy selector then states
+  definitively what the chosen order does with the user's actual inputs —
+  exact penalized dollars, penalty total, and affected ages — and either
+  recommends the order that eliminates/minimizes penalties (rejecting
+  alternatives that create a new funding shortfall) or states that no order
+  avoids the penalty because penalty-free assets cannot cover the bridge.
+  The same comparison feeds an "alternatives" line in the early-access panel.
 
 ## Monte Carlo
 

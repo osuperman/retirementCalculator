@@ -1571,6 +1571,74 @@ function runSelfTests() {
     },
   );
 
+  // --- Cash-strategy penalty comparison: definitive guidance, not "can"
+  testScenario(
+    "Strategy compare: cashLast penalizes an early retiree that cashFirst spares",
+    () => {
+      // All penalty-free money sits in cash: "use cash first" covers the
+      // bridge cleanly, while "cash last" is forced through the 401k and
+      // must pay the 10% penalty — the order alone creates the cost.
+      const richBridge = {
+        ...baseInputs,
+        currentAge: 50,
+        retirementAge: 52,
+        planThroughAge: 62,
+        balanceCash: 800000,
+        balanceTaxable: 0,
+        balance401k: 800000,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+        cashStrategy: "cashLast",
+      };
+      const impact = compareCashStrategies(richBridge);
+      if (!impact) return { passed: false, details: "comparison returned null" };
+      const best = bestCashStrategyAlternative(impact, "cashLast");
+      const ok =
+        impact.cashLast.penaltyTotal > 0 &&
+        impact.cashFirst.penaltyTotal === 0 &&
+        best != null &&
+        best.penaltyTotal === 0;
+      return {
+        passed: ok,
+        details: `cashLast=${impact.cashLast.penaltyTotal}, cashFirst=${impact.cashFirst.penaltyTotal}, best=${best ? `${best.value}/${best.penaltyTotal}` : "none"}`,
+      };
+    },
+  );
+
+  testScenario(
+    "Strategy compare: penalized draws = 10x penalty (identity)",
+    () => {
+      const impact = compareCashStrategies({
+        ...baseInputs,
+        currentAge: 50,
+        retirementAge: 52,
+        planThroughAge: 60,
+        balanceCash: 0,
+        balanceTaxable: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+      });
+      if (!impact) return { passed: false, details: "comparison returned null" };
+      const c = impact.cashFirst;
+      const ok =
+        c.penaltyTotal > 0 &&
+        Math.abs(c.penalizedDraws - c.penaltyTotal * 10) <= 1;
+      return {
+        passed: ok,
+        details: `penaltyTotal=${c.penaltyTotal}, penalizedDraws=${c.penalizedDraws}`,
+      };
+    },
+  );
+
   // --- Cash withdrawal strategy & minimum reserve ---
   const reserveState = {
     bCash: 300000,
@@ -4676,9 +4744,17 @@ function EarlyAccessStrategyPanel({
   adjust,
   showRealDollars,
   maxSustainableSpending,
+  cashStrategyImpact = null,
 }) {
   const earliestRetireAge = displayInputs.retirementAge;
   if (earliestRetireAge >= 59.5) return null;
+
+  // Definitive cash-order comparison (same engine, all four orders).
+  const activeStrategy = displayInputs.cashStrategy || "cashFirst";
+  const strategyCurrent = cashStrategyImpact?.[activeStrategy];
+  const strategyBest = cashStrategyImpact
+    ? bestCashStrategyAlternative(cashStrategyImpact, activeStrategy)
+    : null;
 
   const people = isCouple
     ? [
@@ -5099,6 +5175,23 @@ function EarlyAccessStrategyPanel({
           Alternative strategies that can improve the odds:
         </p>
         <ul className="list-disc list-inside space-y-1.5 text-xs text-slate-700 leading-relaxed">
+          {strategyBest && strategyCurrent && strategyCurrent.penaltyTotal > 0 && (
+            <li>
+              <span className="font-medium">
+                Change the cash withdrawal order
+              </span>{" "}
+              — verified against your projection: switching the Cash
+              Withdrawal Strategy (sidebar → Cash Strategy) to "
+              {CASH_STRATEGY_OPTIONS.find((o) => o.value === strategyBest.value)
+                ?.label || strategyBest.value}
+              "{" "}
+              {strategyBest.penaltyTotal <= 0
+                ? "eliminates the projected early-withdrawal penalties entirely."
+                : `cuts the projected early-withdrawal penalties by about ${Math.round(
+                    (1 - strategyBest.penaltyTotal / strategyCurrent.penaltyTotal) * 100,
+                  )}%.`}
+            </li>
+          )}
           {anyIneligible && (
             <li>
               <span className="font-medium">
@@ -6065,6 +6158,89 @@ function solveMaxSustainableSpending(inputs) {
   return Math.round(lo / 500) * 500;
 }
 
+// ============================================================
+// CASH-STRATEGY PENALTY IMPACT — definitive, not hypothetical
+// ============================================================
+// The engine knows exactly whether a withdrawal order sends money through
+// penalized accounts before 59½. Run the full projection once per strategy
+// (everything else held constant) so the UI can state what WILL happen with
+// the user's actual inputs and recommend the order that minimizes penalties.
+
+const CASH_STRATEGY_VALUES = [
+  "cashFirst",
+  "preserveReserve",
+  "proportional",
+  "cashLast",
+];
+
+function summarizeCashStrategyRun(results) {
+  let penaltyTotal = 0;
+  let penaltyYears = 0;
+  let firstPenaltyAge = null;
+  let lastPenaltyAge = null;
+  for (const d of results.yearlyData) {
+    if ((d.earlyPenalty || 0) > 0) {
+      penaltyTotal += d.earlyPenalty;
+      penaltyYears += 1;
+      if (firstPenaltyAge == null) firstPenaltyAge = d.age;
+      lastPenaltyAge = d.age;
+    }
+  }
+  return {
+    penaltyTotal: Math.round(penaltyTotal),
+    // The §72(t) penalty is exactly 10% of the penalized withdrawals.
+    penalizedDraws: Math.round(penaltyTotal * 10),
+    penaltyYears,
+    firstPenaltyAge,
+    lastPenaltyAge,
+    totalTaxes: results.summary.totalTaxesPaid,
+    endBalance: results.summary.portfolioAtEnd,
+    unmet: results.summary.totalUnmetCashFlow,
+  };
+}
+
+function compareCashStrategies(inputs) {
+  const withStrategy = (strategy) => {
+    if (!isCoupleMode(inputs)) return { ...inputs, cashStrategy: strategy };
+    const couple = normalizeCoupleInputs(inputs.couple);
+    return {
+      ...inputs,
+      couple: {
+        ...couple,
+        shared: { ...couple.shared, cashStrategy: strategy },
+      },
+    };
+  };
+  const impact = {};
+  for (const strategy of CASH_STRATEGY_VALUES) {
+    const run = simulatePlan(withStrategy(strategy));
+    if (run.yearlyData.length === 0) return null; // invalid inputs mid-typing
+    impact[strategy] = summarizeCashStrategyRun(run);
+  }
+  return impact;
+}
+
+// Given the impact map and the active strategy, pick the alternative order
+// that cuts penalties the most without creating a new funding shortfall.
+// Returns null when no alternative meaningfully beats the current one.
+function bestCashStrategyAlternative(impact, currentStrategy) {
+  const current = impact?.[currentStrategy];
+  if (!current) return null;
+  const shortfallTolerance = 1000;
+  const candidates = CASH_STRATEGY_VALUES.filter(
+    (value) => value !== currentStrategy,
+  )
+    .map((value) => ({ value, ...impact[value] }))
+    .filter((alt) => alt.unmet <= current.unmet + shortfallTolerance)
+    .sort(
+      (a, b) =>
+        a.penaltyTotal - b.penaltyTotal || b.endBalance - a.endBalance,
+    );
+  const best = candidates[0];
+  if (!best || best.penaltyTotal >= current.penaltyTotal - 1) return null;
+  return best;
+}
+
 // Horizon-aware safe-withdrawal guideline. The classic 4% rule is calibrated
 // to ~30-year retirements; longer horizons warrant a lower starting rate.
 function safeWithdrawalGuideline(retirementYears) {
@@ -6688,12 +6864,25 @@ const CASH_STRATEGY_OPTIONS = [
 
 // Cash drawdown controls — used by the individual sidebar and, in couple
 // mode, the shared Household section (cash is a shared bucket).
-function CashStrategyInputs({ values, onChange, earlyRetirement = false }) {
+// `penaltyImpact` is the per-strategy projection comparison computed in the
+// main component, so the guidance below states what the user's actual plan
+// DOES — never a hypothetical "can".
+function CashStrategyInputs({
+  values,
+  onChange,
+  earlyRetirement = false,
+  penaltyImpact = null,
+}) {
   const strategy = values.cashStrategy || "cashFirst";
   const selected = CASH_STRATEGY_OPTIONS.find((o) => o.value === strategy);
   const reserveActive = strategy !== "cashFirst";
-  const penaltyRisk =
-    earlyRetirement && (strategy === "cashLast" || strategy === "proportional");
+  const current = penaltyImpact?.[strategy];
+  const best = penaltyImpact
+    ? bestCashStrategyAlternative(penaltyImpact, strategy)
+    : null;
+  const bestLabel = best
+    ? CASH_STRATEGY_OPTIONS.find((o) => o.value === best.value)?.label
+    : null;
   return (
     <>
       <div className="mb-3">
@@ -6714,13 +6903,59 @@ function CashStrategyInputs({ values, onChange, earlyRetirement = false }) {
         {selected && (
           <p className="text-xs text-slate-500 mt-1">{selected.blurb}</p>
         )}
-        {penaltyRisk && (
-          <p className="text-xs text-amber-700 mt-1 bg-amber-50 border border-amber-200 rounded px-2 py-1">
-            Heads up: retiring before 59½ with this strategy can route draws
-            into 401k/IRA territory, where the 10% early-withdrawal penalty
-            applies (PENALTY rows in the year table). Compare lifetime tax +
-            penalty before committing.
+        {earlyRetirement && current && current.penaltyTotal <= 0 && (
+          <p className="text-xs text-emerald-800 mt-1 bg-emerald-50 border border-emerald-200 rounded px-2 py-1">
+            ✓ Checked against your projection: this withdrawal order triggers{" "}
+            <span className="font-semibold">
+              no 10% early-withdrawal penalties
+            </span>{" "}
+            before 59½.
           </p>
+        )}
+        {earlyRetirement && current && current.penaltyTotal > 0 && (
+          <div className="text-xs text-amber-900 mt-1 bg-amber-50 border border-amber-300 rounded px-2 py-1.5 space-y-1">
+            <p>
+              <span className="font-semibold">
+                With your inputs, this order pulls{" "}
+                {fmtMoney(current.penalizedDraws)} from retirement accounts
+                before 59½
+              </span>{" "}
+              — costing {fmtMoney(current.penaltyTotal)} in 10% penalties
+              across {current.penaltyYears} year
+              {current.penaltyYears === 1 ? "" : "s"} (ages{" "}
+              {current.firstPenaltyAge}
+              {current.lastPenaltyAge !== current.firstPenaltyAge
+                ? `–${current.lastPenaltyAge}`
+                : ""}
+              , the PENALTY rows in the table).
+            </p>
+            {best ? (
+              <p>
+                <span className="font-semibold">
+                  {best.penaltyTotal <= 0
+                    ? `Fix: switch to "${bestLabel}" — it eliminates the penalty entirely`
+                    : `Better: "${bestLabel}" cuts the penalty to ${fmtMoney(best.penaltyTotal)}`}
+                </span>{" "}
+                (lifetime taxes {fmtMoney(current.totalTaxes)} →{" "}
+                {fmtMoney(best.totalTaxes)}; ending balance{" "}
+                {fmtMoney(current.endBalance)} → {fmtMoney(best.endBalance)}).
+                {best.value === "cashFirst" &&
+                (values.cashReserveFloor || 0) > 0
+                  ? ' Note: "Use cash first" ignores your protected reserve floor — the savings come from letting that cash be spent.'
+                  : ""}
+              </p>
+            ) : (
+              <p>
+                <span className="font-semibold">
+                  No withdrawal order avoids this penalty:
+                </span>{" "}
+                your penalty-free money (cash + taxable) can't cover the years
+                before 59½ on its own. See the "Accessing Money Before 59½"
+                panel for ways to close the gap — part-time income, lower
+                spending, or retiring at 55+.
+              </p>
+            )}
+          </div>
         )}
       </div>
       <NumberInput
@@ -6763,7 +6998,7 @@ function CashStrategyInputs({ values, onChange, earlyRetirement = false }) {
   );
 }
 
-function CoupleInputs({ couple, updateCouple }) {
+function CoupleInputs({ couple, updateCouple, penaltyImpact = null }) {
   const { primary, spouse, shared } = normalizeCoupleInputs(couple);
   const sharedChange = (key) => updateCouple("shared", key);
   return (
@@ -6815,6 +7050,7 @@ function CoupleInputs({ couple, updateCouple }) {
           earlyRetirement={
             Math.min(primary.retirementAge, spouse.retirementAge) < 59.5
           }
+          penaltyImpact={penaltyImpact}
         />
         <NumberInput
           label="Base Lifestyle Expenses"
@@ -6966,6 +7202,13 @@ export default function RetirementPlanner() {
     () => solveMaxSustainableSpending(inputs),
     [inputs],
   );
+  // Early retirees: run the projection under each cash-withdrawal order so
+  // the UI can state definitively what the chosen order costs in 10%
+  // penalties and which order minimizes them.
+  const cashStrategyImpact = useMemo(() => {
+    if (getDisplayInputs(inputs).retirementAge >= 59.5) return null;
+    return compareCashStrategies(inputs);
+  }, [inputs]);
 
   // Stale MC results are withheld from the narrative so it never quotes a
   // success rate computed from inputs that no longer exist.
@@ -7738,7 +7981,11 @@ export default function RetirementPlanner() {
             </div>
 
             {isCouple ? (
-              <CoupleInputs couple={inputs.couple} updateCouple={updateCouple} />
+              <CoupleInputs
+                couple={inputs.couple}
+                updateCouple={updateCouple}
+                penaltyImpact={cashStrategyImpact}
+              />
             ) : (
               <>
 
@@ -7829,6 +8076,7 @@ export default function RetirementPlanner() {
                 values={inputs}
                 onChange={update}
                 earlyRetirement={inputs.retirementAge < 59.5}
+                penaltyImpact={cashStrategyImpact}
               />
             </Section>
 
@@ -8622,6 +8870,7 @@ export default function RetirementPlanner() {
             adjust={adjust}
             showRealDollars={showRealDollars}
             maxSustainableSpending={maxSustainableSpending}
+            cashStrategyImpact={cashStrategyImpact}
           />
 
           {/* Year-by-year table */}
