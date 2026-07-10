@@ -2,16 +2,15 @@
 
 This document summarizes the projection rules implemented in `src/App.jsx`.
 
-For the standalone rules-and-law specification — every statute, formula, and
-source behind these rules, written so the engine could be reconstructed from
-it — see [RULES_AND_METHODOLOGY.md](RULES_AND_METHODOLOGY.md). Update the two
-documents together when current-law tables change.
-
 ## Timing
 
 - Projection starts in the current calendar year from `new Date().getFullYear()`.
 - Accumulation years are `age < retirementAge`.
 - The retirement year itself is the first distribution year.
+- A retirement age at or below the current age is valid: it means the user is
+  retiring this year or is already retired, and year 1 of the projection is a
+  distribution year. The year-1 withdrawal-rate denominator is today's total
+  balance in that case.
 - Projection rows run through `planThroughAge`, inclusive.
 - Individual mode preserves the original single-person flat input model.
 - Married-couple mode projects each spouse by calendar year with independent
@@ -51,12 +50,34 @@ documents together when current-law tables change.
 
 ## Taxes
 
-- Federal ordinary-income and long-term-capital-gain calculations use official 2026 parameters for the selected filing status (single or MFJ). Individual mode defaults to single; couple mode always files MFJ. Filing status also selects the Social Security provisional-income thresholds, NIIT threshold, IRMAA tiers, and NY tables.
+- Taxes are computed per filing status. Individual mode uses the selected
+  status — single (default) or married filing jointly; couple mode always
+  uses married filing jointly. Head-of-household is not modeled;
+  qualifying-surviving-spouse years can be modeled as married-joint.
+- Federal ordinary-income and long-term-capital-gain calculations use
+  official 2026 parameters for both MFJ and single where available
+  (2026 single: $16,100 standard deduction; brackets to $12,400 / $50,400 /
+  $105,700 / $201,775 / $256,225 / $640,600; LTCG breakpoints $49,450 and
+  $545,500).
 - Future federal brackets and deductions are projected from the last known table year using the input inflation rate.
 - Long-term capital gains use the remaining standard deduction before applying preferential brackets.
-- NIIT is modeled at 3.8% above the non-indexed $250,000 MFJ MAGI threshold.
+- NIIT is modeled at 3.8% above the non-indexed MAGI threshold:
+  $250,000 MFJ / $200,000 single.
+- The age-65+ additional standard deduction ($1,650 per MFJ spouse /
+  $2,050 single in 2026, indexed) and the OBBBA senior deduction ($6,000
+  per person 65+ for tax years 2025-2028 only, not indexed, phased out at
+  6% of MAGI above $150K MFJ / $75K single) are applied. Single filers
+  count one senior; MFJ mirrors the IRMAA enrollee assumption in
+  individual mode and uses each spouse's age in couple mode.
+- Cash/HYSA interest (start-of-year balance x cash return) is taxed as
+  ordinary income and included in Social Security provisional income, MAGI,
+  ACA, and IRMAA calculations. Taxable-brokerage dividends remain modeled
+  only as the annual return drag.
 - NY tax excludes taxable Social Security and applies a simplified public-pension/private-retirement-income treatment.
-- NY brackets and the MFJ standard deduction are projected from their 2024 statutory values by the input inflation rate, consistent with how federal brackets are projected (previously NY was left unindexed, causing one-sided bracket creep).
+- NY brackets and standard deductions (MFJ $16,050 / single $8,000, 2024
+  base) are projected from their 2024 statutory values by the input
+  inflation rate, consistent with how federal brackets are projected
+  (previously NY was left unindexed, causing one-sided bracket creep).
 - The NY middle-class rate cut (Ch. 59, Laws of 2025) is applied: the bottom
   five rates drop 0.1pp in tax year 2026 and 0.2pp total from 2027 onward.
 - The NY $20,000 pension/annuity exclusion is gated at age 59½ (the annual
@@ -70,10 +91,12 @@ documents together when current-law tables change.
   The penalty appears in each row's `earlyPenalty` field and is included in
   `tax`.
 - Tax is solved iteratively so withdrawals cover both spending needs and tax created by those withdrawals.
-- Married-couple mode uses the same MFJ tax engine as individual mode. It sums
-  household ordinary income, LTCG, taxable Social Security, MAGI, pensions,
-  RMDs, Roth conversions, and withdrawals before calculating federal and NY
-  tax. Filing-status changes after a spouse's death are not modeled.
+- Married-couple mode uses the same tax engine with the MFJ parameter set. It
+  sums household ordinary income, LTCG, taxable Social Security, MAGI,
+  pensions, RMDs, Roth conversions, and withdrawals before calculating
+  federal and NY tax. Filing-status changes after a spouse's death are not
+  modeled inside couple mode; a survivor can continue planning in Individual
+  mode with the Single filing status.
 
 ## Social Security
 
@@ -83,7 +106,10 @@ documents together when current-law tables change.
   (exact only for those born 1960+).
 - Claiming before FRA reduces the benefit using SSA-style monthly reduction factors.
 - Claiming after FRA increases the benefit by 8% per year up to 36 delayed months.
-- Taxable Social Security uses MFJ provisional-income thresholds of $32,000 and $44,000, which are not inflation-indexed.
+- Taxable Social Security uses provisional-income thresholds by filing
+  status ($32,000/$44,000 MFJ; $25,000/$34,000 single), not
+  inflation-indexed. The second-tier add-on caps at half the threshold
+  span ($6,000 MFJ / $4,500 single).
 - In married-couple mode, each spouse has their own FRA benefit and claim age.
   The model sums gross household Social Security and applies MFJ taxable
   Social Security rules to the combined benefit. Spousal, survivor, divorced,
@@ -97,19 +123,6 @@ documents together when current-law tables change.
 - In married-couple mode, conversion targets and caps are calculated per spouse
   against that spouse's 401(k)/403(b) balance, age, Social Security timeline,
   and RMD requirement.
-
-## Roth Ordering Layers And SEPP
-
-- Roth withdrawals follow IRC 408A(d)(4) ordering: user-entered contribution
-  basis (`rothBasis`), then conversion vintages FIFO (each penalty-free five
-  tax years after conversion), then earnings. Only unseasoned conversion
-  principal and earnings incur the 10% penalty before 59½, so Roth conversion
-  ladders price correctly. Income tax on early earnings withdrawals is not
-  modeled.
-- Optional SEPP/72(t) program (individual mode, `useSepp` + `seppRate`):
-  fixed-amortization payment (Notice 2022-6, Single Life Table) from the
-  first retirement year's tax-deferred balance, forced yearly until the later
-  of 5 years or 59½ via the RMD channel, penalty-exempt up to the payment.
 
 ## RMDs
 
@@ -131,8 +144,16 @@ documents together when current-law tables change.
 - HSA withdrawals are applied against healthcare spending before taxable account withdrawals.
 - ACA subsidy estimation is optional and approximate.
 - Under current 2026 law, the model restores the 400% FPL subsidy cliff after the enhanced-credit period.
-- IRMAA uses 2026 MFJ Part B and Part D surcharge tiers and applies an inflation projection after 2026.
-- IRMAA uses the real two-year MAGI lookback against modeled retirement-year MAGI; only the first Medicare years (whose lookback predates modeled income) fall back to the same-year iterative approximation.
+- IRMAA uses 2026 Part B and Part D surcharge tiers for the plan's filing
+  status (MFJ thresholds $218K-$750K; single thresholds $109K-$500K) and
+  applies an inflation projection after 2026. Single filers are charged
+  for one Medicare enrollee.
+- IRMAA uses the projected MAGI from two years earlier (the real lookback)
+  whenever the projection has one — i.e., from the third retirement year on.
+  The first two retirement years fall back to same-year MAGI because
+  working-year (salary) MAGI is out of scope.
+- The Federal Poverty Level is household-size aware: $15,060 for the first
+  person plus $5,380 per additional person (2024 base, inflation projected).
 - In married-couple mode, lifestyle spending is shared, but healthcare costs
   are spouse-specific because Medicare/ACA eligibility depends on each spouse's
   age. ACA subsidy and IRMAA estimates remain household-level approximations
@@ -144,7 +165,12 @@ documents together when current-law tables change.
   through the configured horizon.
 - Shared financial elements are cash, taxable brokerage, cost basis, debt,
   base lifestyle spending, returns, inflation, taxes, ACA/IRMAA assumptions,
-  and Monte Carlo risk assumptions.
+  and Monte Carlo risk assumptions. Household size floors at 2 in couple
+  mode (drives the family HSA limit, FPL, and Medicare enrollee counts).
+- While one spouse still works, that spouse's salary is assumed to cover
+  only their own contributions; the full shared lifestyle budget is drawn
+  from savings once the first spouse retires. This is disclosed in the UI
+  and is conservative for staggered retirements.
 - Individual financial elements are retirement accounts, HSA balances,
   contributions, pensions, Social Security, RMD timing, Roth conversion
   targets, healthcare costs, and retirement dates.
@@ -205,6 +231,22 @@ documents together when current-law tables change.
   rate from the narrative until re-run.
 - Early-withdrawal penalties are surfaced per year (PENALTY badge), in the
   cash-flow tooltip, and as a lifetime total in the narrative when material.
+- Plans retiring before 59 1/2 get an "Accessing Money Before 59 1/2" panel:
+  per-person Rule of 55 eligibility (with the current-employer-plan-only
+  caveat), per-account penalty treatment, bridge-year funding totals drawn
+  from the same projection rows as the charts, the recommended withdrawal
+  order, tax implications, and alternatives (work to 55, SEPP/72(t), Roth
+  contribution basis, part-time income, spending cuts).
+- Scenario-comparison retirement ages always derive from the user's own
+  retirement age in both modes.
+- For plans retiring before 59 1/2, the full projection is re-run under all
+  four cash-withdrawal orders. The Cash Strategy selector then states
+  definitively what the chosen order does with the user's actual inputs —
+  exact penalized dollars, penalty total, and affected ages — and either
+  recommends the order that eliminates/minimizes penalties (rejecting
+  alternatives that create a new funding shortfall) or states that no order
+  avoids the penalty because penalty-free assets cannot cover the bridge.
+  The same comparison feeds an "alternatives" line in the early-access panel.
 
 ## Monte Carlo
 
@@ -215,6 +257,8 @@ documents together when current-law tables change.
   portfolio's year-end total fell more than 15% versus the prior year end.
   (The guard previously compared a year-end total to itself and never fired;
   fixed 2026-06-10 in both engines.)
+- Depletion detection keys off distribution-phase rows (not the primary's
+  age), so couple plans where the spouse retires first are scored correctly.
 
 ## Ask AI Context
 

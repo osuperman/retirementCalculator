@@ -17,6 +17,9 @@ import {
 
 const PROJECTION_START_YEAR = new Date().getFullYear();
 
+// Federal parameters by filing status. "mfj" = married filing jointly;
+// "single" = single filer (used by widowed, divorced, or never-married
+// planners). Qualifying-surviving-spouse years can be modeled as "mfj".
 const FEDERAL_TAX_TABLES = {
   mfj: {
     2024: {
@@ -80,10 +83,25 @@ const FEDERAL_TAX_TABLES = {
   },
 };
 
-// IRC 86 provisional-income thresholds (statutorily unindexed) and the
-// IRC 1411 NIIT MAGI threshold, per filing status.
-const SS_TAX_THRESHOLDS = { mfj: [32000, 44000], single: [25000, 34000] };
-const NIIT_THRESHOLD = { mfj: 250000, single: 200000 };
+// Per-status statutory (non-indexed) thresholds and senior-deduction bases.
+const FILING_STATUS_PARAMS = {
+  mfj: {
+    ssThreshold1: 32000,
+    ssThreshold2: 44000,
+    niitThreshold: 250000,
+    // Age-65+ additional standard deduction per person (2026 base, indexed)
+    seniorExtraStdDed2026: 1650,
+    // OBBBA senior deduction MAGI phase-out start (2025-2028, not indexed)
+    obbbaPhaseOutStart: 150000,
+  },
+  single: {
+    ssThreshold1: 25000,
+    ssThreshold2: 34000,
+    niitThreshold: 200000,
+    seniorExtraStdDed2026: 2050,
+    obbbaPhaseOutStart: 75000,
+  },
+};
 
 const LIMIT_TABLES = {
   2026: {
@@ -106,17 +124,13 @@ const ACA_APPLICABLE_PERCENTAGES_2026 = [
   [3.0, 4.0, 0.0996, 0.0996],
 ];
 
-// CMS 2026 IRMAA tiers. Surcharge amounts are per enrollee and identical
-// across statuses; only the MAGI thresholds differ. `exclusiveTop` marks the
-// tier whose upper bound belongs to the tier above (CMS defines the top tier
-// as >= $750,000 MFJ / >= $500,000 single).
 const IRMAA_2026 = {
   mfj: [
     { top: 218000, monthlyPartB: 0, monthlyPartD: 0 },
     { top: 274000, monthlyPartB: 81.2, monthlyPartD: 14.5 },
     { top: 342000, monthlyPartB: 202.9, monthlyPartD: 37.5 },
     { top: 410000, monthlyPartB: 324.6, monthlyPartD: 60.4 },
-    { top: 750000, monthlyPartB: 446.3, monthlyPartD: 83.3, exclusiveTop: true },
+    { top: 750000, monthlyPartB: 446.3, monthlyPartD: 83.3 },
     { top: Infinity, monthlyPartB: 487, monthlyPartD: 91 },
   ],
   single: [
@@ -124,7 +138,7 @@ const IRMAA_2026 = {
     { top: 137000, monthlyPartB: 81.2, monthlyPartD: 14.5 },
     { top: 171000, monthlyPartB: 202.9, monthlyPartD: 37.5 },
     { top: 205000, monthlyPartB: 324.6, monthlyPartD: 60.4 },
-    { top: 500000, monthlyPartB: 446.3, monthlyPartD: 83.3, exclusiveTop: true },
+    { top: 500000, monthlyPartB: 446.3, monthlyPartD: 83.3 },
     { top: Infinity, monthlyPartB: 487, monthlyPartD: 91 },
   ],
 };
@@ -207,7 +221,7 @@ function adjustedSocialSecurityBenefit(fraBenefit, claimAge, fullRetirementAge =
 }
 
 // ============================================================
-// TAX CALCULATIONS (MFJ, inflation-adjusted from 2024 brackets)
+// TAX CALCULATIONS (per filing status: MFJ or single)
 // ============================================================
 
 function fedOrdinaryTax(taxableIncome, year, inflation = 0.03, filingStatus = "mfj") {
@@ -227,7 +241,13 @@ function fedOrdinaryTax(taxableIncome, year, inflation = 0.03, filingStatus = "m
   return tax;
 }
 
-function fedLtcgTax(ltcg, ordinaryTaxable, year, inflation = 0.03, filingStatus = "mfj") {
+function fedLtcgTax(
+  ltcg,
+  ordinaryTaxable,
+  year,
+  inflation = 0.03,
+  filingStatus = "mfj",
+) {
   if (ltcg <= 0) return 0;
   const { ltcgZeroTop: zeroTop, ltcgFifteenTop: fifteenTop } =
     getFederalTaxParams(year, inflation, filingStatus);
@@ -249,17 +269,17 @@ function fedLtcgTax(ltcg, ordinaryTaxable, year, inflation = 0.03, filingStatus 
   return tax;
 }
 
-// NY brackets and the MFJ standard deduction are projected from their ~2024
+// NY brackets and standard deductions are projected from their ~2024
 // statutory values by the input inflation rate, mirroring how federal brackets
 // are projected in getFederalTaxParams. Without this, only the federal side
 // indexed and NY suffered unbounded bracket creep over a multi-decade horizon,
 // overstating NY tax and understating ending balances in later years.
 const NY_TAX_BASE_YEAR = 2024;
-// 2024 statutory NY tables (NY Tax Law 601). Single uses the same nine rates
-// with lower bracket thresholds and an $8,000 standard deduction.
-const NY_TAX_2024 = {
+// NY 2024 statutory schedules per filing status. The five lowest rates
+// (4% through 6%) receive the FY2026 middle-class cut in both schedules.
+const NY_TAX_PARAMS = {
   mfj: {
-    stdDed: 16050,
+    standardDeduction: 16050,
     brackets: [
       [0, 17150, 0.04],
       [17150, 23600, 0.045],
@@ -273,7 +293,7 @@ const NY_TAX_2024 = {
     ],
   },
   single: {
-    stdDed: 8000,
+    standardDeduction: 8000,
     brackets: [
       [0, 8500, 0.04],
       [8500, 11700, 0.045],
@@ -287,24 +307,24 @@ const NY_TAX_2024 = {
     ],
   },
 };
-function nyStateTax(taxableIncome, year = NY_TAX_BASE_YEAR, inflation = 0.03, filingStatus = "mfj") {
+function nyStateTax(
+  taxableIncome,
+  year = NY_TAX_BASE_YEAR,
+  inflation = 0.03,
+  filingStatus = "mfj",
+) {
   if (taxableIncome <= 0) return 0;
-  const nyTable = NY_TAX_2024[filingStatus] || NY_TAX_2024.mfj;
+  const params = NY_TAX_PARAMS[filingStatus] || NY_TAX_PARAMS.mfj;
   const factor = Math.pow(1 + inflation, Math.max(0, year - NY_TAX_BASE_YEAR));
-  const stdDed = nyTable.stdDed * factor;
+  const stdDed = params.standardDeduction * factor;
   const nyTaxable = Math.max(0, taxableIncome - stdDed);
   // FY2026 NY budget (Ch. 59, Laws of 2025) cuts the bottom five rates by
   // 0.1pp in tax year 2026 and 0.2pp total from 2027 onward (permanent).
   const midClassCut = year >= 2027 ? 0.002 : year >= 2026 ? 0.001 : 0;
-  const baseBrackets = nyTable.brackets.map(([low, high, rate], i) => [
-    low,
-    high,
-    i < 5 ? rate - midClassCut : rate,
-  ]);
-  const brackets = baseBrackets.map(([low, high, rate]) => [
+  const brackets = params.brackets.map(([low, high, rate], index) => [
     low * factor,
     high === Infinity ? Infinity : high * factor,
-    rate,
+    index < 5 ? rate - midClassCut : rate,
   ]);
   let tax = 0;
   for (const [low, high, rate] of brackets) {
@@ -316,14 +336,15 @@ function nyStateTax(taxableIncome, year = NY_TAX_BASE_YEAR, inflation = 0.03, fi
   return tax;
 }
 
-// Taxable Social Security benefits (MFJ provisional income rules)
-// Thresholds ($32K / $44K) are NOT inflation-adjusted by statute.
+// Taxable Social Security benefits (provisional income rules).
+// Thresholds are NOT inflation-adjusted by statute:
+//   MFJ $32K / $44K; single $25K / $34K.
 // Returns the amount of SS benefits that is taxable (0 to 85% of gross SS).
 // `otherIncome` = AGI before SS + tax-exempt interest (we assume 0 tax-exempt)
 function taxableSocialSecurity(ssGross, otherIncome, filingStatus = "mfj") {
   if (ssGross <= 0) return 0;
-  const [threshold1, threshold2] =
-    SS_TAX_THRESHOLDS[filingStatus] || SS_TAX_THRESHOLDS.mfj;
+  const { ssThreshold1: threshold1, ssThreshold2: threshold2 } =
+    FILING_STATUS_PARAMS[filingStatus] || FILING_STATUS_PARAMS.mfj;
   const halfSs = ssGross * 0.5;
   const provisional = Math.max(0, otherIncome) + halfSs;
   if (provisional <= threshold1) return 0;
@@ -332,35 +353,15 @@ function taxableSocialSecurity(ssGross, otherIncome, filingStatus = "mfj") {
     // Up to 50% of SS taxable (lesser of half SS or half the excess)
     taxable = Math.min(halfSs, (provisional - threshold1) * 0.5);
   } else {
-    // Above the upper threshold: 85% of the excess, plus the lesser of the
-    // full tier-one amount (half the threshold gap) or 50% of benefits.
+    // Above the second threshold: 85% of that excess, plus the lesser of the
+    // first-tier maximum (half the threshold span: $6K MFJ / $4.5K single)
+    // or half the benefit.
     const excess85 = (provisional - threshold2) * 0.85;
-    const plus = Math.min((threshold2 - threshold1) * 0.5, halfSs);
+    const firstTierCap = (threshold2 - threshold1) * 0.5;
+    const plus = Math.min(firstTierCap, halfSs);
     taxable = excess85 + plus;
   }
   return Math.max(0, Math.min(taxable, ssGross * 0.85));
-}
-
-// Single Life Expectancy Table (Treas. Reg. 1.401(a)(9)-9(b), 2022+),
-// ages relevant to SEPP start. Notice 2022-6 permits this table for the
-// 72(t) fixed-amortization method.
-const SINGLE_LIFE_EXPECTANCY = {
-  40: 45.7, 41: 44.8, 42: 43.8, 43: 42.9, 44: 41.9, 45: 41.0, 46: 40.0,
-  47: 39.0, 48: 38.1, 49: 37.1, 50: 36.2, 51: 35.3, 52: 34.3, 53: 33.4,
-  54: 32.5, 55: 31.6, 56: 30.6, 57: 29.8, 58: 28.9, 59: 28.0,
-};
-
-// Fixed-amortization SEPP payment (Notice 2022-6): level annual payment that
-// amortizes the account balance over single-life expectancy at the chosen
-// interest rate (legally capped at 120% of the federal mid-term rate — the
-// cap is the user's responsibility; the UI carries the warning).
-function seppAmortizedPayment(balance, rate, startAge) {
-  if (balance <= 0) return 0;
-  const n =
-    SINGLE_LIFE_EXPECTANCY[Math.min(59, Math.max(40, Math.round(startAge)))] ??
-    30;
-  if (rate <= 0) return balance / n;
-  return (balance * rate) / (1 - Math.pow(1 + rate, -n));
 }
 
 // IRS Uniform Lifetime Table divisor for RMD calculation (2022+ revised table)
@@ -382,9 +383,10 @@ function rmdDivisor(age) {
   return 2.0;
 }
 
-// 2024 Federal Poverty Level for household of 2 (lower 48), projected by inflation
+// 2024 Federal Poverty Level (lower 48), projected by inflation.
+// $15,060 for the first person + $5,380 for each additional person.
 function federalPovertyLevel(householdSize, year, inflation = 0.03) {
-  const base2024 = 15060 + 5380 * Math.max(1, householdSize - 1); // 2024 FPL
+  const base2024 = 15060 + 5380 * Math.max(0, Math.max(1, householdSize) - 1);
   return base2024 * Math.pow(1 + inflation, year - 2024);
 }
 
@@ -434,13 +436,31 @@ function totalTax(
   inflation = 0.03,
   nySocialSecurityExempt = 0,
   nyPensionAnnuityExclusion = 0,
+  seniors65 = 0,
   filingStatus = "mfj",
 ) {
-  const { standardDeduction: stdDed } = getFederalTaxParams(
+  const statusParams =
+    FILING_STATUS_PARAMS[filingStatus] || FILING_STATUS_PARAMS.mfj;
+  const { standardDeduction: baseStdDed } = getFederalTaxParams(
     year,
     inflation,
     filingStatus,
   );
+  const magi = ordinaryIncome + ltcg;
+  // Age-65+ additional standard deduction (permanent law): $1,650 per MFJ
+  // spouse / $2,050 unmarried in 2026, indexed on the bracket clock.
+  const seniorFactor = Math.pow(1 + inflation, Math.max(0, year - 2026));
+  const extraStdDed65 =
+    seniors65 * statusParams.seniorExtraStdDed2026 * seniorFactor;
+  // OBBBA senior deduction: $6,000 per person 65+ for tax years 2025-2028
+  // only (not indexed), phased out at 6% of MAGI above $150K MFJ / $75K single.
+  let seniorBonusDeduction = 0;
+  if (seniors65 > 0 && year >= 2025 && year <= 2028) {
+    const phaseOut =
+      0.06 * Math.max(0, magi - statusParams.obbbaPhaseOutStart);
+    seniorBonusDeduction = Math.max(0, seniors65 * 6000 - phaseOut);
+  }
+  const stdDed = baseStdDed + extraStdDed65 + seniorBonusDeduction;
   const taxableOrdinary = Math.max(0, ordinaryIncome - stdDed);
   // Apply any unused standard deduction to reduce taxable LTCG
   const unusedStdDed = Math.max(0, stdDed - ordinaryIncome);
@@ -453,9 +473,9 @@ function totalTax(
     inflation,
     filingStatus,
   );
-  // NIIT: 3.8% on investment income above the unindexed IRC 1411 threshold
-  const magi = ordinaryIncome + ltcg;
-  const niitThreshold = NIIT_THRESHOLD[filingStatus] || NIIT_THRESHOLD.mfj;
+  // NIIT: 3.8% on investment income above $250K MFJ / $200K single MAGI
+  // (thresholds not indexed by statute)
+  const niitThreshold = statusParams.niitThreshold;
   const niit =
     magi > niitThreshold
       ? Math.min(ltcg, magi - niitThreshold) * 0.038
@@ -469,43 +489,6 @@ function totalTax(
   );
   const ny = nyStateTax(nyOrdinary + ltcg, year, inflation, filingStatus);
   return fedOrd + fedLtcg + niit + ny;
-}
-
-// Roth IRA ordering rules (IRC 408A(d)(4)): withdrawals come from
-// contribution basis first (never taxed or penalized), then conversion
-// principal FIFO (each conversion penalty-free once 5 tax years old), then
-// earnings. The engine tracks user-entered contribution basis plus every
-// conversion vintage it creates, so Roth conversion ladders price correctly.
-// Simplification: early *earnings* withdrawals are penalized but their income
-// tax is not modeled (they occur only when a plan is already collapsing).
-function rothEarlyPenaltyBase(wRoth, layers, currentYear) {
-  if (!layers) return wRoth;
-  let remaining = wRoth;
-  let penalized = 0;
-  remaining -= Math.min(remaining, Math.max(0, layers.contribBasis));
-  for (const v of layers.vintages) {
-    if (remaining <= 0) break;
-    const take = Math.min(remaining, v.amount);
-    if (currentYear - v.year < 5) penalized += take;
-    remaining -= take;
-  }
-  penalized += Math.max(0, remaining);
-  return penalized;
-}
-
-function consumeRothLayers(wRoth, layers) {
-  if (!layers || wRoth <= 0) return;
-  let remaining = wRoth;
-  const fromBasis = Math.min(remaining, Math.max(0, layers.contribBasis));
-  layers.contribBasis -= fromBasis;
-  remaining -= fromBasis;
-  for (const v of layers.vintages) {
-    if (remaining <= 0) break;
-    const take = Math.min(remaining, v.amount);
-    v.amount -= take;
-    remaining -= take;
-  }
-  layers.vintages = layers.vintages.filter((v) => v.amount > 0);
 }
 
 // User-selectable cash drawdown behavior. "cashFirst" reproduces the original
@@ -625,9 +608,14 @@ function solveGrossedUpWithdrawals({
   minimumRmd = 0,
   penaltyFree401k = false,
   cashPolicy = CASH_POLICY_DEFAULT,
+  // Taxable interest earned on the Cash/HYSA balance this year. Ordinary
+  // income for federal + NY, and part of provisional income and MAGI.
+  interestIncome = 0,
+  // Number of household members 65+ (drives the extra standard deduction
+  // and the 2025-2028 OBBBA senior deduction).
+  seniors65 = 0,
+  // Tax filing status: "mfj" or "single".
   filingStatus = "mfj",
-  rothLayers = null,
-  seppExempt = 0,
 }) {
   let tax = 0;
   let withdrawals = { wCash: 0, wTaxable: 0, w401k: 0, wIra: 0, wRoth: 0, reserveUsed: 0 };
@@ -666,6 +654,7 @@ function solveGrossedUpWithdrawals({
     const incomeBeforeSs =
       ptIncome +
       pensionGross +
+      interestIncome +
       withdrawals.w401k +
       withdrawals.wIra +
       conversion +
@@ -675,6 +664,7 @@ function solveGrossedUpWithdrawals({
       ptIncome +
       taxableSs +
       pensionGross +
+      interestIncome +
       withdrawals.w401k +
       withdrawals.wIra +
       conversion;
@@ -698,16 +688,8 @@ function solveGrossedUpWithdrawals({
     if (age < 59.5) {
       const penalized401k =
         penaltyFree401k && age >= 55 ? 0 : withdrawals.w401k;
-      const penalizedRoth = rothLayers
-        ? rothEarlyPenaltyBase(withdrawals.wRoth, rothLayers, year)
-        : withdrawals.wRoth;
-      // A 72(t) SEPP stream exempts tax-deferred draws up to the fixed
-      // payment amount; anything beyond the payment is still penalized.
-      const penalizedTaxDeferred = Math.max(
-        0,
-        penalized401k + withdrawals.wIra - Math.max(0, seppExempt),
-      );
-      earlyPenalty = 0.1 * (penalizedTaxDeferred + penalizedRoth);
+      earlyPenalty =
+        0.1 * (penalized401k + withdrawals.wIra + withdrawals.wRoth);
     } else {
       earlyPenalty = 0;
     }
@@ -720,6 +702,7 @@ function solveGrossedUpWithdrawals({
         inflation,
         taxableSs,
         nyPensionAnnuityExclusion,
+        seniors65,
         filingStatus,
       ) + earlyPenalty;
     if (Math.abs(newTax - tax) < 1) {
@@ -738,7 +721,8 @@ function solveGrossedUpWithdrawals({
   };
 }
 
-// Compute annual Medicare Part B + Part D IRMAA surcharge for a MFJ household.
+// Compute annual Medicare Part B + Part D IRMAA surcharge for the household,
+// using the tier table for the given filing status.
 function computeIrmaaSurcharge(
   magi,
   year,
@@ -746,12 +730,16 @@ function computeIrmaaSurcharge(
   medicareEnrollees = 2,
   filingStatus = "mfj",
 ) {
+  const tiers = IRMAA_2026[filingStatus] || IRMAA_2026.mfj;
   const factor = Math.pow(1 + inflation, Math.max(0, year - 2026));
   const coveredPeople = Math.max(1, Math.min(2, medicareEnrollees || 1));
-  const tiers = IRMAA_2026[filingStatus] || IRMAA_2026.mfj;
-  for (const tier of tiers) {
+  for (let i = 0; i < tiers.length; i++) {
+    const tier = tiers[i];
     const threshold = tier.top === Infinity ? Infinity : tier.top * factor;
-    const atExclusiveTopTierBoundary = tier.exclusiveTop && magi >= threshold;
+    // The boundary into the top tier ($750K MFJ / $500K single) is exclusive:
+    // a MAGI at or above it belongs to the highest tier.
+    const atExclusiveTopTierBoundary =
+      i === tiers.length - 2 && magi >= threshold;
     if (!atExclusiveTopTierBoundary && magi <= threshold) {
       return (tier.monthlyPartB + tier.monthlyPartD) * 12 * coveredPeople * factor;
     }
@@ -989,6 +977,145 @@ function runSelfTests() {
     20440 * Math.pow(1.03, 10),
     pctEq,
   );
+  // Household of 1 must use the 1-person FPL ($15,060 in 2024), not the
+  // 2-person figure — regression test for the ACA over-subsidy bug.
+  test(
+    "federalPovertyLevel: household of 1 in 2024 = $15,060",
+    federalPovertyLevel(1, 2024, 0.03),
+    15060,
+    pctEq,
+  );
+
+  // --- Senior deductions (age-65+ extra std ded + OBBBA bonus)
+  // 2026, MFJ, $80K ordinary (12% bracket): 2 seniors add 2×$1,650 extra
+  // std ded + 2×$6,000 OBBBA bonus (no phase-out below $150K MAGI)
+  // = $15,300 × 12% = $1,836 federal savings.
+  test(
+    "totalTax: senior deductions save 12% × $15,300 at $80K (2026, 2 seniors)",
+    totalTax(80000, 0, 2026, 0, 0.03, 0, 0, 0) -
+      totalTax(80000, 0, 2026, 0, 0.03, 0, 0, 2),
+    1836,
+    pctEq,
+  );
+  // At $400K MAGI the OBBBA bonus is fully phased out (>$350K); only the
+  // 2×$1,650 extra std ded remains, saving 24% × $3,300 = $792.
+  test(
+    "totalTax: OBBBA bonus phased out at $400K MAGI (only extra std ded left)",
+    totalTax(400000, 0, 2026, 0, 0.03, 0, 0, 0) -
+      totalTax(400000, 0, 2026, 0, 0.03, 0, 0, 2),
+    792,
+    pctEq,
+  );
+
+  // --- Cash interest is taxable ordinary income in the gross-up solve
+  const interestState = {
+    bCash: 500000,
+    bTaxable: 0,
+    bTaxableBasis: 0,
+    b401k: 1000000,
+    bTradIra: 0,
+    bRoth: 0,
+  };
+  const solveNoInterest = solveGrossedUpWithdrawals({
+    netNeed: 60000, state: interestState, preSs: true, conversion: 0,
+    ptIncome: 0, ssGross: 0, pensionGross: 0, pensionNyExempt: false,
+    year: 2030, age: 62, inflation: 0.03, interestIncome: 0,
+  });
+  const solveWithInterest = solveGrossedUpWithdrawals({
+    netNeed: 60000, state: interestState, preSs: true, conversion: 0,
+    ptIncome: 0, ssGross: 0, pensionGross: 0, pensionNyExempt: false,
+    year: 2030, age: 62, inflation: 0.03, interestIncome: 20000,
+  });
+  test(
+    "solver: $20K cash interest raises tax",
+    solveWithInterest.tax > solveNoInterest.tax ? 1 : 0,
+    1,
+  );
+
+  // --- Couple householdSize floors at 2 (HSA family limit regression)
+  test(
+    "normalizeCoupleInputs: stored householdSize 1 floors to 2",
+    normalizeCoupleInputs({ shared: { householdSize: 1 } }).shared.householdSize,
+    2,
+  );
+
+  // ============================================================
+  // SINGLE-FILER TAX TESTS (verified against IRS Rev. Proc. 2025-32,
+  // CMS 2026 IRMAA, and NY single schedules)
+  // ============================================================
+  // $60K taxable, single, 2026: 10%x12,400 + 12%x38,000 + 22%x9,600
+  // = 1,240 + 4,560 + 2,112 = 7,912
+  test(
+    "fedOrdinaryTax single 2026: $60K taxable = $7,912",
+    fedOrdinaryTax(60000, 2026, 0.03, "single"),
+    7912,
+    pctEq,
+  );
+  // Single LTCG 2026: 0% bracket tops at $49,450
+  test(
+    "fedLtcgTax single 2026: $40K LTCG, $0 ordinary = $0 (0% bracket)",
+    fedLtcgTax(40000, 0, 2026, 0.03, "single"),
+    0,
+  );
+  test(
+    "fedLtcgTax single 2026: $60K LTCG, $0 ordinary = 15% x $10,550",
+    fedLtcgTax(60000, 0, 2026, 0.03, "single"),
+    (60000 - 49450) * 0.15,
+    pctEq,
+  );
+  // Single SS thresholds $25K/$34K; first-tier cap $4,500.
+  // SS $20K, other $30K -> provisional $40K: 0.85 x $6K + min($4.5K, $10K) = $9,600
+  test(
+    "taxableSS single: SS=$20K, other=$30K -> $9,600",
+    taxableSocialSecurity(20000, 30000, "single"),
+    9600,
+    pctEq,
+  );
+  // Same income taxed as single must exceed MFJ (narrower brackets, half
+  // the standard deduction): $100K ordinary, 2026.
+  test(
+    "totalTax: single > MFJ at $100K ordinary (2026)",
+    totalTax(100000, 0, 2026, 0, 0.03, 0, 0, 0, "single") >
+      totalTax(100000, 0, 2026, 0, 0.03, 0, 0, 0, "mfj")
+      ? 1
+      : 0,
+    1,
+  );
+  // Single senior deductions at $80K ordinary (22% bracket). The OBBBA
+  // bonus phases out above $75K single MAGI: $6,000 - 6% x $5,000 = $5,700.
+  // ($2,050 + $5,700) x 22% = $1,705 federal savings.
+  test(
+    "totalTax single: senior deductions save 22% x $7,750 at $80K (2026)",
+    totalTax(80000, 0, 2026, 0, 0.03, 0, 0, 0, "single") -
+      totalTax(80000, 0, 2026, 0, 0.03, 0, 0, 1, "single"),
+    1705,
+    pctEq,
+  );
+  // Single IRMAA 2026: $300K MAGI lands in the $205K-$500K tier;
+  // one enrollee: (446.30 + 83.30) x 12 = $6,355.20
+  test(
+    "IRMAA single 2026: $300K MAGI, 1 enrollee = $6,355",
+    computeIrmaaSurcharge(300000, 2026, 0.03, 1, "single"),
+    6355.2,
+    pctEq,
+  );
+  // NY default (no status arg) must still be the MFJ schedule — regression
+  // guard for every legacy call site.
+  test(
+    "nyStateTax default stays MFJ: $100K in 2024 = $4,284.75",
+    nyStateTax(100000, 2024, 0),
+    4284.75,
+    pctEq,
+  );
+  // NY single: $8,000 std ded and single brackets. $100K NY income, 2024:
+  // taxable 92,000 -> 8,500x4% + 3,200x4.5% + 2,200x5.25% + 66,750x5.5%
+  // + 11,350x6% = 340 + 144 + 115.50 + 3,671.25 + 681 = $4,951.75
+  test(
+    "nyStateTax single 2024: $100K (single schedule) = $4,951.75",
+    nyStateTax(100000, 2024, 0, "single"),
+    4951.75,
+    pctEq,
+  );
 
   // --- ACA: below 150% FPL = full subsidy (pays only ~$2K OOP floor)
   const lowMagiCost = estimateAcaHealthcareCost(
@@ -1168,13 +1295,14 @@ function runSelfTests() {
     },
   );
 
-  // --- Scenario E: IRMAA trigger year — high-income year should have irmaaSurcharge > 0
+  // --- Scenario E: IRMAA trigger — with the 2-year lookback, a high-MAGI
+  // conversion year at 65-66 should surface as a surcharge two years later.
   testScenario(
-    "IRMAA: post-65 high-income year charges surcharge to spending",
+    "IRMAA: high-MAGI year triggers surcharge (2-year lookback)",
     () => {
       const highIncInputs = {
         ...baseInputs,
-        conversionFinal: 150000, // force high MAGI during age 65-67 window
+        conversionFinal: 400000, // force very high MAGI during age 65-66 window
       };
       const r = simulate(highIncInputs);
       const irmaaYear = r.yearlyData.find(
@@ -1183,11 +1311,94 @@ function runSelfTests() {
       if (!irmaaYear)
         return {
           passed: false,
-          details: "no IRMAA trigger year found (expected at age 65-66)",
+          details: "no IRMAA trigger year found (expected at ~age 67-68)",
         };
       return {
         passed: irmaaYear.irmaaSurcharge > 0,
         details: `age ${irmaaYear.age}: irmaa=${irmaaYear.irmaaSurcharge}, magi=${Math.round(irmaaYear.magi)}`,
+      };
+    },
+  );
+
+  // --- Scenario E2: lookback timing — surcharge lands 2 years after the
+  // income spike, not in the spike year itself (once retired 2+ years).
+  testScenario(
+    "IRMAA lookback: surcharge reflects MAGI from two years earlier",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        currentAge: 60,
+        retirementAge: 61,
+        planThroughAge: 72,
+        ssAge: 70,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 500000, // ages 65-69 (until SS at 70)
+        balance401k: 3000000,
+      });
+      const at66 = r.yearlyData.find((d) => d.age === 66);
+      const at67 = r.yearlyData.find((d) => d.age === 67);
+      // Age 66 looks back to age 64 (low MAGI: no conversions) -> no surcharge.
+      // Age 67 looks back to age 65 (500K conversion) -> surcharge.
+      const ok = at66 && at67 && at66.irmaaSurcharge === 0 && at67.irmaaSurcharge > 0;
+      return {
+        passed: !!ok,
+        details: `age66 irmaa=${at66?.irmaaSurcharge}, age67 irmaa=${at67?.irmaaSurcharge}`,
+      };
+    },
+  );
+
+  // --- Scenario: single filer pays more tax than MFJ on identical inputs
+  testScenario(
+    "Filing status: single-filer plan pays more tax than MFJ (same inputs)",
+    () => {
+      const base = {
+        ...baseInputs,
+        currentAge: 60,
+        retirementAge: 61,
+        planThroughAge: 70,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+        conversionMid: 40000,
+        conversionFinal: 40000,
+      };
+      const asMfj = simulate({ ...base, filingStatus: "mfj" });
+      const asSingle = simulate({ ...base, filingStatus: "single" });
+      const ok =
+        asSingle.summary.totalTaxesPaid > asMfj.summary.totalTaxesPaid;
+      return {
+        passed: ok,
+        details: `single lifetime tax=${asSingle.summary.totalTaxesPaid}, MFJ=${asMfj.summary.totalTaxesPaid}`,
+      };
+    },
+  );
+
+  // --- Scenario: already-retired user (retirementAge <= currentAge)
+  testScenario(
+    "Already retired: currentAge 70 / retirementAge 65 produces a live plan",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        currentAge: 70,
+        retirementAge: 65,
+        planThroughAge: 80,
+        contrib401k: 0,
+        contribMatch: 0,
+        contribHsa: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+      });
+      const ok =
+        r.yearlyData.length === 11 &&
+        r.yearlyData[0].phase !== "accumulation" &&
+        r.summary.year1WithdrawalRate > 0;
+      return {
+        passed: ok,
+        details: `rows=${r.yearlyData.length}, phase[0]=${r.yearlyData[0]?.phase}, wr=${(r.summary.year1WithdrawalRate * 100).toFixed(1)}%`,
       };
     },
   );
@@ -1601,6 +1812,74 @@ function runSelfTests() {
     },
   );
 
+  // --- Cash-strategy penalty comparison: definitive guidance, not "can"
+  testScenario(
+    "Strategy compare: cashLast penalizes an early retiree that cashFirst spares",
+    () => {
+      // All penalty-free money sits in cash: "use cash first" covers the
+      // bridge cleanly, while "cash last" is forced through the 401k and
+      // must pay the 10% penalty — the order alone creates the cost.
+      const richBridge = {
+        ...baseInputs,
+        currentAge: 50,
+        retirementAge: 52,
+        planThroughAge: 62,
+        balanceCash: 800000,
+        balanceTaxable: 0,
+        balance401k: 800000,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+        cashStrategy: "cashLast",
+      };
+      const impact = compareCashStrategies(richBridge);
+      if (!impact) return { passed: false, details: "comparison returned null" };
+      const best = bestCashStrategyAlternative(impact, "cashLast");
+      const ok =
+        impact.cashLast.penaltyTotal > 0 &&
+        impact.cashFirst.penaltyTotal === 0 &&
+        best != null &&
+        best.penaltyTotal === 0;
+      return {
+        passed: ok,
+        details: `cashLast=${impact.cashLast.penaltyTotal}, cashFirst=${impact.cashFirst.penaltyTotal}, best=${best ? `${best.value}/${best.penaltyTotal}` : "none"}`,
+      };
+    },
+  );
+
+  testScenario(
+    "Strategy compare: penalized draws = 10x penalty (identity)",
+    () => {
+      const impact = compareCashStrategies({
+        ...baseInputs,
+        currentAge: 50,
+        retirementAge: 52,
+        planThroughAge: 60,
+        balanceCash: 0,
+        balanceTaxable: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+      });
+      if (!impact) return { passed: false, details: "comparison returned null" };
+      const c = impact.cashFirst;
+      const ok =
+        c.penaltyTotal > 0 &&
+        Math.abs(c.penalizedDraws - c.penaltyTotal * 10) <= 1;
+      return {
+        passed: ok,
+        details: `penaltyTotal=${c.penaltyTotal}, penalizedDraws=${c.penalizedDraws}`,
+      };
+    },
+  );
+
   // --- Cash withdrawal strategy & minimum reserve ---
   const reserveState = {
     bCash: 300000,
@@ -1863,188 +2142,6 @@ function runSelfTests() {
     },
   );
 
-  // --- Filing status: single-filer parameters
-  // 2026 single, $100K taxable: 12400@10% + 38000@12% + 49600@22% = $16,712
-  test(
-    "single filer 2026: $100K taxable ordinary tax = $16,712",
-    fedOrdinaryTax(100000, 2026, 0.03, "single"),
-    16712,
-    pctEq,
-  );
-  // Single provisional thresholds $25K/$34K: SS=$30K, other=$30K →
-  // provisional $45K → 0.85×11,000 + min(4,500, 15,000) = $13,850
-  test(
-    "single SS taxation: SS=$30K, other=$30K → $13,850 taxable",
-    taxableSocialSecurity(30000, 30000, "single"),
-    13850,
-    pctEq,
-  );
-  // Same income MFJ: provisional $45K → 0.85×1,000 + min(6,000, 15,000) = $6,850
-  test(
-    "mfj SS taxation: SS=$30K, other=$30K → $6,850 taxable",
-    taxableSocialSecurity(30000, 30000, "mfj"),
-    6850,
-    pctEq,
-  );
-  test(
-    "single IRMAA: $120K MAGI = tier 2 for one enrollee",
-    computeIrmaaSurcharge(120000, 2026, 0.03, 1, "single"),
-    (81.2 + 14.5) * 12,
-    pctEq,
-  );
-  test(
-    "single IRMAA: exactly $500K uses the top tier",
-    computeIrmaaSurcharge(500000, 2026, 0.03, 1, "single"),
-    (487 + 91) * 12,
-    pctEq,
-  );
-  // NY single 2024: $50K − $8K std ded = $42K taxable → $2,145
-  test(
-    "single NY 2024: $50K income = $2,145",
-    nyStateTax(50000, 2024, 0, "single"),
-    2145,
-    pctEq,
-  );
-
-  testScenario(
-    "Filing status: single filer pays materially more lifetime tax than MFJ",
-    () => {
-      const mfj = simulate({ ...baseInputs, filingStatus: "mfj" });
-      const single = simulate({ ...baseInputs, filingStatus: "single" });
-      return {
-        passed:
-          single.summary.totalTaxesPaid > mfj.summary.totalTaxesPaid * 1.1,
-        details: `single=${single.summary.totalTaxesPaid}, mfj=${mfj.summary.totalTaxesPaid}`,
-      };
-    },
-  );
-
-  // --- Roth ordering layers (IRC 408A(d)(4))
-  test(
-    "Roth layers: basis free, unseasoned conversion penalized",
-    rothEarlyPenaltyBase(
-      8000,
-      { contribBasis: 5000, vintages: [{ year: 2026, amount: 20000 }] },
-      2028,
-    ),
-    3000,
-  );
-  test(
-    "Roth layers: 5-year-seasoned conversion is penalty-free",
-    rothEarlyPenaltyBase(
-      8000,
-      { contribBasis: 0, vintages: [{ year: 2026, amount: 20000 }] },
-      2031,
-    ),
-    0,
-  );
-  test(
-    "Roth layers: earnings beyond layers are penalized",
-    rothEarlyPenaltyBase(
-      30000,
-      { contribBasis: 5000, vintages: [{ year: 2020, amount: 20000 }] },
-      2031,
-    ),
-    5000,
-  );
-
-  testScenario(
-    "Roth basis: early retiree spending contributions pays no penalty",
-    () => {
-      const r = simulate({
-        ...baseInputs,
-        currentAge: 50,
-        retirementAge: 52,
-        planThroughAge: 58,
-        balanceCash: 0,
-        balanceTaxable: 0,
-        balance401k: 0,
-        balanceTradIra: 0,
-        balanceHsa: 0,
-        balanceRoth: 400000,
-        rothBasis: 400000,
-        contrib401k: 0,
-        contribMatch: 0,
-        contribHsa: 0,
-        partTimeIncome: 0,
-        partTimeYears: 0,
-        conversionBridge: 0,
-        ssIncome: 0,
-      });
-      const row = r.yearlyData.find((d) => d.age === 52);
-      return {
-        passed: row.fromRoth > 0 && row.earlyPenalty === 0,
-        details: `fromRoth=${row.fromRoth}, penalty=${row.earlyPenalty}`,
-      };
-    },
-  );
-
-  // --- SEPP / 72(t)
-  testScenario(
-    "SEPP: amortized stream eliminates the penalty when it covers the need",
-    () => {
-      const base = {
-        ...baseInputs,
-        currentAge: 50,
-        retirementAge: 52,
-        planThroughAge: 60,
-        balanceCash: 0,
-        balanceTaxable: 0,
-        balanceRoth: 0,
-        balanceHsa: 0,
-        balanceTradIra: 0,
-        balance401k: 1000000,
-        baseExpenses: 40000,
-        healthcarePre65: 10000,
-        partTimeIncome: 0,
-        partTimeYears: 0,
-        conversionBridge: 0,
-        ssIncome: 20000,
-      };
-      const withSepp = simulate({ ...base, useSepp: true, seppRate: 0.05 });
-      const withoutSepp = simulate(base);
-      const rowW = withSepp.yearlyData.find((d) => d.age === 52);
-      const rowWo = withoutSepp.yearlyData.find((d) => d.age === 52);
-      return {
-        passed:
-          rowW.earlyPenalty === 0 &&
-          rowWo.earlyPenalty > 0 &&
-          rowW.from401k > 0,
-        details: `sepp: penalty=${rowW.earlyPenalty} draw=${rowW.from401k}; no sepp: penalty=${rowWo.earlyPenalty}`,
-      };
-    },
-  );
-
-  // --- IRMAA two-year lookback
-  testScenario(
-    "IRMAA lookback: pre-65 conversions surface as surcharges after 65",
-    () => {
-      const r = simulate({
-        ...baseInputs,
-        currentAge: 60,
-        retirementAge: 61,
-        planThroughAge: 68,
-        balance401k: 2000000,
-        balanceCash: 200000,
-        balanceTaxable: 300000,
-        balanceTradIra: 0,
-        conversionBridge: 0,
-        conversionMid: 300000,
-        conversionFinal: 0,
-        ssIncome: 30000,
-        ssAge: 67,
-        partTimeIncome: 0,
-        partTimeYears: 0,
-      });
-      const at63 = r.yearlyData.find((d) => d.age === 63);
-      const at65 = r.yearlyData.find((d) => d.age === 65);
-      return {
-        passed: at63.magi > 218000 && at65.irmaaSurcharge > 0,
-        details: `magi@63=${at63.magi}, surcharge@65=${at65.irmaaSurcharge}`,
-      };
-    },
-  );
-
   const passed = results.filter((r) => r.passed).length;
   const failed = results.filter((r) => !r.passed).length;
   return { passed, failed, total: results.length, results };
@@ -2099,19 +2196,16 @@ function simulate(inputs, options = {}) {
     cashStrategy = "cashFirst",
     cashReserveFloor = 0,
     allowReserveAsLastResort = false,
-    filingStatus = "mfj",
-    rothBasis = 0,
-    useSepp = false,
-    seppRate = 0.05,
   } = inputs;
 
-  // Guard against invalid inputs during manual typing
+  // Guard against invalid inputs during manual typing. A retirement age at or
+  // below the current age is VALID — it means the user is retiring this year
+  // or is already retired, and year 1 of the projection is a retirement year.
   if (
     !retirementAge ||
     !currentAge ||
     !planThroughAge ||
-    retirementAge <= currentAge ||
-    planThroughAge < retirementAge
+    planThroughAge < Math.max(currentAge, retirementAge)
   ) {
     // Return empty result if inputs are clearly invalid
     return {
@@ -2134,6 +2228,10 @@ function simulate(inputs, options = {}) {
   const currentYear = PROJECTION_START_YEAR;
   const retirementYear = currentYear + (retirementAge - currentAge);
   const endYear = currentYear + (planThroughAge - currentAge);
+  // Filing status drives federal/NY brackets and deductions, SS taxation
+  // thresholds, NIIT, senior deductions, and IRMAA tiers. Defaults to MFJ
+  // for backward compatibility with direct engine calls.
+  const filingStatus = inputs.filingStatus === "single" ? "single" : "mfj";
   const effectiveRmdStartAge =
     rmdStartAge ?? defaultRmdStartAge(currentAge, currentYear);
   // Benefits cannot start before 62 even if the user types a lower age.
@@ -2170,24 +2268,11 @@ function simulate(inputs, options = {}) {
   let totalConverted = 0;
   let totalUnmetCashFlow = unpaidDebt;
   let depleted = unpaidDebt > 1;
+  // Projected MAGI by year — real IRMAA is based on MAGI from two years
+  // earlier, so retirement years look back where a projected MAGI exists.
+  const magiByYear = {};
   let priorYearEndTotal = bCash + bTaxable + b401k + bTradIra + bRoth + bHsa - unpaidDebt;
   let priorPriorYearEndTotal = 0;
-  // Modeled MAGI per retirement year, for the IRMAA two-year lookback.
-  const magiByYear = new Map();
-  // Roth ordering layers: user-entered contribution basis + conversion
-  // vintages created below. Basis is capped at the starting balance.
-  const rothLayers = {
-    contribBasis: Math.max(0, Math.min(rothBasis || 0, balanceRoth)),
-    vintages: [],
-  };
-  // 72(t) SEPP: payment is fixed from the first retirement year's starting
-  // tax-deferred balance and forced until the later of 5 years or age 59½
-  // (busting the schedule is not modeled — payments always continue).
-  let seppPayment = null;
-  const seppLockEndAge =
-    useSepp && retirementAge < 59.5
-      ? Math.max(retirementAge + 5, 59.5)
-      : null;
 
   for (let year = currentYear; year <= endYear; year++) {
     const age = currentAge + (year - currentYear);
@@ -2310,17 +2395,6 @@ function simulate(inputs, options = {}) {
         ? Math.round(pensionIncome * pensionMult)
         : 0;
 
-    // 72(t) SEPP stream: fix the payment in the first retirement year.
-    if (
-      seppLockEndAge !== null &&
-      seppPayment === null &&
-      age >= retirementAge
-    ) {
-      seppPayment = seppAmortizedPayment(b401k + bTradIra, seppRate, age);
-    }
-    const seppActive =
-      seppLockEndAge !== null && seppPayment > 0 && age < seppLockEndAge;
-
     // Determine Roth conversion target based on age phase
     let conversion = 0;
     let strategy = "";
@@ -2383,6 +2457,21 @@ function simulate(inputs, options = {}) {
       allowReserve: allowReserveAsLastResort,
     };
 
+    // Taxable interest on the Cash/HYSA balance (start-of-year balance).
+    // Counted as ordinary income, provisional income, and MAGI.
+    const cashInterestIncome = Math.max(0, bCash * cashReturn);
+    // People 65+ for the senior standard deductions. A single filer counts
+    // only themselves; MFJ mirrors the IRMAA enrollee assumption (household
+    // members share the modeled age).
+    const seniors65 =
+      age >= 65
+        ? filingStatus === "single"
+          ? 1
+          : Math.max(1, Math.min(2, householdSize))
+        : 0;
+    const medicareEnrollees =
+      filingStatus === "single" ? 1 : Math.min(2, householdSize);
+
     // === Converged solve: withdrawals, tax, RMD, and IRMAA all converge together ===
     // Outer loop: iterate IRMAA (and ACA pre-65) until spending stabilizes.
     // Inner: solveGrossedUpWithdrawals handles tax gross-up AND RMD internally.
@@ -2393,21 +2482,6 @@ function simulate(inputs, options = {}) {
     let finalSpending = spending;
     let hsaWithdrawal = 0;
 
-    // IRMAA lookback: real Medicare premiums for year Y are set from the
-    // tax return two years prior. When the projection has a modeled MAGI for
-    // Y-2, the surcharge is FIXED before the solve (no iteration needed).
-    // Only the first Medicare years, whose lookback predates modeled
-    // retirement income, fall back to the same-year iterative approximation.
-    const irmaaLookbackMagi = age >= 65 ? magiByYear.get(year - 2) : undefined;
-    if (age >= 65 && irmaaLookbackMagi !== undefined) {
-      irmaaSurcharge = computeIrmaaSurcharge(
-        irmaaLookbackMagi,
-        year,
-        inflation,
-        Math.min(2, householdSize),
-        filingStatus,
-      );
-    }
     for (let outerIter = 0; outerIter < 4; outerIter++) {
       // Effective spending includes IRMAA surcharge (post-65)
       // ACA (pre-65) is handled below as a separate branch
@@ -2433,38 +2507,43 @@ function simulate(inputs, options = {}) {
         year,
         age,
         inflation,
-        minimumRmd: seppActive
-          ? Math.max(rmdAmount, seppPayment)
-          : rmdAmount,
+        minimumRmd: rmdAmount,
         penaltyFree401k,
         cashPolicy,
+        interestIncome: cashInterestIncome,
+        seniors65,
         filingStatus,
-        rothLayers,
-        seppExempt: seppActive ? seppPayment : 0,
       });
 
       finalSpending = effectiveSpending;
       hsaWithdrawal = hsaOffset;
 
-      // Pre-65 has no IRMAA; a known lookback MAGI means the surcharge was
-      // fixed before the solve — either way, one pass suffices.
-      if (age < 65 || irmaaLookbackMagi !== undefined) break;
+      // Only post-65 IRMAA iteration matters here; break early for pre-65
+      if (age < 65) break;
 
       // Recompute MAGI from converged solve
       const postOrdIncome =
         ptIncome +
         solve.taxableSs +
         pensionGross +
+        cashInterestIncome +
         solve.withdrawals.w401k +
         solve.withdrawals.wIra +
         conversion;
       const postMagi = postOrdIncome + solve.realizedGain;
 
+      // Real IRMAA uses MAGI from two years earlier. Use the projected MAGI
+      // from that year when the projection has one (i.e. the household has
+      // been retired 2+ years); otherwise fall back to same-year MAGI, since
+      // working-year MAGI (salary) is out of scope for this model.
+      const lookbackMagi = magiByYear[year - 2];
+      const irmaaMagi = lookbackMagi != null ? lookbackMagi : postMagi;
+
       const newIrmaa = computeIrmaaSurcharge(
-        postMagi,
+        irmaaMagi,
         year,
         inflation,
-        Math.min(2, householdSize),
+        medicareEnrollees,
         filingStatus,
       );
 
@@ -2510,14 +2589,12 @@ function simulate(inputs, options = {}) {
         year,
         age,
         inflation,
-        minimumRmd: seppActive
-          ? Math.max(rmdAmount, seppPayment)
-          : rmdAmount,
+        minimumRmd: rmdAmount,
         penaltyFree401k,
         cashPolicy,
+        interestIncome: cashInterestIncome,
+        seniors65,
         filingStatus,
-        rothLayers,
-        seppExempt: seppActive ? seppPayment : 0,
       });
     }
 
@@ -2537,8 +2614,6 @@ function simulate(inputs, options = {}) {
     bTaxable = Math.max(0, bTaxable - wTaxable);
     bTaxableBasis = Math.max(0, bTaxableBasis - basisReduction);
     b401k = Math.max(0, b401k - w401k - conversion);
-    consumeRothLayers(wRoth, rothLayers);
-    if (conversion > 0) rothLayers.vintages.push({ year, amount: conversion });
     bRoth = bRoth + conversion;
     bTradIra = Math.max(0, bTradIra - wIra);
     bRoth = Math.max(0, bRoth - wRoth);
@@ -2564,9 +2639,15 @@ function simulate(inputs, options = {}) {
 
     // MAGI for display/debug (reflects final withdrawals)
     const finalOrdIncome =
-      ptIncome + taxableSs + pensionGross + w401k + wIra + conversion;
+      ptIncome +
+      taxableSs +
+      pensionGross +
+      cashInterestIncome +
+      w401k +
+      wIra +
+      conversion;
     const magi = finalOrdIncome + realizedGain;
-    magiByYear.set(year, magi);
+    magiByYear[year] = magi;
 
     // Grow balances
     bCash *= 1 + cashReturn;
@@ -2635,11 +2716,25 @@ function simulate(inputs, options = {}) {
     });
   }
 
-  const retirementData = yearlyData.find((d) => d.age === retirementAge);
+  const currentTotal =
+    inputs.balanceCash +
+    inputs.balanceTaxable +
+    inputs.balance401k +
+    inputs.balanceTradIra +
+    inputs.balanceRoth +
+    inputs.balanceHsa -
+    (inputs.creditCardDebt || 0);
+  // First retirement-year row. For an already-retired user (retirementAge <=
+  // currentAge) there is no row at exactly retirementAge, so fall back to the
+  // first distribution row (year 1 of the projection).
+  const retirementData =
+    yearlyData.find((d) => d.age === retirementAge) ??
+    yearlyData.find((d) => d.phase !== "accumulation") ??
+    null;
   const endData = yearlyData[yearlyData.length - 1];
   const year1Data = retirementData;
-  // Start-of-retirement balance: use accumulation year end (age = retirementAge - 1)
-  // Guard against invalid retirement ages (e.g., during manual typing)
+  // Start-of-retirement balance: use accumulation year end (age = retirementAge - 1).
+  // Already-retired users have no accumulation years — use today's balances.
   const startOfRetirement =
     retirementAge > currentAge
       ? yearlyData.find((d) => d.age === retirementAge - 1)
@@ -2647,9 +2742,11 @@ function simulate(inputs, options = {}) {
   const startBalance =
     startOfRetirement && startOfRetirement.total > 0
       ? startOfRetirement.total
-      : year1Data && year1Data.total > 0
-        ? year1Data.total
-        : 1; // Avoid divide-by-zero
+      : retirementAge <= currentAge && currentTotal > 0
+        ? currentTotal
+        : year1Data && year1Data.total > 0
+          ? year1Data.total
+          : 1; // Avoid divide-by-zero
 
   return {
     yearlyData,
@@ -2666,14 +2763,7 @@ function simulate(inputs, options = {}) {
       totalUnmetCashFlow: Math.round(totalUnmetCashFlow),
       depleted,
       rmdStartAge: effectiveRmdStartAge,
-      currentTotal:
-        inputs.balanceCash +
-        inputs.balanceTaxable +
-        inputs.balance401k +
-        inputs.balanceTradIra +
-        inputs.balanceRoth +
-        inputs.balanceHsa -
-        (inputs.creditCardDebt || 0),
+      currentTotal,
     },
   };
 }
@@ -2857,8 +2947,11 @@ function solveCoupleGrossedUpWithdrawals({
   inflation,
   penaltyFree401k = { primary: false, spouse: false },
   cashPolicy = CASH_POLICY_DEFAULT,
-  rothLayers = { primary: null, spouse: null },
+  // Taxable interest earned on the shared Cash/HYSA balance this year.
+  interestIncome = 0,
 }) {
+  const seniors65 =
+    (ages.primary >= 65 ? 1 : 0) + (ages.spouse >= 65 ? 1 : 0);
   let tax = 0;
   let withdrawals = doCoupleWithdrawalWaterfall(0, state, preHouseholdSs, rmds, cashPolicy);
   let realizedGain = 0;
@@ -2893,6 +2986,7 @@ function solveCoupleGrossedUpWithdrawals({
     const incomeBeforeSs =
       partTimeGross +
       pensionGross +
+      interestIncome +
       taxDeferredWithdrawals +
       totalConversions +
       realizedGain;
@@ -2901,6 +2995,7 @@ function solveCoupleGrossedUpWithdrawals({
       partTimeGross +
       taxableSs +
       pensionGross +
+      interestIncome +
       taxDeferredWithdrawals +
       totalConversions;
 
@@ -2924,13 +3019,10 @@ function solveCoupleGrossedUpWithdrawals({
 
     // IRC §72(t) 10% early-distribution penalty, applied per spouse.
     // See solveGrossedUpWithdrawals for the Rule-of-55 / IRA / Roth treatment.
-    const personPenalty = (age, ruleOf55, w401k, wIra, wRoth, layers) => {
+    const personPenalty = (age, ruleOf55, w401k, wIra, wRoth) => {
       if (age >= 59.5) return 0;
       const penalized401k = ruleOf55 && age >= 55 ? 0 : w401k;
-      const penalizedRoth = layers
-        ? rothEarlyPenaltyBase(wRoth, layers, year)
-        : wRoth;
-      return 0.1 * (penalized401k + wIra + penalizedRoth);
+      return 0.1 * (penalized401k + wIra + wRoth);
     };
     earlyPenalty =
       personPenalty(
@@ -2939,7 +3031,6 @@ function solveCoupleGrossedUpWithdrawals({
         withdrawals.primary401k,
         withdrawals.primaryIra,
         withdrawals.primaryRoth,
-        rothLayers.primary,
       ) +
       personPenalty(
         ages.spouse,
@@ -2947,7 +3038,6 @@ function solveCoupleGrossedUpWithdrawals({
         withdrawals.spouse401k,
         withdrawals.spouseIra,
         withdrawals.spouseRoth,
-        rothLayers.spouse,
       );
 
     const newTax =
@@ -2959,6 +3049,7 @@ function solveCoupleGrossedUpWithdrawals({
         inflation,
         taxableSs,
         nyPensionAnnuityExclusion,
+        seniors65,
       ) + earlyPenalty;
     if (Math.abs(newTax - tax) < 1) {
       tax = newTax;
@@ -3033,26 +3124,9 @@ function simulateCouple(coupleInputs, options = {}) {
   let totalConverted = 0;
   let totalUnmetCashFlow = unpaidDebt;
   let depleted = unpaidDebt > 1;
+  // Projected household MAGI by year, for the IRMAA two-year lookback.
+  const coupleMagiByYear = {};
   let priorPriorYearEndTotal = 0;
-  // Modeled household MAGI per retirement year (IRMAA two-year lookback).
-  const magiByYear = new Map();
-  // Per-spouse Roth ordering layers (IRC 408A(d)(4)).
-  const coupleRothLayers = {
-    primary: {
-      contribBasis: Math.max(
-        0,
-        Math.min(primary.rothBasis || 0, primary.balanceRoth),
-      ),
-      vintages: [],
-    },
-    spouse: {
-      contribBasis: Math.max(
-        0,
-        Math.min(spouse.rothBasis || 0, spouse.balanceRoth),
-      ),
-      vintages: [],
-    },
-  };
   let priorYearEndTotal =
     cash +
     taxable +
@@ -3359,6 +3433,8 @@ function simulateCouple(coupleInputs, options = {}) {
           : Math.round(Math.max(0, shared.cashReserveFloor || 0) * inflMult),
       allowReserve: !!shared.allowReserveAsLastResort,
     };
+    // Taxable interest on the shared Cash/HYSA balance (start-of-year).
+    const coupleCashInterest = Math.max(0, cash * shared.cashReturn);
     let netNeed = Math.max(0, spending - hsaWithdrawal - incomeTotal);
     let solve = solveCoupleGrossedUpWithdrawals({
       netNeed,
@@ -3391,7 +3467,7 @@ function simulateCouple(coupleInputs, options = {}) {
       inflation: shared.inflation,
       penaltyFree401k: couplePenaltyFree401k,
       cashPolicy: coupleCashPolicy,
-      rothLayers: coupleRothLayers,
+      interestIncome: coupleCashInterest,
     });
     let acaSubsidy = 0;
     const pre65HealthcareSticker =
@@ -3448,7 +3524,7 @@ function simulateCouple(coupleInputs, options = {}) {
         inflation: shared.inflation,
         penaltyFree401k: couplePenaltyFree401k,
         cashPolicy: coupleCashPolicy,
-        rothLayers: coupleRothLayers,
+        interestIncome: coupleCashInterest,
       });
     }
 
@@ -3457,13 +3533,14 @@ function simulateCouple(coupleInputs, options = {}) {
       const medicareEnrollees =
         (primaryAge >= 65 ? 1 : 0) + (spouseAge >= 65 ? 1 : 0);
       const baseSpendingBeforeIrmaa = spending;
-      // Two-year lookback (see individual engine note). With a known Y-2
-      // MAGI the surcharge is fixed and needs exactly one re-solve to fund it.
-      const irmaaLookbackMagi = magiByYear.get(year - 2);
       for (let outerIter = 0; outerIter < 4; outerIter++) {
+        // Real IRMAA looks back two years; use the projected MAGI from that
+        // year when the projection has one, else same-year MAGI (working-year
+        // salary MAGI is out of scope for this model).
+        const lookbackMagi = coupleMagiByYear[year - 2];
         const newIrmaa = computeIrmaaSurcharge(
-          irmaaLookbackMagi !== undefined
-            ? irmaaLookbackMagi
+          lookbackMagi != null
+            ? lookbackMagi
             : solve.ordIncome + solve.realizedGain,
           year,
           shared.inflation,
@@ -3515,7 +3592,7 @@ function simulateCouple(coupleInputs, options = {}) {
           inflation: shared.inflation,
           penaltyFree401k: couplePenaltyFree401k,
           cashPolicy: coupleCashPolicy,
-          rothLayers: coupleRothLayers,
+          interestIncome: coupleCashInterest,
         });
       }
       spending = Math.round(baseSpendingBeforeIrmaa + irmaaSurcharge);
@@ -3539,12 +3616,6 @@ function simulateCouple(coupleInputs, options = {}) {
     );
     primaryState.bTradIra = Math.max(0, primaryState.bTradIra - withdrawals.primaryIra);
     spouseState.bTradIra = Math.max(0, spouseState.bTradIra - withdrawals.spouseIra);
-    consumeRothLayers(withdrawals.primaryRoth, coupleRothLayers.primary);
-    consumeRothLayers(withdrawals.spouseRoth, coupleRothLayers.spouse);
-    if (primaryConversion > 0)
-      coupleRothLayers.primary.vintages.push({ year, amount: primaryConversion });
-    if (spouseConversion > 0)
-      coupleRothLayers.spouse.vintages.push({ year, amount: spouseConversion });
     primaryState.bRoth = Math.max(
       0,
       primaryState.bRoth + primaryConversion - withdrawals.primaryRoth,
@@ -3589,13 +3660,12 @@ function simulateCouple(coupleInputs, options = {}) {
 
     totalTaxesPaid += tax;
     totalConverted += primaryConversion + spouseConversion;
+    coupleMagiByYear[year] = solve.ordIncome + realizedGain;
 
     const total = totalAssets();
     priorPriorYearEndTotal = priorYearEndTotal;
     priorYearEndTotal = total;
     if ((total <= 0 || unmetCashFlow > 1) && !depleted) depleted = true;
-
-    magiByYear.set(year, solve.ordIncome + realizedGain);
 
     let phase = "bridge";
     if (primarySs + spouseSs > 0) phase = "ss";
@@ -3761,11 +3831,15 @@ const TERM_HELP = {
   magi:
     "Modified Adjusted Gross Income. A tax-income measure used for ACA subsidies, IRMAA, and other thresholds. Roth conversions increase MAGI.",
   mfj:
-    "Married Filing Jointly. The tax model uses married-joint federal brackets and thresholds.",
+    "Married Filing Jointly. Couple mode always uses married-joint brackets and thresholds; Individual mode uses your selected filing status (Single or Married joint).",
   niit:
-    "Net Investment Income Tax. A 3.8% surtax on investment income above the $250K MFJ MAGI threshold.",
+    "Net Investment Income Tax. A 3.8% surtax on investment income above the MAGI threshold: $250K married filing jointly, $200K single.",
   rmd:
     "Required Minimum Distribution. Mandatory withdrawals from tax-deferred retirement accounts after the applicable start age.",
+  ruleOf55:
+    "An IRS exception to the 10% early-withdrawal penalty. If you leave your job in or after the calendar year you turn 55, withdrawals from THAT employer's 401k/403b are penalty-free. It never applies to IRAs or to old employers' plans, and the plan must allow post-separation withdrawals.",
+  sepp:
+    "Substantially Equal Periodic Payments (IRS rule 72(t)). A way to take penalty-free withdrawals from an IRA before 59½ by committing to a fixed payment schedule for at least 5 years or until 59½, whichever is longer. Breaking the schedule triggers back-penalties. Not modeled by this tool — discuss with a professional.",
 };
 
 function TermInfo({ text }) {
@@ -4263,7 +4337,6 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
           [`${planLabel} Balance`, fmtMoney(person.balance401k)],
           ["Traditional IRA", fmtMoney(person.balanceTradIra)],
           ["Roth IRA", fmtMoney(person.balanceRoth)],
-          ["Roth Contributions to Date", fmtMoney(person.rothBasis || 0)],
           ["HSA", fmtMoney(person.balanceHsa)],
         ],
       },
@@ -4292,10 +4365,10 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
         title: `${title} Strategy`,
         rows: [
           ["RMD Start Age", fmtNum(person.rmdStartAge || defaultRmdStartAge(person.currentAge))],
-          ["Roth Conversion Ages 55-59", fmtMoney(person.conversionBridge)],
-          ["Roth Conversion Ages 60-64", fmtMoney(person.conversionMid)],
-          ["Roth Conversion Ages 65 to SS", fmtMoney(person.conversionFinal)],
-          ["Healthcare Pre-65", fmtMoney(person.healthcarePre65)],
+          ["Roth Conversion: retirement-59 / Year", fmtMoney(person.conversionBridge)],
+          ["Roth Conversion: Ages 60-64 / Year", fmtMoney(person.conversionMid)],
+          ["Roth Conversion: 65 until SS / Year", fmtMoney(person.conversionFinal)],
+          ["Healthcare before 65", fmtMoney(person.healthcarePre65)],
           ["Healthcare 65+", fmtMoney(person.healthcarePost65)],
         ],
       },
@@ -4351,15 +4424,15 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
     {
       title: "Timing",
       rows: [
-        ["Current Age", fmtNum(exportInputs.currentAge)],
-        ["Retirement Age", fmtNum(exportInputs.retirementAge)],
-        ["Plan Through Age", fmtNum(exportInputs.planThroughAge)],
         [
           "Filing Status",
           exportInputs.filingStatus === "mfj"
             ? "Married filing jointly"
             : "Single",
         ],
+        ["Current Age", fmtNum(exportInputs.currentAge)],
+        ["Retirement Age", fmtNum(exportInputs.retirementAge)],
+        ["Plan Through Age", fmtNum(exportInputs.planThroughAge)],
       ],
     },
     {
@@ -4371,7 +4444,6 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
         ["401k / 403b", fmtMoney(exportInputs.balance401k)],
         ["Traditional IRA", fmtMoney(exportInputs.balanceTradIra)],
         ["Roth IRA", fmtMoney(exportInputs.balanceRoth)],
-        ["Roth Contributions to Date", fmtMoney(exportInputs.rothBasis || 0)],
         ["HSA", fmtMoney(exportInputs.balanceHsa)],
         ["Credit Card Debt", fmtMoney(exportInputs.creditCardDebt)],
       ],
@@ -4444,9 +4516,9 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
     {
       title: "Roth Conversions",
       rows: [
-        ["Ages 55-59 / Year", fmtMoney(exportInputs.conversionBridge)],
+        ["Retirement through 59 / Year", fmtMoney(exportInputs.conversionBridge)],
         ["Ages 60-64 / Year", fmtMoney(exportInputs.conversionMid)],
-        ["Ages 65 to SS / Year", fmtMoney(exportInputs.conversionFinal)],
+        ["Age 65 until SS / Year", fmtMoney(exportInputs.conversionFinal)],
       ],
     },
     {
@@ -4861,59 +4933,717 @@ function SpendableCashLedger({ rows }) {
   );
 }
 
+// Small color chip matching the series color used in the chart + legend.
+function SeriesSwatch({ color }) {
+  return (
+    <span
+      className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm border border-black/10"
+      style={{ background: color }}
+      aria-hidden="true"
+    />
+  );
+}
+
+// Chart hover tooltip, shared by the portfolio-composition and cash-flow
+// charts. Rendered as a table with a color swatch per row (matching the
+// legend), grouped into income vs. account withdrawals on the cash-flow
+// chart, with subtotals and the spending+tax "Need" breakdown.
 function CashFlowTooltip({ active, payload, isCouple, showNeedBreakdown = false }) {
   if (!active || !payload?.length) return null;
   const row = payload[0].payload;
-  const visiblePayload = payload.filter((item) => item.value != null && item.value !== 0);
+  const visiblePayload = payload.filter(
+    (item) => item.value != null && item.value !== 0,
+  );
+  const seriesColor = (item) => item.color || item.fill || "#64748b";
+  const NEED_NAME = "Need (Spending + Tax)";
+  const INCOME_NAMES = new Set(["Part-Time", "Social Security", "Pension"]);
+
+  const incomeItems = [];
+  const accountItems = [];
+  const spendingItems = []; // "Annual Spending" line on the composition chart
+  let needItem = null;
+  for (const item of visiblePayload) {
+    const name = String(item.name ?? item.dataKey);
+    if (name === NEED_NAME) needItem = item;
+    else if (name === "Annual Spending") spendingItems.push(item);
+    else if (INCOME_NAMES.has(name)) incomeItems.push(item);
+    else accountItems.push(item);
+  }
+  const sum = (items) => items.reduce((acc, i) => acc + (i.value || 0), 0);
+
+  const seriesRow = (item) => (
+    <tr key={item.dataKey}>
+      <td className="py-0.5 pr-4">
+        <span className="inline-flex items-center gap-1.5 text-slate-600">
+          <SeriesSwatch color={seriesColor(item)} />
+          {item.name || item.dataKey}
+        </span>
+      </td>
+      <td className="py-0.5 text-right font-mono tabular-nums text-slate-900">
+        {fmtMoneyFull(item.value)}
+      </td>
+    </tr>
+  );
+  const groupHeader = (label) => (
+    <tr>
+      <td
+        colSpan={2}
+        className="pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400"
+      >
+        {label}
+      </td>
+    </tr>
+  );
+  const subtotalRow = (label, value, keySuffix) => (
+    <tr key={`subtotal-${keySuffix}`} className="border-t border-slate-200">
+      <td className="py-0.5 pr-4 pl-4 text-slate-500">{label}</td>
+      <td className="py-0.5 text-right font-mono tabular-nums font-semibold text-slate-900">
+        {fmtMoneyFull(value)}
+      </td>
+    </tr>
+  );
+
   return (
     <div className="max-w-sm rounded border border-slate-300 bg-white p-3 text-xs shadow-lg">
-      <div className="mb-2 font-semibold text-slate-900">
+      <div className="mb-1.5 font-semibold text-slate-900">
         {formatYearAgeLabel(row, isCouple)}
       </div>
-      <div className="space-y-1">
-        {visiblePayload.map((item) => (
-          <div key={item.dataKey} className="flex items-center justify-between gap-4">
-            <span className="text-slate-600">{item.name || item.dataKey}</span>
-            <span className="font-mono text-slate-900">{fmtMoneyFull(item.value)}</span>
-          </div>
-        ))}
-      </div>
-      {showNeedBreakdown && row.spending > 0 && (
-        <div className="mt-2 border-t border-slate-200 pt-2 space-y-0.5">
-          <div className="flex items-center justify-between gap-4">
-            <span className="text-slate-600">Need = Spending</span>
-            <span className="font-mono text-slate-900">
-              {fmtMoneyFull(row.spending)}
-            </span>
-          </div>
-          <div className="flex items-center justify-between gap-4">
-            <span className="text-slate-600">
-              + Tax
-              {row.earlyPenalty > 0
-                ? ` (incl. ${fmtMoneyFull(row.earlyPenalty)} penalty)`
-                : ""}
-            </span>
-            <span className="font-mono text-slate-900">
-              {fmtMoneyFull(row.tax)}
-            </span>
-          </div>
-          {row.conversion > 0 && (
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-indigo-700">
-                Roth conversion (taxed, not spending)
-              </span>
-              <span className="font-mono text-indigo-700">
-                {fmtMoneyFull(row.conversion)}
-              </span>
-            </div>
+      <table className="w-full border-collapse text-xs">
+        <tbody>
+          {showNeedBreakdown ? (
+            <>
+              {incomeItems.length > 0 && groupHeader("Income")}
+              {incomeItems.map(seriesRow)}
+              {incomeItems.length > 1 &&
+                subtotalRow("Income total", sum(incomeItems), "income")}
+              {accountItems.length > 0 && groupHeader("Withdrawn from accounts")}
+              {accountItems.map(seriesRow)}
+              {accountItems.length > 1 &&
+                subtotalRow("Withdrawals total", sum(accountItems), "accounts")}
+            </>
+          ) : (
+            <>
+              {accountItems.map(seriesRow)}
+              {accountItems.length > 1 &&
+                row.total != null &&
+                subtotalRow("Total portfolio", row.total, "portfolio")}
+              {[...incomeItems, ...spendingItems].map(seriesRow)}
+            </>
           )}
-        </div>
+        </tbody>
+      </table>
+      {showNeedBreakdown && row.spending > 0 && (
+        <table className="mt-2 w-full border-collapse border-t border-slate-200 pt-2 text-xs">
+          <tbody>
+            <tr>
+              <td className="pt-1.5 pr-4 pb-0.5">
+                <span className="inline-flex items-center gap-1.5 font-semibold text-slate-900">
+                  <SeriesSwatch
+                    color={needItem ? seriesColor(needItem) : "#ef4444"}
+                  />
+                  {NEED_NAME}
+                </span>
+              </td>
+              <td className="pt-1.5 pb-0.5 text-right font-mono tabular-nums font-semibold text-slate-900">
+                {fmtMoneyFull(row.spending + row.tax)}
+              </td>
+            </tr>
+            <tr>
+              <td className="py-0.5 pr-4 pl-4 text-slate-500">= Spending</td>
+              <td className="py-0.5 text-right font-mono tabular-nums text-slate-900">
+                {fmtMoneyFull(row.spending)}
+              </td>
+            </tr>
+            <tr>
+              <td className="py-0.5 pr-4 pl-4 text-slate-500">
+                + Tax
+                {row.earlyPenalty > 0
+                  ? ` (incl. ${fmtMoneyFull(row.earlyPenalty)} penalty)`
+                  : ""}
+              </td>
+              <td className="py-0.5 text-right font-mono tabular-nums text-slate-900">
+                {fmtMoneyFull(row.tax)}
+              </td>
+            </tr>
+            {row.conversion > 0 && (
+              <tr>
+                <td className="py-0.5 pr-4 text-indigo-700">
+                  <span className="inline-flex items-center gap-1.5">
+                    <SeriesSwatch color="#6366f1" />
+                    Roth conversion (taxed, not spending)
+                  </span>
+                </td>
+                <td className="py-0.5 text-right font-mono tabular-nums text-indigo-700">
+                  {fmtMoneyFull(row.conversion)}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       )}
       {isCouple && row.ownerDetails && (
         <div className="mt-3 border-t border-slate-200 pt-2">
           <CoupleOwnerDetailGrid ownerDetails={row.ownerDetails} />
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================
+// EARLY-RETIREMENT ACCESS STRATEGY (Rule of 55 / pre-59½ bridge)
+// ============================================================
+// Personalized guidance for plans that retire before 59½: whether the Rule
+// of 55 applies, which accounts carry penalties, and how the projection
+// actually funds the bridge years. All numbers come from the same engine
+// rows that drive the charts and year-by-year table.
+
+function EarlyAccessStrategyPanel({
+  displayInputs,
+  results,
+  isCouple,
+  couple,
+  adjust,
+  showRealDollars,
+  maxSustainableSpending,
+  cashStrategyImpact = null,
+}) {
+  const earliestRetireAge = displayInputs.retirementAge;
+  if (earliestRetireAge >= 59.5) return null;
+
+  // Definitive cash-order comparison (same engine, all four orders).
+  const activeStrategy = displayInputs.cashStrategy || "cashFirst";
+  const strategyCurrent = cashStrategyImpact?.[activeStrategy];
+  const strategyBest = cashStrategyImpact
+    ? bestCashStrategyAlternative(cashStrategyImpact, activeStrategy)
+    : null;
+  const strategyBestLabel = strategyBest
+    ? CASH_STRATEGY_OPTIONS.find((o) => o.value === strategyBest.value)?.label ||
+      strategyBest.value
+    : null;
+  // Penalties exist but a zero-penalty withdrawal order is available: the
+  // user has enough penalty-free money — the order alone causes the cost.
+  const orderCausedPenalty =
+    strategyBest != null && strategyBest.penaltyTotal <= 0;
+
+  const people = isCouple
+    ? [
+        {
+          label: couple.primary.name || "Primary",
+          retirementAge: couple.primary.retirementAge,
+          plan: couple.primary.employerPlanLabel || "401k",
+        },
+        {
+          label: couple.spouse.name || "Spouse",
+          retirementAge: couple.spouse.retirementAge,
+          plan: couple.spouse.employerPlanLabel || "403b",
+        },
+      ]
+    : [
+        {
+          label: "You",
+          retirementAge: displayInputs.retirementAge,
+          plan: "401k",
+        },
+      ];
+  const anyRuleOf55 = people.some(
+    (p) => p.retirementAge >= 55 && p.retirementAge < 59.5,
+  );
+  const anyIneligible = people.some((p) => p.retirementAge < 55);
+
+  // Bridge rows: retirement years in which a retired person is still under 60
+  // (the annual model's stand-in for 59½). These are the years early-access
+  // rules bite — the same rows shown in the charts and table.
+  const bridgeRows = results.yearlyData.filter((d) => {
+    if (d.phase === "accumulation") return false;
+    if (!isCouple) return d.age < 60;
+    const primaryBridging =
+      d.primaryAge >= couple.primary.retirementAge && d.primaryAge < 60;
+    const spouseBridging =
+      d.spouseAge >= couple.spouse.retirementAge && d.spouseAge < 60;
+    return primaryBridging || spouseBridging;
+  });
+  const sumAdj = (fn) =>
+    bridgeRows.reduce((acc, d) => acc + adjust(fn(d) || 0, d.year), 0);
+  const bridgeNeed = sumAdj((d) => d.spending + d.tax);
+  const bridgeIncome = sumAdj((d) => d.partTime + (d.pension || 0) + d.ss);
+  const fromCash = sumAdj((d) => d.fromCash);
+  const fromTaxable = sumAdj((d) => d.fromTaxable);
+  const fromHsa = sumAdj((d) => d.hsaWithdrawal);
+  const fromPreTax = sumAdj((d) => d.from401k + d.fromIra);
+  const fromRoth = sumAdj((d) => d.fromRoth);
+  const totalPenalties = results.yearlyData.reduce(
+    (acc, d) => acc + adjust(d.earlyPenalty || 0, d.year),
+    0,
+  );
+  const penaltyDraws = fromPreTax + fromRoth;
+  const bridgeCovered = penaltyDraws < Math.max(1000, bridgeNeed * 0.01);
+  const dollarNote = showRealDollars
+    ? "today's dollars"
+    : "future (inflated) dollars";
+  const bridgeYearCount = bridgeRows.length;
+  const stillWorking = displayInputs.currentAge < earliestRetireAge;
+
+  const accessRows = [
+    {
+      name: "Cash / HYSA",
+      balance: displayInputs.balanceCash,
+      status: "No penalty at any age. Interest is taxed as ordinary income.",
+      tone: "good",
+    },
+    {
+      name: "Taxable brokerage",
+      balance: displayInputs.balanceTaxable,
+      status:
+        "No penalty at any age. Only the gain portion of each sale is taxed — often at 0% capital-gains rates when your other income is low.",
+      tone: "good",
+    },
+    {
+      name: "HSA",
+      balance: displayInputs.balanceHsa,
+      status:
+        "Tax- and penalty-free at any age for qualified medical costs (including many insurance premiums and out-of-pocket bills).",
+      tone: "good",
+    },
+    {
+      name: isCouple ? "Employer plans (401k/403b)" : "401k / 403b",
+      balance: displayInputs.balance401k,
+      status: anyRuleOf55
+        ? "Penalty-free before 59½ ONLY under the Rule of 55: just the plan at the employer you leave at 55+, and only if that plan allows post-separation withdrawals. Old employers' plans stay penalized. Otherwise: 10% penalty + income tax."
+        : "10% penalty + ordinary income tax on withdrawals before 59½. The Rule of 55 does not apply to this plan (see below).",
+      tone: anyRuleOf55 ? "warn" : "bad",
+    },
+    {
+      name: "Traditional IRA",
+      balance: displayInputs.balanceTradIra,
+      status:
+        "10% penalty + ordinary income tax before 59½. The Rule of 55 NEVER applies to IRAs — rolling a 401k into an IRA before 55 permanently gives up that exception for the rolled money.",
+      tone: "bad",
+    },
+    {
+      name: "Roth IRA",
+      balance: displayInputs.balanceRoth,
+      status:
+        "In real life, direct contributions can come out any time tax- and penalty-free; earnings and conversions less than 5 years old are penalized before 59½. This model is conservative: it penalizes ALL early Roth withdrawals and draws Roth last.",
+      tone: "warn",
+    },
+  ].filter((row) => (row.balance || 0) > 0);
+
+  const toneStyles = {
+    good: "text-emerald-700",
+    warn: "text-amber-700",
+    bad: "text-rose-700",
+  };
+
+  return (
+    <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm print:shadow-none print:border-slate-300 print-avoid-break">
+      <div className="flex flex-wrap items-center gap-2 mb-1">
+        <h2 className="text-lg font-bold text-slate-900">
+          Accessing Money Before 59½ — Your Strategy
+        </h2>
+        <span
+          className={`text-xs font-semibold px-2 py-0.5 rounded border ${
+            anyRuleOf55
+              ? "bg-amber-50 text-amber-800 border-amber-200"
+              : "bg-rose-50 text-rose-800 border-rose-200"
+          }`}
+        >
+          <TermLabel info={TERM_HELP.ruleOf55}>
+            {anyRuleOf55
+              ? anyIneligible
+                ? "Rule of 55: partial"
+                : "Rule of 55: applies, with limits"
+              : "Rule of 55: not available"}
+          </TermLabel>
+        </span>
+      </div>
+      <p className="text-xs text-slate-500 mb-4">
+        You plan to retire at {earliestRetireAge}, before retirement accounts
+        unlock at 59½. Here is what that means and how this plan handles it.
+        All figures below come from the same projection as the charts and
+        table, in {dollarNote}.
+      </p>
+
+      {/* Plain-language verdict, mirroring the engine's actual strategy */}
+      <div
+        className={`mb-4 rounded border p-3 text-xs leading-relaxed ${
+          bridgeCovered
+            ? "bg-emerald-50 border-emerald-200 text-emerald-900"
+            : "bg-amber-50 border-amber-300 text-amber-900"
+        }`}
+      >
+        {anyRuleOf55 && !anyIneligible ? (
+          <span>
+            <span className="font-semibold">
+              The Rule of 55 can help you, but it is narrower than most people
+              think.
+            </span>{" "}
+            It covers only the 401k/403b at the employer you leave at 55 or
+            later — never IRAs, never old employers' plans — and only if the
+            plan allows partial withdrawals after you leave.{" "}
+          </span>
+        ) : (
+          <span>
+            <span className="font-semibold">
+              The Rule of 55 does not apply to your situation
+              {isCouple && anyRuleOf55 ? " for every account" : ""}.
+            </span>{" "}
+          </span>
+        )}
+        Based on your current finances, the recommended approach is to use
+        your available cash and taxable investments to fund the early years
+        of retirement while preserving tax-advantaged retirement assets until
+        they can be accessed without penalty.{" "}
+        {bridgeCovered ? (
+          <span>
+            <span className="font-semibold">
+              Good news: this projection does exactly that.
+            </span>{" "}
+            Your penalty-free money (cash, taxable, HSA
+            {bridgeIncome > 0 ? ", plus part-time/pension income" : ""}) covers
+            all {bridgeYearCount} bridge year{bridgeYearCount === 1 ? "" : "s"}{" "}
+            without touching retirement accounts early.
+          </span>
+        ) : orderCausedPenalty ? (
+          <span>
+            <span className="font-semibold">
+              You have enough penalty-free money to reach 59½ — but your
+              selected withdrawal order doesn't use it that way.
+            </span>{" "}
+            The "{CASH_STRATEGY_OPTIONS.find((o) => o.value === activeStrategy)
+              ?.label || activeStrategy}" setting sends{" "}
+            {fmtMoney(penaltyDraws)} through retirement accounts before 59½,
+            costing about {fmtMoney(totalPenalties)} in{" "}
+            <em>avoidable</em> 10% penalties. Switching the Cash Withdrawal
+            Strategy (sidebar → Cash Strategy) to "{strategyBestLabel}"
+            eliminates them entirely — these penalties are a consequence of
+            the chosen order, not of your finances.
+          </span>
+        ) : (
+          <span>
+            <span className="font-semibold">
+              Caution: penalty-free money alone is not enough in this plan —
+              no withdrawal order avoids the penalty.
+            </span>{" "}
+            The projection is forced to pull {fmtMoney(penaltyDraws)} from
+            retirement accounts before 59½, costing about{" "}
+            {fmtMoney(totalPenalties)} in extra 10% penalties (rows flagged
+            PENALTY in the table). The strategies at the bottom of this panel
+            can shrink that gap.
+          </span>
+        )}
+      </div>
+
+      {/* Per-person eligibility */}
+      <div className="mb-4">
+        <p className="text-xs font-semibold text-slate-700 mb-2">
+          Why {anyRuleOf55 ? "— and where —" : ""} the Rule of 55{" "}
+          {anyRuleOf55 ? "applies" : "is not available"}:
+        </p>
+        <ul className="space-y-1.5 text-xs text-slate-700 leading-relaxed list-disc list-inside">
+          {people.map((p) => {
+            if (p.retirementAge >= 59.5) {
+              return (
+                <li key={p.label}>
+                  <span className="font-medium">{p.label}</span> retires at{" "}
+                  {p.retirementAge}, after 59½ — no early-withdrawal problem
+                  for {isCouple ? `${p.label}'s` : "your"} accounts.
+                </li>
+              );
+            }
+            if (p.retirementAge >= 55) {
+              return (
+                <li key={p.label}>
+                  <span className="font-medium">{p.label}</span> retires at{" "}
+                  {p.retirementAge}, in or after the year of turning 55 — so
+                  the Rule of 55 can make{" "}
+                  {isCouple ? `${p.label}'s ${p.plan}` : `your ${p.plan}`}{" "}
+                  penalty-free, but only the current employer's plan and only
+                  if it allows post-separation withdrawals. IRAs still wait
+                  until 59½. This model optimistically assumes the whole{" "}
+                  {p.plan} qualifies.
+                </li>
+              );
+            }
+            return (
+              <li key={p.label}>
+                <span className="font-medium">{p.label}</span> retires at{" "}
+                {p.retirementAge} — {55 - p.retirementAge} year
+                {55 - p.retirementAge === 1 ? "" : "s"} before the Rule of 55
+                window opens. The rule requires leaving your employer{" "}
+                <em>in or after the calendar year you turn 55</em>, so it will
+                not apply to any of{" "}
+                {isCouple ? `${p.label}'s` : "your"} retirement accounts for
+                this retirement. Every 401k/IRA dollar withdrawn before 59½
+                carries a 10% penalty on top of income tax, and this
+                projection includes those penalties. (Returning to work later
+                and separating again at 55+ could re-open the rule for that
+                new employer's plan only.)
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      {/* Account access table */}
+      <div className="mb-4">
+        <p className="text-xs font-semibold text-slate-700 mb-2">
+          What you can touch before 59½ — your accounts:
+        </p>
+        <div className="overflow-x-auto rounded border border-slate-200">
+          <table className="w-full text-xs">
+            <thead className="bg-slate-50 border-b border-slate-200">
+              <tr>
+                <th className="px-3 py-2 text-left font-semibold text-slate-700">
+                  Account
+                </th>
+                <th className="px-3 py-2 text-right font-semibold text-slate-700">
+                  Balance today
+                </th>
+                <th className="px-3 py-2 text-left font-semibold text-slate-700">
+                  Access before 59½
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {accessRows.map((row) => (
+                <tr key={row.name} className="border-b border-slate-100 align-top">
+                  <td className="px-3 py-2 font-medium text-slate-800 whitespace-nowrap">
+                    {row.name}
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono">
+                    {fmtMoney(row.balance)}
+                  </td>
+                  <td className={`px-3 py-2 leading-relaxed ${toneStyles[row.tone]}`}>
+                    {row.status}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Bridge-years funding, from the actual projection */}
+      {bridgeYearCount > 0 && (
+        <div className="mb-4">
+          <p className="text-xs font-semibold text-slate-700 mb-2">
+            Your bridge years by the numbers ({bridgeYearCount} year
+            {bridgeYearCount === 1 ? "" : "s"} before 59½, in {dollarNote}):
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+            <div className="rounded border border-slate-200 bg-slate-50 p-2">
+              <div className="text-slate-500">Spending + taxes to cover</div>
+              <div className="font-bold text-slate-900 text-sm">
+                {fmtMoney(bridgeNeed)}
+              </div>
+            </div>
+            <div className="rounded border border-slate-200 bg-slate-50 p-2">
+              <div className="text-slate-500">
+                Covered by income (part-time / pension)
+              </div>
+              <div className="font-bold text-emerald-700 text-sm">
+                {fmtMoney(bridgeIncome)}
+              </div>
+            </div>
+            <div className="rounded border border-slate-200 bg-slate-50 p-2">
+              <div className="text-slate-500">
+                From penalty-free savings (cash, taxable, HSA)
+              </div>
+              <div className="font-bold text-sky-700 text-sm">
+                {fmtMoney(fromCash + fromTaxable + fromHsa)}
+              </div>
+            </div>
+            <div className="rounded border border-slate-200 bg-slate-50 p-2">
+              <div className="text-slate-500">
+                From retirement accounts (penalized)
+              </div>
+              <div
+                className={`font-bold text-sm ${
+                  penaltyDraws > 0 ? "text-rose-700" : "text-slate-900"
+                }`}
+              >
+                {fmtMoney(penaltyDraws)}
+                {totalPenalties > 0 && (
+                  <span className="block text-[10px] font-medium text-rose-600">
+                    incl. {fmtMoney(totalPenalties)} of 10% penalties
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Recommended order */}
+      <div className="mb-4">
+        <p className="text-xs font-semibold text-slate-700 mb-2">
+          Which money to use first, and why (the projection already follows
+          this order):
+        </p>
+        <ol className="list-decimal list-inside space-y-1.5 text-xs text-slate-700 leading-relaxed">
+          <li>
+            <span className="font-medium">Part-time or pension income</span> —
+            every earned dollar is one your portfolio doesn't have to produce
+            in its most vulnerable years.
+          </li>
+          <li>
+            <span className="font-medium">Cash / HYSA</span> — no tax, no
+            penalty, and spending it first lets investments keep compounding.
+          </li>
+          <li>
+            <span className="font-medium">Taxable brokerage</span> — no
+            penalty; you only pay capital-gains tax on the growth portion,
+            and in low-income bridge years much of that can land in the 0%
+            bracket.
+          </li>
+          <li>
+            <span className="font-medium">HSA for medical bills</span> —
+            tax-free at any age for healthcare, which is often a big bridge
+            expense.
+          </li>
+          <li>
+            <span className="font-medium">Retirement accounts last</span>
+            {anyRuleOf55
+              ? " — if needed, a Rule-of-55 401k first (no penalty), then penalized accounts only as a last resort."
+              : " — only if everything else runs out; each early dollar costs 10% extra plus income tax."}{" "}
+            Roth stays untouched the longest so it can grow tax-free.
+          </li>
+        </ol>
+      </div>
+
+      {/* Tax and long-term implications */}
+      <div className="mb-4">
+        <p className="text-xs font-semibold text-slate-700 mb-2">
+          Tax and long-term implications of this strategy:
+        </p>
+        <ul className="list-disc list-inside space-y-1.5 text-xs text-slate-700 leading-relaxed">
+          <li>
+            Selling taxable investments realizes capital gains — but in years
+            with little other income, gains inside the 0% bracket are federal
+            tax-free (NY still taxes them). The projection's Tax column
+            already reflects this.
+          </li>
+          <li>
+            Every penalized retirement-account dollar costs 10% on top of
+            ordinary income tax
+            {totalPenalties > 0
+              ? ` — about ${fmtMoney(totalPenalties)} of penalties over this plan`
+              : ""}
+            . Penalties are pure loss: money that never comes back or
+            compounds.
+          </li>
+          <li>
+            Draining cash and taxable first means your tax-deferred accounts
+            keep growing — good for the bridge, but it builds up the balance
+            subject to RMDs at {results.summary.rmdStartAge}. Low-income
+            bridge years are also the cheapest time for{" "}
+            <span className="font-medium">Roth conversions</span> (sidebar →
+            Roth Conversions) to defuse that later tax bomb.
+          </li>
+          <li>
+            Big withdrawals or conversions in bridge years raise MAGI, which
+            can shrink ACA health-insurance subsidies before 65. If you use
+            marketplace insurance, test the "Estimate ACA Subsidy" toggle to
+            see the trade-off.
+          </li>
+          <li>
+            Spending down your cash buffer early leaves you more exposed to a
+            market crash in your first retirement years (sequence risk) — see
+            the Risk Analysis tab.
+          </li>
+        </ul>
+      </div>
+
+      {/* Alternatives */}
+      <div className="mb-2">
+        <p className="text-xs font-semibold text-slate-700 mb-2">
+          Alternative strategies that can improve the odds:
+        </p>
+        <ul className="list-disc list-inside space-y-1.5 text-xs text-slate-700 leading-relaxed">
+          {strategyBest && strategyCurrent && strategyCurrent.penaltyTotal > 0 && (
+            <li>
+              <span className="font-medium">
+                Change the cash withdrawal order
+              </span>{" "}
+              — verified against your projection: switching the Cash
+              Withdrawal Strategy (sidebar → Cash Strategy) to "
+              {strategyBestLabel}"{" "}
+              {strategyBest.penaltyTotal <= 0
+                ? "eliminates the projected early-withdrawal penalties entirely."
+                : `cuts the projected early-withdrawal penalties by about ${Math.round(
+                    (1 - strategyBest.penaltyTotal / strategyCurrent.penaltyTotal) * 100,
+                  )}%.`}
+            </li>
+          )}
+          {anyIneligible && (
+            <li>
+              <span className="font-medium">
+                Work until the year you turn 55
+              </span>{" "}
+              — retiring at 55 instead of {earliestRetireAge} unlocks the Rule
+              of 55 for your current employer's plan
+              {totalPenalties > 0
+                ? ` and could avoid much of the ${fmtMoney(totalPenalties)} in projected penalties`
+                : ""}
+              . Test it with the Retirement Age lever.
+            </li>
+          )}
+          <li>
+            <span className="font-medium">
+              <TermLabel info={TERM_HELP.sepp}>
+                SEPP / 72(t) payments
+              </TermLabel>
+            </span>{" "}
+            — a legal way to take penalty-free IRA withdrawals before 59½ by
+            locking into a fixed schedule for 5+ years. Rigid and easy to get
+            wrong (breaking it triggers back-penalties), and not modeled here
+            — worth discussing with a professional if your penalty-free money
+            falls short.
+          </li>
+          <li>
+            <span className="font-medium">Roth IRA contributions</span> — in
+            real life, the amounts you contributed directly (not earnings, not
+            recent conversions) can come out any time without tax or penalty.
+            This model doesn't track that layer, so treat any Roth flexibility
+            as a bonus cushion it isn't showing you.
+          </li>
+          <li>
+            <span className="font-medium">Part-time income</span> —{" "}
+            {displayInputs.partTimeIncome > 0
+              ? `your ${fmtMoney(displayInputs.partTimeIncome)}/yr already offsets bridge withdrawals; extending it even a year or two helps more than it looks.`
+              : "even $10–20K/yr in the bridge years replaces withdrawals exactly when your portfolio is most fragile. Try the Part-Time Income input."}
+          </li>
+          {stillWorking && (
+            <li>
+              <span className="font-medium">
+                Redirect final working-year savings
+              </span>{" "}
+              — after capturing the full employer match, extra savings routed
+              to your taxable brokerage (instead of extra 401k deferrals) land
+              in the penalty-free bucket you'll actually spend first.
+            </li>
+          )}
+          {maxSustainableSpending != null &&
+            maxSustainableSpending < displayInputs.baseExpenses && (
+              <li>
+                <span className="font-medium">Trim spending</span> — this plan
+                currently overshoots; lifestyle spending of about{" "}
+                {fmtMoney(maxSustainableSpending)}/yr (vs{" "}
+                {fmtMoney(displayInputs.baseExpenses)}) keeps it funded, and
+                lower spending also means smaller taxable withdrawals each
+                bridge year.
+              </li>
+            )}
+        </ul>
+      </div>
+
+      <p className="text-[11px] text-slate-400 italic">
+        Estimates only — early-withdrawal rules have exceptions and traps this
+        tool can't see (plan documents, state rules, disability/medical
+        exceptions, 457(b) plans with no early penalty). Confirm your specific
+        situation with a fee-only fiduciary or CPA before acting.
+      </p>
     </div>
   );
 }
@@ -4927,9 +5657,9 @@ function CashFlowTooltip({ active, payload, isCouple, showNeedBreakdown = false 
 // every field is meant to be overwritten with the visitor's own numbers.
 const DEFAULT_INPUTS = {
   mode: "single",
-  // Tax filing status for individual mode: "single" or "mfj". Couple mode
-  // always files jointly. Individual mode defaults to single-filer tables;
-  // a married user modeling only their own accounts should switch to MFJ.
+  // Tax filing status for Individual mode: "single" or "mfj".
+  // Individual plans default to single-filer taxes; a married person modeling
+  // only their own accounts can switch to MFJ. Couple mode is always MFJ.
   filingStatus: "single",
   currentAge: 45,
   retirementAge: 60,
@@ -4944,9 +5674,6 @@ const DEFAULT_INPUTS = {
   balanceTradIra: 50000,
   // Roth IRA
   balanceRoth: 75000,
-  // Total Roth *contributions* to date (not conversions, not growth) —
-  // withdrawable anytime tax- and penalty-free. 0 = conservative.
-  rothBasis: 0,
   // HSA cash + HSA investment
   balanceHsa: 25000,
   // Credit card debt (subtracted from net worth)
@@ -4996,11 +5723,6 @@ const DEFAULT_INPUTS = {
   // (flagged in the year-by-year table). If false, the plan shows a shortfall
   // instead of touching the reserve.
   allowReserveAsLastResort: false,
-  // 72(t) SEPP program (individual mode): fixed-amortization payments from
-  // tax-deferred accounts, penalty-free, from retirement until the later of
-  // 5 years or 59½. Rate must not exceed 120% of the federal mid-term rate.
-  useSepp: false,
-  seppRate: 0.05,
   conversionBridge: 0,
   conversionMid: 0,
   conversionFinal: 0,
@@ -5024,7 +5746,6 @@ const DEFAULT_COUPLE_INPUTS = {
     balance401k: DEFAULT_INPUTS.balance401k,
     balanceTradIra: DEFAULT_INPUTS.balanceTradIra,
     balanceRoth: DEFAULT_INPUTS.balanceRoth,
-    rothBasis: DEFAULT_INPUTS.rothBasis,
     balanceHsa: DEFAULT_INPUTS.balanceHsa,
     contrib401k: DEFAULT_INPUTS.contrib401k,
     contribMatch: DEFAULT_INPUTS.contribMatch,
@@ -5053,7 +5774,6 @@ const DEFAULT_COUPLE_INPUTS = {
     balance401k: 0,
     balanceTradIra: 0,
     balanceRoth: 0,
-    rothBasis: 0,
     balanceHsa: 0,
     contrib401k: 0,
     contribMatch: 0,
@@ -5085,7 +5805,9 @@ const DEFAULT_COUPLE_INPUTS = {
     inflation: DEFAULT_INPUTS.inflation,
     taxableAnnualTaxDrag: DEFAULT_INPUTS.taxableAnnualTaxDrag,
     useAcaSubsidyEstimate: DEFAULT_INPUTS.useAcaSubsidyEstimate,
-    householdSize: DEFAULT_INPUTS.householdSize,
+    // A married couple is at least 2 people. This drives the family-vs-self
+    // HSA limit, the FPL used for ACA subsidies, and Medicare enrollee counts.
+    householdSize: 2,
     portfolioVolatility: DEFAULT_INPUTS.portfolioVolatility,
     flexibleSpending: DEFAULT_INPUTS.flexibleSpending,
     cashStrategy: DEFAULT_INPUTS.cashStrategy,
@@ -5309,6 +6031,14 @@ function normalizeCouplePerson(person, fallback) {
 }
 
 function normalizeCoupleInputs(coupleInputs) {
+  const shared = {
+    ...DEFAULT_COUPLE_INPUTS.shared,
+    ...(coupleInputs?.shared || {}),
+  };
+  // Couple mode always models at least a 2-person household; stored scenarios
+  // from before this floor existed may carry a stale householdSize of 1,
+  // which silently capped the household HSA at the self-only limit.
+  shared.householdSize = Math.max(2, shared.householdSize || 2);
   return {
     primary: normalizeCouplePerson(
       coupleInputs?.primary,
@@ -5318,10 +6048,7 @@ function normalizeCoupleInputs(coupleInputs) {
       coupleInputs?.spouse,
       DEFAULT_COUPLE_INPUTS.spouse,
     ),
-    shared: {
-      ...DEFAULT_COUPLE_INPUTS.shared,
-      ...(coupleInputs?.shared || {}),
-    },
+    shared,
   };
 }
 
@@ -5342,6 +6069,7 @@ function getDisplayInputs(inputs) {
     ...DEFAULT_INPUTS,
     ...shared,
     mode: "couple",
+    filingStatus: "mfj",
     currentAge: primary.currentAge,
     retirementAge: firstRetirementAge,
     planThroughAge: finalPrimaryAge,
@@ -5385,6 +6113,7 @@ function normalizeInputs(rawInputs) {
   return {
     ...merged,
     mode: merged.mode === "couple" ? "couple" : "single",
+    filingStatus: merged.filingStatus === "mfj" ? "mfj" : "single",
     couple: normalizeCoupleInputs(merged.couple),
     rmdStartAge: wasLegacyDefaultRmd
       ? computedRmdStartAge
@@ -5528,9 +6257,11 @@ function simulateWithReturns(inputs, yearlyReturns) {
     100,
     (result.summary.year1Spending || 0) * 0.001,
   );
+  // Any distribution-phase year counts; keying off the primary's age missed
+  // early household-retirement years in couple mode when the spouse retired first.
   const depletedRow = result.yearlyData.find(
     (row) =>
-      row.age >= displayInputs.retirementAge &&
+      row.phase !== "accumulation" &&
       (row.total <= 0 || row.unmetCashFlow > materialThreshold),
   );
   const failed =
@@ -5817,6 +6548,89 @@ function solveMaxSustainableSpending(inputs) {
   return Math.round(lo / 500) * 500;
 }
 
+// ============================================================
+// CASH-STRATEGY PENALTY IMPACT — definitive, not hypothetical
+// ============================================================
+// The engine knows exactly whether a withdrawal order sends money through
+// penalized accounts before 59½. Run the full projection once per strategy
+// (everything else held constant) so the UI can state what WILL happen with
+// the user's actual inputs and recommend the order that minimizes penalties.
+
+const CASH_STRATEGY_VALUES = [
+  "cashFirst",
+  "preserveReserve",
+  "proportional",
+  "cashLast",
+];
+
+function summarizeCashStrategyRun(results) {
+  let penaltyTotal = 0;
+  let penaltyYears = 0;
+  let firstPenaltyAge = null;
+  let lastPenaltyAge = null;
+  for (const d of results.yearlyData) {
+    if ((d.earlyPenalty || 0) > 0) {
+      penaltyTotal += d.earlyPenalty;
+      penaltyYears += 1;
+      if (firstPenaltyAge == null) firstPenaltyAge = d.age;
+      lastPenaltyAge = d.age;
+    }
+  }
+  return {
+    penaltyTotal: Math.round(penaltyTotal),
+    // The §72(t) penalty is exactly 10% of the penalized withdrawals.
+    penalizedDraws: Math.round(penaltyTotal * 10),
+    penaltyYears,
+    firstPenaltyAge,
+    lastPenaltyAge,
+    totalTaxes: results.summary.totalTaxesPaid,
+    endBalance: results.summary.portfolioAtEnd,
+    unmet: results.summary.totalUnmetCashFlow,
+  };
+}
+
+function compareCashStrategies(inputs) {
+  const withStrategy = (strategy) => {
+    if (!isCoupleMode(inputs)) return { ...inputs, cashStrategy: strategy };
+    const couple = normalizeCoupleInputs(inputs.couple);
+    return {
+      ...inputs,
+      couple: {
+        ...couple,
+        shared: { ...couple.shared, cashStrategy: strategy },
+      },
+    };
+  };
+  const impact = {};
+  for (const strategy of CASH_STRATEGY_VALUES) {
+    const run = simulatePlan(withStrategy(strategy));
+    if (run.yearlyData.length === 0) return null; // invalid inputs mid-typing
+    impact[strategy] = summarizeCashStrategyRun(run);
+  }
+  return impact;
+}
+
+// Given the impact map and the active strategy, pick the alternative order
+// that cuts penalties the most without creating a new funding shortfall.
+// Returns null when no alternative meaningfully beats the current one.
+function bestCashStrategyAlternative(impact, currentStrategy) {
+  const current = impact?.[currentStrategy];
+  if (!current) return null;
+  const shortfallTolerance = 1000;
+  const candidates = CASH_STRATEGY_VALUES.filter(
+    (value) => value !== currentStrategy,
+  )
+    .map((value) => ({ value, ...impact[value] }))
+    .filter((alt) => alt.unmet <= current.unmet + shortfallTolerance)
+    .sort(
+      (a, b) =>
+        a.penaltyTotal - b.penaltyTotal || b.endBalance - a.endBalance,
+    );
+  const best = candidates[0];
+  if (!best || best.penaltyTotal >= current.penaltyTotal - 1) return null;
+  return best;
+}
+
 // Horizon-aware safe-withdrawal guideline. The classic 4% rule is calibrated
 // to ~30-year retirements; longer horizons warrant a lower starting rate.
 function safeWithdrawalGuideline(retirementYears) {
@@ -5893,16 +6707,24 @@ function generatePlanNarrative(inputs, results, mcResults, maxSustainableSpendin
   const materialFundingGap = hasMaterialUnmetCashFlow(s);
   const materialDepletion = s.depleted && (materialFundingGap || s.portfolioAtEnd <= 0);
 
+  const alreadyRetired = inputs.retirementAge <= inputs.currentAge;
+  const retireLabel = alreadyRetired
+    ? "your retirement"
+    : `retiring at ${inputs.retirementAge}`;
   let tone = "good";
-  let headline = `You appear to be in a good position to retire at ${inputs.retirementAge}.`;
+  let headline = alreadyRetired
+    ? "Your retirement plan appears to be in a good position."
+    : `You appear to be in a good position to retire at ${inputs.retirementAge}.`;
   if (materialDepletion || materialFundingGap || s.portfolioAtEnd <= 0) {
     tone = "bad";
-    headline = `Retiring at ${inputs.retirementAge} does not fully work with these assumptions.`;
+    headline = alreadyRetired
+      ? "This retirement plan does not fully work with these assumptions."
+      : `Retiring at ${inputs.retirementAge} does not fully work with these assumptions.`;
   } else if (withdrawalRate > 0.045 || endingVsRetirement < 0.7) {
     tone = "warn";
-    headline = `Retiring at ${inputs.retirementAge} looks possible, but the plan has pressure points.`;
+    headline = `The plan for ${retireLabel} looks possible, but it has pressure points.`;
   } else if (withdrawalRate < 0.03 && endingVsRetirement >= 1) {
-    headline = `You appear to have a strong margin for retiring at ${inputs.retirementAge}.`;
+    headline = `You appear to have a strong margin for ${retireLabel}.`;
   }
 
   const reasons = [];
@@ -6075,14 +6897,6 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
         step={1000}
       />
       <NumberInput
-        label="Roth Contributions to Date"
-        value={person.rothBasis || 0}
-        onChange={onChange("rothBasis")}
-        prefix="$"
-        step={1000}
-        hint="Lifetime contributions (not conversions/growth) — withdrawable anytime penalty-free. 0 if unsure."
-      />
-      <NumberInput
         label="HSA"
         value={person.balanceHsa}
         onChange={onChange("balanceHsa")}
@@ -6096,7 +6910,7 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
         onChange={onChange("contrib401k")}
         prefix="$"
         step={500}
-        hint={`Capped at ${fmtMoney(contributionLimits.k401Employee)} for ${PROJECTION_START_YEAR}`}
+        hint={`Capped at ${fmtMoneyFull(contributionLimits.k401Employee)} for ${PROJECTION_START_YEAR}`}
       />
       <NumberInput
         label="Employer Match"
@@ -6179,32 +6993,34 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
         onChange={onChange("rmdStartAge")}
       />
       <NumberInput
-        label="Roth Conversion Ages 55-59"
+        label="Roth Conversion: retirement–59 / Year"
         value={person.conversionBridge}
         onChange={onChange("conversionBridge")}
         prefix="$"
         step={5000}
+        hint="Applies each year from this person's retirement until age 59"
       />
       <NumberInput
-        label="Roth Conversion Ages 60-64"
+        label="Roth Conversion: Ages 60-64 / Year"
         value={person.conversionMid}
         onChange={onChange("conversionMid")}
         prefix="$"
         step={5000}
       />
       <NumberInput
-        label="Roth Conversion Ages 65 to SS"
+        label="Roth Conversion: 65 until SS / Year"
         value={person.conversionFinal}
         onChange={onChange("conversionFinal")}
         prefix="$"
         step={5000}
       />
       <NumberInput
-        label="Healthcare Pre-65"
+        label="Healthcare before 65"
         value={person.healthcarePre65}
         onChange={onChange("healthcarePre65")}
         prefix="$"
         step={1000}
+        hint="Per year, today's dollars, from this person's retirement until Medicare at 65"
         info={TERM_HELP.aca}
       />
       <NumberInput
@@ -6213,6 +7029,7 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
         onChange={onChange("healthcarePost65")}
         prefix="$"
         step={500}
+        hint="Per year, today's dollars — Medicare + Medigap + out-of-pocket"
       />
     </Section>
   );
@@ -6437,12 +7254,25 @@ const CASH_STRATEGY_OPTIONS = [
 
 // Cash drawdown controls — used by the individual sidebar and, in couple
 // mode, the shared Household section (cash is a shared bucket).
-function CashStrategyInputs({ values, onChange, earlyRetirement = false }) {
+// `penaltyImpact` is the per-strategy projection comparison computed in the
+// main component, so the guidance below states what the user's actual plan
+// DOES — never a hypothetical "can".
+function CashStrategyInputs({
+  values,
+  onChange,
+  earlyRetirement = false,
+  penaltyImpact = null,
+}) {
   const strategy = values.cashStrategy || "cashFirst";
   const selected = CASH_STRATEGY_OPTIONS.find((o) => o.value === strategy);
   const reserveActive = strategy !== "cashFirst";
-  const penaltyRisk =
-    earlyRetirement && (strategy === "cashLast" || strategy === "proportional");
+  const current = penaltyImpact?.[strategy];
+  const best = penaltyImpact
+    ? bestCashStrategyAlternative(penaltyImpact, strategy)
+    : null;
+  const bestLabel = best
+    ? CASH_STRATEGY_OPTIONS.find((o) => o.value === best.value)?.label
+    : null;
   return (
     <>
       <div className="mb-3">
@@ -6463,13 +7293,74 @@ function CashStrategyInputs({ values, onChange, earlyRetirement = false }) {
         {selected && (
           <p className="text-xs text-slate-500 mt-1">{selected.blurb}</p>
         )}
-        {penaltyRisk && (
-          <p className="text-xs text-amber-700 mt-1 bg-amber-50 border border-amber-200 rounded px-2 py-1">
-            Heads up: retiring before 59½ with this strategy can route draws
-            into 401k/IRA territory, where the 10% early-withdrawal penalty
-            applies (PENALTY rows in the year table). Compare lifetime tax +
-            penalty before committing.
+        {earlyRetirement && current && current.penaltyTotal <= 0 && (
+          <p className="text-xs text-emerald-800 mt-1 bg-emerald-50 border border-emerald-200 rounded px-2 py-1">
+            ✓ Checked against your projection: this withdrawal order triggers{" "}
+            <span className="font-semibold">
+              no 10% early-withdrawal penalties
+            </span>{" "}
+            before 59½.
           </p>
+        )}
+        {earlyRetirement && current && current.penaltyTotal > 0 && (
+          <div className="text-xs text-amber-900 mt-1 bg-amber-50 border border-amber-300 rounded px-2 py-1.5 space-y-1">
+            <p>
+              <span className="font-semibold">
+                With your inputs, this order pulls{" "}
+                {fmtMoney(current.penalizedDraws)} from retirement accounts
+                before 59½
+              </span>{" "}
+              — costing {fmtMoney(current.penaltyTotal)} in 10% penalties
+              across {current.penaltyYears} year
+              {current.penaltyYears === 1 ? "" : "s"} (ages{" "}
+              {current.firstPenaltyAge}
+              {current.lastPenaltyAge !== current.firstPenaltyAge
+                ? `–${current.lastPenaltyAge}`
+                : ""}
+              , the PENALTY rows in the table).
+            </p>
+            {best && best.penaltyTotal <= 0 && (
+              <p>
+                <span className="font-semibold">
+                  To be clear: you are not short of money.
+                </span>{" "}
+                Your penalty-free funds (cash, taxable, income) are enough to
+                reach 59½ without touching retirement accounts at all — this
+                penalty exists only because of the withdrawal order
+                {strategy !== "cashFirst" &&
+                (values.cashReserveFloor || 0) > 0
+                  ? " and reserve floor"
+                  : ""}{" "}
+                selected here, not because of your finances.
+              </p>
+            )}
+            {best ? (
+              <p>
+                <span className="font-semibold">
+                  {best.penaltyTotal <= 0
+                    ? `Fix: switch to "${bestLabel}" — it eliminates the penalty entirely`
+                    : `Better: "${bestLabel}" cuts the penalty to ${fmtMoney(best.penaltyTotal)}`}
+                </span>{" "}
+                (lifetime taxes {fmtMoney(current.totalTaxes)} →{" "}
+                {fmtMoney(best.totalTaxes)}; ending balance{" "}
+                {fmtMoney(current.endBalance)} → {fmtMoney(best.endBalance)}).
+                {best.value === "cashFirst" &&
+                (values.cashReserveFloor || 0) > 0
+                  ? ' Note: "Use cash first" ignores your protected reserve floor — the savings come from letting that cash be spent. If keeping the reserve matters more to you than the penalty, that is a legitimate choice; the numbers above show its exact price.'
+                  : ""}
+              </p>
+            ) : (
+              <p>
+                <span className="font-semibold">
+                  No withdrawal order avoids this penalty:
+                </span>{" "}
+                your penalty-free money (cash + taxable) can't cover the years
+                before 59½ on its own. See the "Accessing Money Before 59½"
+                panel for ways to close the gap — part-time income, lower
+                spending, or retiring at 55+.
+              </p>
+            )}
+          </div>
         )}
       </div>
       <NumberInput
@@ -6512,7 +7403,7 @@ function CashStrategyInputs({ values, onChange, earlyRetirement = false }) {
   );
 }
 
-function CoupleInputs({ couple, updateCouple }) {
+function CoupleInputs({ couple, updateCouple, penaltyImpact = null }) {
   const { primary, spouse, shared } = normalizeCoupleInputs(couple);
   const sharedChange = (key) => updateCouple("shared", key);
   return (
@@ -6522,6 +7413,14 @@ function CoupleInputs({ couple, updateCouple }) {
           Married-couple mode uses MFJ taxes, shared cash/taxable/expenses,
           and separate spouse timelines, accounts, Social Security, RMDs, and
           Roth conversions. Survivor modeling is not included in v1.
+          <span className="mt-1 block">
+            <span className="font-semibold">Heads up:</span> while one spouse
+            still works, their paycheck is assumed to cover{" "}
+            <em>their own contributions only</em> — all household spending is
+            drawn from savings once the first spouse retires. If the working
+            spouse's income actually covers the bills, this plan is more
+            pessimistic than reality.
+          </span>
         </div>
         <NumberInput
           label="Cash / HYSA"
@@ -6556,6 +7455,7 @@ function CoupleInputs({ couple, updateCouple }) {
           earlyRetirement={
             Math.min(primary.retirementAge, spouse.retirementAge) < 59.5
           }
+          penaltyImpact={penaltyImpact}
         />
         <NumberInput
           label="Base Lifestyle Expenses"
@@ -6600,6 +7500,7 @@ function CoupleInputs({ couple, updateCouple }) {
           label="Household Size"
           value={shared.householdSize}
           onChange={sharedChange("householdSize")}
+          hint="At least 2 in couple mode. Drives ACA subsidy math, the family HSA limit, and Medicare premium counts"
         />
         <div className="mb-3 mt-2 p-2 bg-slate-50 rounded border border-slate-200">
           <label className="flex items-start gap-2 cursor-pointer">
@@ -6706,6 +7607,13 @@ export default function RetirementPlanner() {
     () => solveMaxSustainableSpending(inputs),
     [inputs],
   );
+  // Early retirees: run the projection under each cash-withdrawal order so
+  // the UI can state definitively what the chosen order costs in 10%
+  // penalties and which order minimizes them.
+  const cashStrategyImpact = useMemo(() => {
+    if (getDisplayInputs(inputs).retirementAge >= 59.5) return null;
+    return compareCashStrategies(inputs);
+  }, [inputs]);
 
   // Stale MC results are withheld from the narrative so it never quotes a
   // success rate computed from inputs that no longer exist.
@@ -6832,16 +7740,19 @@ export default function RetirementPlanner() {
 
   const hasSavedScenarios = savedScenarios.length > 0;
 
-  // Compute scenario comparison
+  // Compute scenario comparison — ages always derive from the user's own
+  // retirement age (earlier hardcoded ages described plans nobody entered).
   const scenarios = useMemo(() => {
-    const ages = isCouple
-      ? [
-          Math.max(45, displayInputs.retirementAge - 3),
-          displayInputs.retirementAge,
-          displayInputs.retirementAge + 2,
-          displayInputs.retirementAge + 5,
-        ]
-      : [50, 52, 53, 55, 57];
+    const baseAge = displayInputs.retirementAge;
+    const minAge = displayInputs.currentAge;
+    const ages = [
+      ...new Set(
+        (isCouple
+          ? [baseAge - 3, baseAge, baseAge + 2, baseAge + 5]
+          : [baseAge - 3, baseAge - 1, baseAge, baseAge + 2, baseAge + 5]
+        ).filter((age) => age === baseAge || age > minAge),
+      ),
+    ];
     const spendingLevels = [
       Math.round(displayInputs.baseExpenses * 0.85),
       displayInputs.baseExpenses,
@@ -7026,6 +7937,12 @@ export default function RetirementPlanner() {
     displayInputs.householdSize,
   );
   const yearDetailColSpan = displayInputs.pensionIncome > 0 ? 16 : 15;
+  // For an already-retired user the "portfolio at retirement" metric describes
+  // the end of the first projected year, which happens at the current age.
+  const retirementDisplayAge = Math.max(
+    displayInputs.retirementAge,
+    displayInputs.currentAge,
+  );
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
@@ -7060,14 +7977,14 @@ export default function RetirementPlanner() {
             </span>
             <span>
               <span className="text-slate-500">
-                At {displayInputs.retirementAge}:
+                At {retirementDisplayAge}:
               </span>{" "}
               <span className="font-bold">
                 {fmtMoney(
                   adjust(
                     s.portfolioAtRetirement,
                     currentYear +
-                      (displayInputs.retirementAge - displayInputs.currentAge),
+                      (retirementDisplayAge - displayInputs.currentAge),
                   ),
                 )}
               </span>
@@ -7296,26 +8213,26 @@ export default function RetirementPlanner() {
         </div>
         <div className="max-w-[1800px] mx-auto grid grid-cols-2 lg:grid-cols-4 gap-3">
           <MetricCard
-            label={`Portfolio at ${displayInputs.retirementAge}`}
+            label={`Portfolio at ${retirementDisplayAge}`}
             value={fmtMoney(
               adjust(
                 s.portfolioAtRetirement,
-                currentYear + (displayInputs.retirementAge - displayInputs.currentAge),
+                currentYear + (retirementDisplayAge - displayInputs.currentAge),
               ),
             )}
             sublabel={
               showRealDollars
                 ? `Inflation-adjusted — future dollars: ${fmtMoney(s.portfolioAtRetirement)}`
-                : `≈ ${fmtMoney(
+                : `Measured at the end of your first retirement year. ≈ ${fmtMoney(
                     s.portfolioAtRetirement /
                       Math.pow(
                         1 + displayInputs.inflation,
                         Math.max(
                           0,
-                          displayInputs.retirementAge - displayInputs.currentAge,
+                          retirementDisplayAge - displayInputs.currentAge,
                         ),
                       ),
-                  )} in today's dollars — up from ${fmtMoney(s.currentTotal)}`
+                  )} in today's dollars — vs ${fmtMoney(s.currentTotal)} now`
             }
             tone="good"
           />
@@ -7359,16 +8276,17 @@ export default function RetirementPlanner() {
             label="Year 1 Withdrawal Rate"
             value={fmtPct(s.year1WithdrawalRate)}
             sublabel={
-              s.year1WithdrawalRate < shortfall.guideline
+              (s.year1WithdrawalRate < shortfall.guideline
                 ? `Below the ${fmtPct(shortfall.guideline)} guideline for a ${shortfall.retirementYears}-year retirement`
-                : `Above the ${fmtPct(shortfall.guideline)} guideline for a ${shortfall.retirementYears}-year retirement`
+                : `Above the ${fmtPct(shortfall.guideline)} guideline for a ${shortfall.retirementYears}-year retirement`) +
+              " — counts everything pulled from savings in year 1, including money withdrawn to pay taxes"
             }
             tone={s.year1WithdrawalRate < shortfall.guideline ? "good" : "warn"}
           />
           <MetricCard
             label="Total Roth Converted"
             value={fmtMoney(s.totalConverted)}
-            sublabel={`Lifetime taxes: ${fmtMoney(s.totalTaxesPaid)}`}
+            sublabel={`Moved into Roth over the whole plan. Lifetime taxes ${fmtMoney(s.totalTaxesPaid)} adds every year's bill in future (inflated) dollars — use it to compare scenarios, not as today's money`}
           />
         </div>
       </div>
@@ -7456,16 +8374,16 @@ export default function RetirementPlanner() {
                 </button>
               </div>
               {!isCouple && (
-                <div className="mt-2">
-                  <p className="mb-1 text-[11px] font-medium text-slate-500">
-                    Tax filing status
-                  </p>
+                <div className="mt-3">
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    I file federal taxes as
+                  </label>
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
                       onClick={() => update("filingStatus")("single")}
-                      className={`rounded border px-3 py-1.5 text-xs font-medium transition ${
-                        (inputs.filingStatus || "single") === "single"
+                      className={`rounded border px-3 py-2 text-xs font-semibold transition ${
+                        inputs.filingStatus !== "mfj"
                           ? "border-indigo-600 bg-indigo-600 text-white"
                           : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
                       }`}
@@ -7475,26 +8393,39 @@ export default function RetirementPlanner() {
                     <button
                       type="button"
                       onClick={() => update("filingStatus")("mfj")}
-                      className={`rounded border px-3 py-1.5 text-xs font-medium transition ${
+                      className={`rounded border px-3 py-2 text-xs font-semibold transition ${
                         inputs.filingStatus === "mfj"
                           ? "border-indigo-600 bg-indigo-600 text-white"
                           : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
                       }`}
                     >
-                      Married (MFJ)
+                      Married (joint)
                     </button>
                   </div>
-                  <p className="mt-1 text-[11px] text-slate-500 leading-relaxed">
-                    Drives federal + NY brackets, deductions, Social Security
-                    taxation, NIIT, and IRMAA tiers. Pick MFJ if you are
-                    married but modeling only your own accounts.
+                  <p className="mt-1.5 text-xs text-slate-500 leading-relaxed">
+                    {inputs.filingStatus === "mfj"
+                      ? "All taxes use married-filing-jointly brackets — for married people modeling only their own accounts."
+                      : "All taxes use single-filer federal and NY brackets, thresholds, and Medicare (IRMAA) tiers."}
+                  </p>
+                  <p className="mt-1.5 rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs leading-relaxed text-slate-600">
+                    <span className="font-semibold">Recently widowed?</span>{" "}
+                    You can usually still file jointly for the year your
+                    spouse passed, and — if you have a dependent child — as a
+                    qualifying surviving spouse (joint rates) for up to two
+                    more years. Model those years with "Married (joint)",
+                    then switch to "Single". Ask your tax preparer which
+                    applies to you.
                   </p>
                 </div>
               )}
             </div>
 
             {isCouple ? (
-              <CoupleInputs couple={inputs.couple} updateCouple={updateCouple} />
+              <CoupleInputs
+                couple={inputs.couple}
+                updateCouple={updateCouple}
+                penaltyImpact={cashStrategyImpact}
+              />
             ) : (
               <>
 
@@ -7508,12 +8439,13 @@ export default function RetirementPlanner() {
                 label="Retirement Age"
                 value={inputs.retirementAge}
                 onChange={update("retirementAge")}
-                hint="Target age to leave corporate work"
+                hint="Target age to stop full-time work. Already retired? Enter the age you actually retired — it can be at or below your current age."
               />
               <NumberInput
                 label="Plan Through Age"
                 value={inputs.planThroughAge}
                 onChange={update("planThroughAge")}
+                hint="How long the money must last — the age you're planning to live to. 95 is a common conservative choice."
               />
             </Section>
 
@@ -7562,14 +8494,6 @@ export default function RetirementPlanner() {
                 step={1000}
               />
               <NumberInput
-                label="Roth Contributions to Date"
-                value={inputs.rothBasis || 0}
-                onChange={update("rothBasis")}
-                prefix="$"
-                step={1000}
-                hint="Lifetime contributions (not conversions/growth) — withdrawable anytime penalty-free before 59½. Leave 0 if unsure (conservative)."
-              />
-              <NumberInput
                 label="HSA"
                 value={inputs.balanceHsa}
                 onChange={update("balanceHsa")}
@@ -7583,7 +8507,7 @@ export default function RetirementPlanner() {
                 onChange={update("creditCardDebt")}
                 prefix="$"
                 step={100}
-                hint="Reduces net worth; assumed paid off before retirement"
+                hint="Paid off immediately at the start of the plan, from cash first and then taxable savings"
               />
             </Section>
 
@@ -7592,6 +8516,7 @@ export default function RetirementPlanner() {
                 values={inputs}
                 onChange={update}
                 earlyRetirement={inputs.retirementAge < 59.5}
+                penaltyImpact={cashStrategyImpact}
               />
             </Section>
 
@@ -7666,7 +8591,7 @@ export default function RetirementPlanner() {
                 onChange={update("contrib401k")}
                 prefix="$"
                 step={500}
-                hint={`Capped at ${fmtMoney(currentContributionLimits.k401Employee)} for ${PROJECTION_START_YEAR}`}
+                hint={`Capped at ${fmtMoneyFull(currentContributionLimits.k401Employee)} for ${PROJECTION_START_YEAR}`}
               />
               <NumberInput
                 label="Employer Match"
@@ -7674,7 +8599,7 @@ export default function RetirementPlanner() {
                 onChange={update("contribMatch")}
                 prefix="$"
                 step={500}
-                hint={`Employee + employer capped at ${fmtMoney(currentContributionLimits.k401Total)}`}
+                hint={`Employee + employer capped at ${fmtMoneyFull(currentContributionLimits.k401Total)}`}
               />
               <NumberInput
                 label="HSA Contribution"
@@ -7682,36 +8607,36 @@ export default function RetirementPlanner() {
                 onChange={update("contribHsa")}
                 prefix="$"
                 step={500}
-                hint={`Capped at ${fmtMoney(currentContributionLimits.hsa)} for current age/household`}
+                hint={`Capped at ${fmtMoneyFull(currentContributionLimits.hsa)} for current age/household`}
                 info={TERM_HELP.hsa}
               />
             </Section>
 
-            <Section title="Spending (in retirement year 1)" icon="🛒">
+            <Section title="Spending (today's dollars)" icon="🛒">
               <NumberInput
                 label="Base Lifestyle Expenses"
                 value={inputs.baseExpenses}
                 onChange={update("baseExpenses")}
                 prefix="$"
                 step={1000}
-                hint="Non-healthcare annual spending"
+                hint="What you spend per year today, not counting healthcare. We grow it with inflation automatically — enter it in today's dollars."
               />
               <NumberInput
-                label="Healthcare (55-64)"
+                label="Healthcare before 65"
                 value={inputs.healthcarePre65}
                 onChange={update("healthcarePre65")}
                 prefix="$"
                 step={1000}
-                hint="ACA marketplace before Medicare"
+                hint="Your full insurance + out-of-pocket cost per year (today's dollars) from retirement until Medicare starts at 65 — e.g. an ACA marketplace plan"
                 info={TERM_HELP.aca}
               />
               <NumberInput
-                label="Healthcare (65+)"
+                label="Healthcare 65+"
                 value={inputs.healthcarePost65}
                 onChange={update("healthcarePost65")}
                 prefix="$"
                 step={500}
-                hint="Medicare + Medigap"
+                hint="Per year, today's dollars — Medicare premiums + Medigap + out-of-pocket"
               />
             </Section>
 
@@ -7830,6 +8755,16 @@ export default function RetirementPlanner() {
             </Section>
 
             <Section title="Roth Conversions" badge="Strategy" icon="🔄">
+              <div className="mb-3 text-xs text-slate-500 leading-relaxed">
+                A <span className="font-medium">Roth conversion</span> moves
+                money from your 401k/IRA into a Roth IRA. You pay income tax
+                on the amount you move <em>this year</em>; after that it grows
+                tax-free with no required withdrawals. Converting works best
+                in low-income years (after retiring, before Social Security).
+                Enter dollars to convert per year in each age range — $0 is a
+                perfectly fine choice. The model stops conversions once your
+                Social Security starts.
+              </div>
               {(() => {
                 // Warn if annual conversion targets are a large % of 401k balance
                 // This prevents the "conversion destroys small portfolio" failure mode
@@ -7856,12 +8791,12 @@ export default function RetirementPlanner() {
                 return null;
               })()}
               <NumberInput
-                label="Ages 55-59 / Year"
+                label="From retirement through 59 / Year"
                 value={inputs.conversionBridge}
                 onChange={update("conversionBridge")}
                 prefix="$"
                 step={5000}
-                hint="Fill 12% bracket"
+                hint={`Tip: many people size this so taxable income stays inside the 12% federal bracket (about ${inputs.filingStatus === "mfj" ? "$100,800 for a couple" : "$50,400 for a single filer"} in 2026)`}
               />
               <NumberInput
                 label="Ages 60-64 / Year"
@@ -7871,12 +8806,12 @@ export default function RetirementPlanner() {
                 step={5000}
               />
               <NumberInput
-                label="Ages 65 to SS / Year"
+                label="Age 65 until Social Security / Year"
                 value={inputs.conversionFinal}
                 onChange={update("conversionFinal")}
                 prefix="$"
                 step={5000}
-                hint="Last chance before SS"
+                hint="Last window — conversions stop once SS starts"
               />
             </Section>
 
@@ -7919,53 +8854,20 @@ export default function RetirementPlanner() {
                   </div>
                 </label>
               </div>
-              {inputs.useAcaSubsidyEstimate && (
-                <NumberInput
-                  label="Household Size"
-                  value={inputs.householdSize}
-                  onChange={update("householdSize")}
-                  hint="For Federal Poverty Level calculation"
-                />
-              )}
-              {inputs.retirementAge < 59.5 && (
-                <div className="mb-3 mt-2 p-2 bg-slate-50 rounded border border-slate-200">
-                  <label className="flex items-start gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={inputs.useSepp === true}
-                      onChange={(e) => update("useSepp")(e.target.checked)}
-                      className="mt-0.5"
-                    />
-                    <div>
-                      <div className="text-xs font-medium text-slate-700">
-                        Model a SEPP / 72(t) program
-                      </div>
-                      <div className="text-xs text-slate-500 mt-0.5">
-                        Fixed-amortization payments from your 401k/IRA, taken
-                        every year from retirement until the later of 5 years
-                        or 59½ — penalty-free up to the payment amount. Rigid
-                        in real life: breaking the schedule triggers
-                        retroactive penalties (not modeled).
-                      </div>
-                    </div>
-                  </label>
-                  {inputs.useSepp && (
-                    <div className="mt-2">
-                      <PctInput
-                        label="SEPP Interest Rate"
-                        value={inputs.seppRate ?? 0.05}
-                        onChange={update("seppRate")}
-                        hint="Legal cap: 120% of the federal mid-term rate (AFR) for the start month — verify the current AFR before relying on this."
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
+              <NumberInput
+                label="Household Size"
+                value={inputs.householdSize}
+                onChange={update("householdSize")}
+                hint="Used for three things: ACA subsidy math, your HSA contribution limit (1 = self-only $4,400, 2+ = family $8,750 in 2026), and how many people pay Medicare premiums"
+              />
               <div className="mt-2 text-xs text-slate-500 leading-relaxed">
                 <TermLabel info={TERM_HELP.irmaa}>IRMAA</TermLabel> surcharges
-                (Medicare 65+) are flagged per year based on same-year{" "}
-                <TermLabel info={TERM_HELP.magi}>MAGI</TermLabel>. Real IRMAA uses a 2-year lookback — treat
-                flagged years as approximate.
+                (Medicare 65+) use your projected{" "}
+                <TermLabel info={TERM_HELP.magi}>MAGI</TermLabel> from two
+                years earlier (matching the real 2-year lookback) once the plan
+                has been retired 2+ years; the first two retirement years fall
+                back to same-year MAGI because working-year income isn't
+                modeled. Treat flagged years as approximate.
               </div>
             </Section>
               </>
@@ -8303,14 +9205,23 @@ export default function RetirementPlanner() {
                         {retireAge >= 55 ? (
                           <>
                             The <span className="font-medium">Rule of 55</span>{" "}
-                            makes your 401k penalty-free if needed.
+                            can make 401k withdrawals penalty-free — but only
+                            from your{" "}
+                            <span className="font-medium">
+                              current employer's plan
+                            </span>
+                            , and only if that plan allows post-separation
+                            withdrawals. Old 401k's and IRAs stay penalized
+                            before 59½. This model optimistically assumes your
+                            whole 401k qualifies.
                           </>
                         ) : (
                           <>
-                            Retiring before 55 means 401k/IRA draws in this
-                            phase carry a{" "}
+                            Retiring before 55 means the Rule of 55 never
+                            applies — 401k/IRA draws in this phase carry a{" "}
                             <span className="font-medium">10% penalty</span>{" "}
-                            (flagged PENALTY in the table below).
+                            (flagged PENALTY in the table below). See the
+                            "Accessing money before 59½" panel for a strategy.
                           </>
                         )}{" "}
                         Begin{" "}
@@ -8389,6 +9300,18 @@ export default function RetirementPlanner() {
               );
             })()}
           </div>
+
+          {/* Early-retirement access strategy (Rule of 55 / pre-59½ bridge) */}
+          <EarlyAccessStrategyPanel
+            displayInputs={displayInputs}
+            results={results}
+            isCouple={isCouple}
+            couple={isCouple ? normalizeCoupleInputs(inputs.couple) : null}
+            adjust={adjust}
+            showRealDollars={showRealDollars}
+            maxSustainableSpending={maxSustainableSpending}
+            cashStrategyImpact={cashStrategyImpact}
+          />
 
           {/* Year-by-year table */}
           <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden print:shadow-none print:border-slate-300 print-page-break">
@@ -8966,9 +9889,16 @@ export default function RetirementPlanner() {
             <p className="font-semibold mb-2">Model Assumptions & Caveats</p>
             <ul className="space-y-1 list-disc list-inside">
               <li>
-                Tax: <TermLabel info={TERM_HELP.mfj}>MFJ</TermLabel> federal
-                brackets + NY State, inflation-adjusted from 2024 using your
-                selected inflation rate
+                Tax: federal + NY brackets for your selected filing status —{" "}
+                {isCouple
+                  ? "couple mode always uses married filing jointly"
+                  : displayInputs.filingStatus === "mfj"
+                    ? "married filing jointly"
+                    : "single filer"}{" "}
+                — inflation-adjusted from the latest published tables using
+                your selected inflation rate. Head-of-household is not
+                modeled; qualifying-surviving-spouse years can be modeled as
+                married-joint.
               </li>
               <li>
                 Taxable account gains use tracked cost basis (not flat 60%
@@ -8977,8 +9907,9 @@ export default function RetirementPlanner() {
               </li>
               <li>
                 Social Security taxation uses provisional-income rules (0-85%
-                taxable depending on other income). Thresholds $32K/$44K are
-                not indexed to inflation — this is statutory, not a bug.
+                taxable depending on other income). Thresholds ($32K/$44K
+                joint, $25K/$34K single) are not indexed to inflation — this
+                is statutory, not a bug.
               </li>
               <li>
                 Taxes solved iteratively (gross-up converges so final
@@ -8987,35 +9918,38 @@ export default function RetirementPlanner() {
               <li>
                 RMDs modeled from your configured start age using the 2022+
                 Uniform Lifetime Table. Inherited-account rules not modeled.
+                RMDs are computed on the combined 401k + IRA balance; in real
+                life each employer plan's RMD must be taken from that plan
+                (only IRAs can be aggregated).
               </li>
               <li>
                 <TermLabel info={TERM_HELP.niit}>NIIT</TermLabel> (3.8%)
-                modeled above $250K <TermLabel info={TERM_HELP.mfj}>MFJ</TermLabel>{" "}
-                <TermLabel info={TERM_HELP.magi}>MAGI</TermLabel>. Threshold
+                modeled above $250K joint / $200K single{" "}
+                <TermLabel info={TERM_HELP.magi}>MAGI</TermLabel>. Thresholds
                 not indexed (statutory).
               </li>
               <li>
-                <TermLabel info={TERM_HELP.irmaa}>IRMAA</TermLabel>: computed
-                from <TermLabel info={TERM_HELP.magi}>MAGI</TermLabel> two years
-                prior (the real Medicare lookback). Only the first Medicare
-                years, whose lookback predates modeled retirement income, fall
-                back to same-year MAGI.
+                Age-65+ extra standard deduction ($1,650/spouse joint,
+                $2,050 single, indexed) and the OBBBA senior deduction
+                ($6,000/person 65+, 2025-2028, phased out above $150K joint /
+                $75K single MAGI) are modeled.
+              </li>
+              <li>
+                Cash/HYSA interest is taxed as ordinary income and counts
+                toward <TermLabel info={TERM_HELP.magi}>MAGI</TermLabel>,
+                Social Security provisional income, ACA, and IRMAA. Taxable
+                brokerage dividends remain a simplified return drag.
+              </li>
+              <li>
+                <TermLabel info={TERM_HELP.irmaa}>IRMAA</TermLabel>: uses
+                projected <TermLabel info={TERM_HELP.magi}>MAGI</TermLabel>{" "}
+                from two years earlier (the real lookback) once retired 2+
+                years; earlier years fall back to same-year MAGI.
               </li>
               <li>
                 <TermLabel info={TERM_HELP.aca}>ACA subsidy</TermLabel> (if enabled): bracketed approximation using
                 post-IRA applicable-percentage formula. Real subsidies depend
                 on state, plan choice, age, and specific FPL tables.
-              </li>
-              <li>
-                Tax: computed with{" "}
-                {isCouple || inputs.filingStatus === "mfj"
-                  ? "married-filing-jointly"
-                  : "single-filer"}{" "}
-                federal and NY parameters
-                {!isCouple
-                  ? " (switch under Plan Type if your filing status differs)"
-                  : ""}
-                .
               </li>
               <li>
                 Social Security earnings test not modeled: claiming before
@@ -9025,12 +9959,22 @@ export default function RetirementPlanner() {
               <li>
                 Couple mode assumes both spouses live through the full plan —
                 survivor benefits, widow(er) filing status, and first-death
-                expense changes are not modeled.
+                expense changes are not modeled. A surviving spouse can plan
+                forward by switching to Individual mode with the Single
+                filing status (or Married-joint for qualifying
+                surviving-spouse years).
               </li>
               <li>
-                Not modeled: TCJA sunset after 2025, tax-exempt interest in
-                provisional income, state tax law changes, long-term care
-                costs.
+                HSA withdrawals are modeled for healthcare only. In reality,
+                after 65 an HSA can fund anything (taxed as ordinary income) —
+                a large HSA balance here may look less spendable than it is.
+              </li>
+              <li>
+                Not modeled: tax-exempt interest in provisional income, state
+                tax law changes, long-term care costs, the 2026+ requirement
+                that high earners' 401k catch-up contributions be Roth, and
+                Roth 5-year clocks (early Roth draws are penalized in full as
+                a conservative stand-in).
               </li>
               <li>
                 Not financial advice — consult a fee-only fiduciary & CPA.
@@ -9200,7 +10144,7 @@ function ScenarioComparison({
                   const yourAge = Number(age);
                   const spouseAge = couple
                     ? couple.spouse.currentAge + (yourAge - couple.primary.currentAge)
-                    : yourAge + 5;
+                    : null;
                   const yearsRetired = displayInputs.planThroughAge - yourAge;
                   const isCurrentPlan = yourAge === displayInputs.retirementAge;
                   return (
@@ -9219,9 +10163,11 @@ function ScenarioComparison({
                             </span>
                           )}
                         </div>
-                        <div className="text-xs text-slate-500">
-                          {couple ? "Spouse age" : "Husband"}: {spouseAge}
-                        </div>
+                        {couple && (
+                          <div className="text-xs text-slate-500">
+                            Spouse age: {spouseAge}
+                          </div>
+                        )}
                       </td>
                       {byAge[age].map((s, i) => {
                         const val = adjust(s.portfolioAtEnd, endYear);
@@ -9308,29 +10254,31 @@ function ScenarioComparison({
         </h3>
         <div className="space-y-3 text-sm text-slate-700 leading-relaxed">
           <p>
-            <span className="font-semibold">Retiring at 50 at "Current Plan" spending:</span>{" "}
-            you'd have 5 fewer years of compounding and contributions, and 5
-            more years of drawdown. The ending balance is smaller — but look at
-            the trade: you'd gain 5 years of freedom while your husband is in
-            his mid-50s rather than his 60s.
+            <span className="font-semibold">Retiring earlier</span> means fewer
+            years of saving and more years of spending, so the ending balance
+            shrinks. The question this table answers is <em>how much</em> it
+            shrinks — and whether the smaller number is still enough to fund
+            your plan through age {displayInputs.planThroughAge}.
           </p>
           <p>
-            <span className="font-semibold">Retiring at 55 at "Enhanced" spending:</span>{" "}
-            you'd spend 25% more each year and still likely leave a meaningful
-            inheritance. If the goal is to enjoy more while you're able, this
-            column is arguably the most interesting.
+            <span className="font-semibold">Spending more ("Enhanced")</span>{" "}
+            shows what an extra 25% per year costs you by age{" "}
+            {displayInputs.planThroughAge}. If that column still ends
+            comfortably above zero, you may have more room to enjoy than you
+            thought. <span className="font-semibold">"Modest"</span> shows the
+            cushion you gain from a 15% cut.
           </p>
           <p>
-            <span className="font-semibold">Retiring at 52-53:</span> Often the
-            sweet spot for people in your situation. You bank 2-3 more years
-            of 401k match + catch-up contributions (which are the highest-value
-            years of your career), then step out while both you and your
-            husband are still in great shape.
+            <span className="font-semibold">A red "Depleted" cell</span> means
+            that combination of retirement age and spending runs out of money
+            before age {displayInputs.planThroughAge}. Cells in amber end above
+            zero but with a thin cushion.
           </p>
           <p className="text-xs text-slate-500 italic mt-2">
             Every cell above has been projected with your actual assumptions
             (returns, inflation, tax rates, part-time income, Social Security).
             Numbers are ending portfolio at age {displayInputs.planThroughAge}.
+            Estimates only — not financial advice.
           </p>
         </div>
       </div>
@@ -9724,6 +10672,11 @@ function PlannerChat({
           </button>
         </form>
 
+        <p className="text-[11px] text-slate-400 leading-relaxed">
+          AI answers can be wrong and are not financial, tax, or investment
+          advice. Verify anything important with a professional before acting.
+        </p>
+
         {!compact && (
           <p className="text-xs text-slate-500 leading-relaxed">
             Local development uses <span className="font-mono">/api/chat</span>.
@@ -9774,11 +10727,11 @@ function RiskAnalysis({
           Risk Analysis — Sequence of Returns
         </h2>
         <p className="text-xs text-slate-500 mb-2">
-          The single model you've been looking at assumes steady 5.5% returns
-          every year. Real markets don't work that way — you might get a
-          devastating crash in your first year of retirement, or a bull market
-          for a decade. This simulation runs your plan through 500 possible
-          market sequences to see how often it succeeds.
+          The main plan assumes steady {fmtPct(inputs.postReturn)} returns
+          every year in retirement. Real markets don't work that way — you
+          might get a devastating crash in your first year of retirement, or a
+          bull market for a decade. This simulation runs your plan through 500
+          possible market sequences to see how often it succeeds.
         </p>
         <p className="text-xs text-slate-500 italic mb-4">
           Each simulation feeds randomized retirement-year returns into the
@@ -10101,14 +11054,15 @@ function RiskAnalysis({
                 </div>
                 <div className="mt-3 p-3 bg-white border border-emerald-300 rounded">
                   <p className="text-xs text-emerald-900 leading-relaxed">
-                    <span className="font-bold">Your Year-1 WR is{" "}
+                    <span className="font-bold">Your Year-1 withdrawal rate is{" "}
                       {fmtPct(results.summary.year1WithdrawalRate)}
                     </span>
-                    . In US market history going back to ~1926, a withdrawal
-                    rate at your level has historically performed well across
-                    35-year periods — including retirees who started in 1929,
-                    1966, and 1973. Past performance is not a guarantee; treat
-                    this as historical context, not a prediction.
+                    .{" "}
+                    {results.summary.year1WithdrawalRate < 0.04
+                      ? "In US market history back to ~1926, starting rates at this level survived nearly every 35-year period — including retirements that began in 1929, 1966, and 1973."
+                      : "In US market history back to ~1926, starting rates above 4% failed in a meaningful share of 35-year periods — the table above shows how quickly the odds fall as the rate rises."}{" "}
+                    Past performance is not a guarantee; treat this as
+                    historical context, not a prediction.
                   </p>
                   <p className="text-xs text-emerald-900 leading-relaxed mt-2">
                     If the Monte Carlo above shows a lower success rate, it's
@@ -10197,9 +11151,11 @@ function RiskAnalysis({
                   {inputs.planThroughAge}.
                 </li>
                 <li>
-                  Financial planners consider{" "}
-                  <span className="font-medium">85%+ "safe"</span>, 90%+ "very
-                  safe", 95%+ "probably over-saving".
+                  Planners often treat{" "}
+                  <span className="font-medium">85–90%+ as comfortable</span>.
+                  Very high rates (95%+) <em>can</em> mean you have room to
+                  retire earlier or spend more — or that your return
+                  assumptions are optimistic.
                 </li>
                 <li>
                   The{" "}
@@ -10226,18 +11182,26 @@ function RiskAnalysis({
                 What this means for your decision:
               </p>
               <p className="text-xs text-emerald-900 leading-relaxed">
-                If your success rate is above 90%, you're almost certainly
-                over-saving. That's the data-driven case for either{" "}
+                A success rate well above 90% <em>may</em> mean you have more
+                margin than you need — a case for{" "}
                 <span className="font-medium">retiring earlier</span>,{" "}
                 <span className="font-medium">spending more per year</span>,
-                or <span className="font-medium">both</span>. Try changing
-                your retirement age to 52 in the sidebar and re-running —
-                you'll see how much margin you actually have.
+                or <span className="font-medium">both</span>. Before acting on
+                it, stress-test the conclusion: lower the return assumption by
+                1% and re-run. If the rate stays high, try moving your
+                retirement age a year or two earlier in the sidebar and watch
+                how much margin you actually have.
               </p>
             </div>
           </>
         )}
       </div>
+
+      <p className="text-xs text-slate-500 italic">
+        Estimates only — this tool is for education, not financial, tax, or
+        investment advice. Verify important numbers with a professional before
+        acting.
+      </p>
 
       <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm">
         <h3 className="text-base font-bold text-slate-900 mb-3">
@@ -10258,10 +11222,18 @@ function RiskAnalysis({
         </p>
         <p className="text-sm text-slate-700 leading-relaxed">
           <span className="font-semibold">How to hedge:</span> Keep 2-3 years
-          of spending in cash/short-term bonds (you already do), avoid selling
-          stocks during bad years, have flexible spending (part-time income
-          helps), and stay diversified. Your current plan with $300K+ cash and
-          part-time income already has these guardrails.
+          of spending in cash/short-term bonds, avoid selling stocks during
+          bad years, keep spending flexible (part-time income helps), and stay
+          diversified.{" "}
+          {(() => {
+            const yearOneSpend =
+              (inputs.baseExpenses || 0) + (inputs.healthcarePre65 || 0);
+            if (yearOneSpend <= 0) return null;
+            const cashYears = (inputs.balanceCash || 0) / yearOneSpend;
+            return cashYears >= 2
+              ? `Your current inputs hold about ${cashYears.toFixed(1)} years of spending in cash — a solid buffer.`
+              : `Your current inputs hold about ${cashYears.toFixed(1)} year${cashYears >= 0.95 && cashYears < 1.05 ? "" : "s"} of spending in cash — a thin buffer for bad early years.`;
+          })()}
         </p>
       </div>
     </div>
