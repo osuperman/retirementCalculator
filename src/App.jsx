@@ -364,6 +364,28 @@ function taxableSocialSecurity(ssGross, otherIncome, filingStatus = "mfj") {
   return Math.max(0, Math.min(taxable, ssGross * 0.85));
 }
 
+// Single Life Expectancy Table (Treas. Reg. 1.401(a)(9)-9(b), 2022+),
+// ages relevant to SEPP start. Notice 2022-6 permits this table for the
+// 72(t) fixed-amortization method.
+const SINGLE_LIFE_EXPECTANCY = {
+  40: 45.7, 41: 44.8, 42: 43.8, 43: 42.9, 44: 41.9, 45: 41.0, 46: 40.0,
+  47: 39.0, 48: 38.1, 49: 37.1, 50: 36.2, 51: 35.3, 52: 34.3, 53: 33.4,
+  54: 32.5, 55: 31.6, 56: 30.6, 57: 29.8, 58: 28.9, 59: 28.0,
+};
+
+// Fixed-amortization SEPP payment (Notice 2022-6): level annual payment that
+// amortizes the account balance over single-life expectancy at the chosen
+// interest rate (legally capped at 120% of the federal mid-term rate - the
+// cap is the user's responsibility; the UI carries the warning).
+function seppAmortizedPayment(balance, rate, startAge) {
+  if (balance <= 0) return 0;
+  const n =
+    SINGLE_LIFE_EXPECTANCY[Math.min(59, Math.max(40, Math.round(startAge)))] ??
+    30;
+  if (rate <= 0) return balance / n;
+  return (balance * rate) / (1 - Math.pow(1 + rate, -n));
+}
+
 // IRS Uniform Lifetime Table divisor for RMD calculation (2022+ revised table)
 // RMD = prior year-end balance / divisor
 function rmdDivisor(age) {
@@ -494,6 +516,43 @@ function totalTax(
 // User-selectable cash drawdown behavior. "cashFirst" reproduces the original
 // waterfall exactly; the other strategies respect an inflation-adjusted
 // minimum cash reserve that is only spendable via the last-resort toggle.
+// Roth IRA ordering rules (IRC 408A(d)(4)): withdrawals come from
+// contribution basis first (never taxed or penalized), then conversion
+// principal FIFO (each conversion penalty-free once 5 tax years old), then
+// earnings. The engine tracks user-entered contribution basis plus every
+// conversion vintage it creates, so Roth conversion ladders price correctly.
+// Simplification: early *earnings* withdrawals are penalized but their income
+// tax is not modeled (they occur only when a plan is already collapsing).
+function rothEarlyPenaltyBase(wRoth, layers, currentYear) {
+  if (!layers) return wRoth;
+  let remaining = wRoth;
+  let penalized = 0;
+  remaining -= Math.min(remaining, Math.max(0, layers.contribBasis));
+  for (const v of layers.vintages) {
+    if (remaining <= 0) break;
+    const take = Math.min(remaining, v.amount);
+    if (currentYear - v.year < 5) penalized += take;
+    remaining -= take;
+  }
+  penalized += Math.max(0, remaining);
+  return penalized;
+}
+
+function consumeRothLayers(wRoth, layers) {
+  if (!layers || wRoth <= 0) return;
+  let remaining = wRoth;
+  const fromBasis = Math.min(remaining, Math.max(0, layers.contribBasis));
+  layers.contribBasis -= fromBasis;
+  remaining -= fromBasis;
+  for (const v of layers.vintages) {
+    if (remaining <= 0) break;
+    const take = Math.min(remaining, v.amount);
+    v.amount -= take;
+    remaining -= take;
+  }
+  layers.vintages = layers.vintages.filter((v) => v.amount > 0);
+}
+
 const CASH_POLICY_DEFAULT = {
   strategy: "cashFirst", // cashFirst | preserveReserve | proportional | cashLast
   reserveNominal: 0, // this year's reserve floor in nominal dollars
@@ -616,6 +675,11 @@ function solveGrossedUpWithdrawals({
   seniors65 = 0,
   // Tax filing status: "mfj" or "single".
   filingStatus = "mfj",
+  // Roth ordering layers (contribution basis + conversion vintages).
+  rothLayers = null,
+  // Annual SEPP/72(t) payment amount - tax-deferred draws up to this are
+  // exempt from the early-withdrawal penalty.
+  seppExempt = 0,
 }) {
   let tax = 0;
   let withdrawals = { wCash: 0, wTaxable: 0, w401k: 0, wIra: 0, wRoth: 0, reserveUsed: 0 };
@@ -688,8 +752,14 @@ function solveGrossedUpWithdrawals({
     if (age < 59.5) {
       const penalized401k =
         penaltyFree401k && age >= 55 ? 0 : withdrawals.w401k;
-      earlyPenalty =
-        0.1 * (penalized401k + withdrawals.wIra + withdrawals.wRoth);
+      const penalizedRoth = rothLayers
+        ? rothEarlyPenaltyBase(withdrawals.wRoth, rothLayers, year)
+        : withdrawals.wRoth;
+      const penalizedTaxDeferred = Math.max(
+        0,
+        penalized401k + withdrawals.wIra - Math.max(0, seppExempt),
+      );
+      earlyPenalty = 0.1 * (penalizedTaxDeferred + penalizedRoth);
     } else {
       earlyPenalty = 0;
     }
@@ -2142,6 +2212,109 @@ function runSelfTests() {
     },
   );
 
+  // --- Roth ordering layers (IRC 408A(d)(4))
+  test(
+    "Roth layers: basis free, unseasoned conversion penalized",
+    rothEarlyPenaltyBase(
+      8000,
+      { contribBasis: 5000, vintages: [{ year: 2026, amount: 20000 }] },
+      2028,
+    ),
+    3000,
+  );
+  test(
+    "Roth layers: 5-year-seasoned conversion is penalty-free",
+    rothEarlyPenaltyBase(
+      8000,
+      { contribBasis: 0, vintages: [{ year: 2026, amount: 20000 }] },
+      2031,
+    ),
+    0,
+  );
+  test(
+    "Roth layers: earnings beyond layers are penalized",
+    rothEarlyPenaltyBase(
+      30000,
+      { contribBasis: 5000, vintages: [{ year: 2020, amount: 20000 }] },
+      2031,
+    ),
+    5000,
+  );
+
+  testScenario(
+    "Roth basis: early retiree spending contributions pays no penalty",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        currentAge: 50,
+        retirementAge: 52,
+        planThroughAge: 58,
+        balanceCash: 0,
+        balanceTaxable: 0,
+        balance401k: 0,
+        balanceTradIra: 0,
+        balanceHsa: 0,
+        balanceRoth: 400000,
+        rothBasis: 400000,
+        contrib401k: 0,
+        contribMatch: 0,
+        contribHsa: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+        ssIncome: 0,
+      });
+      const row = r.yearlyData.find((d) => d.age === 52);
+      return {
+        passed: row.fromRoth > 0 && row.earlyPenalty === 0,
+        details: `fromRoth=${row.fromRoth}, penalty=${row.earlyPenalty}`,
+      };
+    },
+  );
+
+  // --- SEPP / 72(t)
+  test(
+    "seppAmortizedPayment: $1M at 5% from age 52 (life exp 34.3) approx $61,545",
+    seppAmortizedPayment(1000000, 0.05, 52),
+    61545,
+    pctEq,
+  );
+
+  testScenario(
+    "SEPP: amortized stream eliminates the penalty when it covers the need",
+    () => {
+      const base = {
+        ...baseInputs,
+        currentAge: 50,
+        retirementAge: 52,
+        planThroughAge: 60,
+        balanceCash: 0,
+        balanceTaxable: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        balanceTradIra: 0,
+        balance401k: 1000000,
+        baseExpenses: 40000,
+        healthcarePre65: 10000,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+        ssIncome: 20000,
+      };
+      const withSepp = simulate({ ...base, useSepp: true, seppRate: 0.05 });
+      const withoutSepp = simulate(base);
+      const rowW = withSepp.yearlyData.find((d) => d.age === 52);
+      const rowWo = withoutSepp.yearlyData.find((d) => d.age === 52);
+      return {
+        passed:
+          rowW.earlyPenalty === 0 &&
+          rowWo.earlyPenalty > 0 &&
+          rowW.from401k > 0,
+        details: `sepp: penalty=${rowW.earlyPenalty} draw=${rowW.from401k}; no sepp: penalty=${rowWo.earlyPenalty}`,
+      };
+    },
+  );
+
   const passed = results.filter((r) => r.passed).length;
   const failed = results.filter((r) => !r.passed).length;
   return { passed, failed, total: results.length, results };
@@ -2196,6 +2369,9 @@ function simulate(inputs, options = {}) {
     cashStrategy = "cashFirst",
     cashReserveFloor = 0,
     allowReserveAsLastResort = false,
+    rothBasis = 0,
+    useSepp = false,
+    seppRate = 0.05,
   } = inputs;
 
   // Guard against invalid inputs during manual typing. A retirement age at or
@@ -2271,6 +2447,20 @@ function simulate(inputs, options = {}) {
   // Projected MAGI by year — real IRMAA is based on MAGI from two years
   // earlier, so retirement years look back where a projected MAGI exists.
   const magiByYear = {};
+  // Roth ordering layers: user-entered contribution basis + conversion
+  // vintages created below. Basis is capped at the starting balance.
+  const rothLayers = {
+    contribBasis: Math.max(0, Math.min(rothBasis || 0, balanceRoth)),
+    vintages: [],
+  };
+  // 72(t) SEPP: payment is fixed from the first retirement year's starting
+  // tax-deferred balance and forced until the later of 5 years or age 59.5
+  // (busting the schedule is not modeled - payments always continue).
+  let seppPayment = null;
+  const seppLockEndAge =
+    useSepp && retirementAge < 59.5
+      ? Math.max(retirementAge + 5, 59.5)
+      : null;
   let priorYearEndTotal = bCash + bTaxable + b401k + bTradIra + bRoth + bHsa - unpaidDebt;
   let priorPriorYearEndTotal = 0;
 
@@ -2395,6 +2585,17 @@ function simulate(inputs, options = {}) {
         ? Math.round(pensionIncome * pensionMult)
         : 0;
 
+    // 72(t) SEPP stream: fix the payment in the first retirement year.
+    if (
+      seppLockEndAge !== null &&
+      seppPayment === null &&
+      age >= retirementAge
+    ) {
+      seppPayment = seppAmortizedPayment(b401k + bTradIra, seppRate, age);
+    }
+    const seppActive =
+      seppLockEndAge !== null && seppPayment > 0 && age < seppLockEndAge;
+
     // Determine Roth conversion target based on age phase
     let conversion = 0;
     let strategy = "";
@@ -2507,12 +2708,16 @@ function simulate(inputs, options = {}) {
         year,
         age,
         inflation,
-        minimumRmd: rmdAmount,
+        minimumRmd: seppActive
+          ? Math.max(rmdAmount, seppPayment)
+          : rmdAmount,
         penaltyFree401k,
         cashPolicy,
         interestIncome: cashInterestIncome,
         seniors65,
         filingStatus,
+        rothLayers,
+        seppExempt: seppActive ? seppPayment : 0,
       });
 
       finalSpending = effectiveSpending;
@@ -2589,12 +2794,16 @@ function simulate(inputs, options = {}) {
         year,
         age,
         inflation,
-        minimumRmd: rmdAmount,
+        minimumRmd: seppActive
+          ? Math.max(rmdAmount, seppPayment)
+          : rmdAmount,
         penaltyFree401k,
         cashPolicy,
         interestIncome: cashInterestIncome,
         seniors65,
         filingStatus,
+        rothLayers,
+        seppExempt: seppActive ? seppPayment : 0,
       });
     }
 
@@ -2614,6 +2823,8 @@ function simulate(inputs, options = {}) {
     bTaxable = Math.max(0, bTaxable - wTaxable);
     bTaxableBasis = Math.max(0, bTaxableBasis - basisReduction);
     b401k = Math.max(0, b401k - w401k - conversion);
+    consumeRothLayers(wRoth, rothLayers);
+    if (conversion > 0) rothLayers.vintages.push({ year, amount: conversion });
     bRoth = bRoth + conversion;
     bTradIra = Math.max(0, bTradIra - wIra);
     bRoth = Math.max(0, bRoth - wRoth);
@@ -2949,6 +3160,8 @@ function solveCoupleGrossedUpWithdrawals({
   cashPolicy = CASH_POLICY_DEFAULT,
   // Taxable interest earned on the shared Cash/HYSA balance this year.
   interestIncome = 0,
+  // Per-spouse Roth ordering layers (IRC 408A(d)(4)).
+  rothLayers = { primary: null, spouse: null },
 }) {
   const seniors65 =
     (ages.primary >= 65 ? 1 : 0) + (ages.spouse >= 65 ? 1 : 0);
@@ -3019,10 +3232,13 @@ function solveCoupleGrossedUpWithdrawals({
 
     // IRC §72(t) 10% early-distribution penalty, applied per spouse.
     // See solveGrossedUpWithdrawals for the Rule-of-55 / IRA / Roth treatment.
-    const personPenalty = (age, ruleOf55, w401k, wIra, wRoth) => {
+    const personPenalty = (age, ruleOf55, w401k, wIra, wRoth, layers) => {
       if (age >= 59.5) return 0;
       const penalized401k = ruleOf55 && age >= 55 ? 0 : w401k;
-      return 0.1 * (penalized401k + wIra + wRoth);
+      const penalizedRoth = layers
+        ? rothEarlyPenaltyBase(wRoth, layers, year)
+        : wRoth;
+      return 0.1 * (penalized401k + wIra + penalizedRoth);
     };
     earlyPenalty =
       personPenalty(
@@ -3031,6 +3247,7 @@ function solveCoupleGrossedUpWithdrawals({
         withdrawals.primary401k,
         withdrawals.primaryIra,
         withdrawals.primaryRoth,
+        rothLayers.primary,
       ) +
       personPenalty(
         ages.spouse,
@@ -3038,6 +3255,7 @@ function solveCoupleGrossedUpWithdrawals({
         withdrawals.spouse401k,
         withdrawals.spouseIra,
         withdrawals.spouseRoth,
+        rothLayers.spouse,
       );
 
     const newTax =
@@ -3126,6 +3344,23 @@ function simulateCouple(coupleInputs, options = {}) {
   let depleted = unpaidDebt > 1;
   // Projected household MAGI by year, for the IRMAA two-year lookback.
   const coupleMagiByYear = {};
+  // Per-spouse Roth ordering layers (IRC 408A(d)(4)).
+  const coupleRothLayers = {
+    primary: {
+      contribBasis: Math.max(
+        0,
+        Math.min(primary.rothBasis || 0, primary.balanceRoth),
+      ),
+      vintages: [],
+    },
+    spouse: {
+      contribBasis: Math.max(
+        0,
+        Math.min(spouse.rothBasis || 0, spouse.balanceRoth),
+      ),
+      vintages: [],
+    },
+  };
   let priorPriorYearEndTotal = 0;
   let priorYearEndTotal =
     cash +
@@ -3467,6 +3702,7 @@ function simulateCouple(coupleInputs, options = {}) {
       inflation: shared.inflation,
       penaltyFree401k: couplePenaltyFree401k,
       cashPolicy: coupleCashPolicy,
+      rothLayers: coupleRothLayers,
       interestIncome: coupleCashInterest,
     });
     let acaSubsidy = 0;
@@ -3524,6 +3760,7 @@ function simulateCouple(coupleInputs, options = {}) {
         inflation: shared.inflation,
         penaltyFree401k: couplePenaltyFree401k,
         cashPolicy: coupleCashPolicy,
+        rothLayers: coupleRothLayers,
         interestIncome: coupleCashInterest,
       });
     }
@@ -3592,6 +3829,7 @@ function simulateCouple(coupleInputs, options = {}) {
           inflation: shared.inflation,
           penaltyFree401k: couplePenaltyFree401k,
           cashPolicy: coupleCashPolicy,
+          rothLayers: coupleRothLayers,
           interestIncome: coupleCashInterest,
         });
       }
@@ -3616,6 +3854,12 @@ function simulateCouple(coupleInputs, options = {}) {
     );
     primaryState.bTradIra = Math.max(0, primaryState.bTradIra - withdrawals.primaryIra);
     spouseState.bTradIra = Math.max(0, spouseState.bTradIra - withdrawals.spouseIra);
+    consumeRothLayers(withdrawals.primaryRoth, coupleRothLayers.primary);
+    consumeRothLayers(withdrawals.spouseRoth, coupleRothLayers.spouse);
+    if (primaryConversion > 0)
+      coupleRothLayers.primary.vintages.push({ year, amount: primaryConversion });
+    if (spouseConversion > 0)
+      coupleRothLayers.spouse.vintages.push({ year, amount: spouseConversion });
     primaryState.bRoth = Math.max(
       0,
       primaryState.bRoth + primaryConversion - withdrawals.primaryRoth,
@@ -4337,6 +4581,7 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
           [`${planLabel} Balance`, fmtMoney(person.balance401k)],
           ["Traditional IRA", fmtMoney(person.balanceTradIra)],
           ["Roth IRA", fmtMoney(person.balanceRoth)],
+          ["Roth Contributions to Date", fmtMoney(person.rothBasis || 0)],
           ["HSA", fmtMoney(person.balanceHsa)],
         ],
       },
@@ -4444,6 +4689,7 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
         ["401k / 403b", fmtMoney(exportInputs.balance401k)],
         ["Traditional IRA", fmtMoney(exportInputs.balanceTradIra)],
         ["Roth IRA", fmtMoney(exportInputs.balanceRoth)],
+        ["Roth Contributions to Date", fmtMoney(exportInputs.rothBasis || 0)],
         ["HSA", fmtMoney(exportInputs.balanceHsa)],
         ["Credit Card Debt", fmtMoney(exportInputs.creditCardDebt)],
       ],
@@ -5674,6 +5920,9 @@ const DEFAULT_INPUTS = {
   balanceTradIra: 50000,
   // Roth IRA
   balanceRoth: 75000,
+  // Total Roth *contributions* to date (not conversions, not growth) -
+  // withdrawable anytime tax- and penalty-free. 0 = conservative default.
+  rothBasis: 0,
   // HSA cash + HSA investment
   balanceHsa: 25000,
   // Credit card debt (subtracted from net worth)
@@ -5723,6 +5972,11 @@ const DEFAULT_INPUTS = {
   // (flagged in the year-by-year table). If false, the plan shows a shortfall
   // instead of touching the reserve.
   allowReserveAsLastResort: false,
+  // 72(t) SEPP program (individual mode): fixed-amortization payments from
+  // tax-deferred accounts, penalty-free, from retirement until the later of
+  // 5 years or 59.5. Rate must not exceed 120% of the federal mid-term rate.
+  useSepp: false,
+  seppRate: 0.05,
   conversionBridge: 0,
   conversionMid: 0,
   conversionFinal: 0,
@@ -5746,6 +6000,7 @@ const DEFAULT_COUPLE_INPUTS = {
     balance401k: DEFAULT_INPUTS.balance401k,
     balanceTradIra: DEFAULT_INPUTS.balanceTradIra,
     balanceRoth: DEFAULT_INPUTS.balanceRoth,
+    rothBasis: DEFAULT_INPUTS.rothBasis,
     balanceHsa: DEFAULT_INPUTS.balanceHsa,
     contrib401k: DEFAULT_INPUTS.contrib401k,
     contribMatch: DEFAULT_INPUTS.contribMatch,
@@ -5774,6 +6029,7 @@ const DEFAULT_COUPLE_INPUTS = {
     balance401k: 0,
     balanceTradIra: 0,
     balanceRoth: 0,
+    rothBasis: 0,
     balanceHsa: 0,
     contrib401k: 0,
     contribMatch: 0,
@@ -6895,6 +7151,14 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
         onChange={onChange("balanceRoth")}
         prefix="$"
         step={1000}
+      />
+      <NumberInput
+        label="Roth Contributions to Date"
+        value={person.rothBasis || 0}
+        onChange={onChange("rothBasis")}
+        prefix="$"
+        step={1000}
+        hint="Lifetime contributions (not conversions/growth) — withdrawable anytime penalty-free. 0 if unsure."
       />
       <NumberInput
         label="HSA"
@@ -8494,6 +8758,14 @@ export default function RetirementPlanner() {
                 step={1000}
               />
               <NumberInput
+                label="Roth Contributions to Date"
+                value={inputs.rothBasis || 0}
+                onChange={update("rothBasis")}
+                prefix="$"
+                step={1000}
+                hint="Lifetime contributions (not conversions or growth) — withdrawable anytime penalty-free before 59½. Leave 0 if unsure (conservative)."
+              />
+              <NumberInput
                 label="HSA"
                 value={inputs.balanceHsa}
                 onChange={update("balanceHsa")}
@@ -8860,6 +9132,40 @@ export default function RetirementPlanner() {
                 onChange={update("householdSize")}
                 hint="Used for three things: ACA subsidy math, your HSA contribution limit (1 = self-only $4,400, 2+ = family $8,750 in 2026), and how many people pay Medicare premiums"
               />
+              {inputs.retirementAge < 59.5 && (
+                <div className="mb-3 mt-2 p-2 bg-slate-50 rounded border border-slate-200">
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={inputs.useSepp === true}
+                      onChange={(e) => update("useSepp")(e.target.checked)}
+                      className="mt-0.5"
+                    />
+                    <div>
+                      <div className="text-xs font-medium text-slate-700">
+                        Model a SEPP / 72(t) program
+                      </div>
+                      <div className="text-xs text-slate-500 mt-0.5">
+                        Fixed-amortization payments from your 401k/IRA, taken
+                        every year from retirement until the later of 5 years
+                        or 59½ — penalty-free up to the payment amount. Rigid in
+                        real life: breaking the schedule triggers retroactive
+                        penalties (not modeled).
+                      </div>
+                    </div>
+                  </label>
+                  {inputs.useSepp && (
+                    <div className="mt-2">
+                      <PctInput
+                        label="SEPP Interest Rate"
+                        value={inputs.seppRate ?? 0.05}
+                        onChange={update("seppRate")}
+                        hint="Legal cap: 120% of the federal mid-term rate (AFR) for the start month — verify the current AFR before relying on this."
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="mt-2 text-xs text-slate-500 leading-relaxed">
                 <TermLabel info={TERM_HELP.irmaa}>IRMAA</TermLabel> surcharges
                 (Medicare 65+) use your projected{" "}

@@ -124,6 +124,21 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
   against that spouse's 401(k)/403(b) balance, age, Social Security timeline,
   and RMD requirement.
 
+## Roth Ordering Layers And SEPP
+
+- Roth withdrawals follow IRC 408A(d)(4) ordering: user-entered contribution
+  basis (`rothBasis`), then conversion vintages FIFO (each penalty-free five
+  tax years after conversion), then earnings. Only unseasoned conversion
+  principal and earnings incur the 10% penalty before 59.5, so Roth conversion
+  ladders price correctly. Income tax on early earnings withdrawals is not
+  modeled (they arise only in already-failing plans; earnings are consumed
+  last).
+- Optional SEPP/72(t) program (individual mode, `useSepp` + `seppRate`):
+  fixed-amortization payment (Notice 2022-6, Single Life Table) from the first
+  retirement year's tax-deferred balance, forced yearly through the RMD
+  channel until the later of 5 years or 59.5, penalty-exempt up to the payment
+  amount. Busting the schedule (retroactive penalties) is not modeled.
+
 ## RMDs
 
 - RMD start age defaults from inferred birth year and current projection year.
