@@ -2,6 +2,11 @@
 
 This document summarizes the projection rules implemented in `src/App.jsx`.
 
+For the standalone rules-and-law specification — every statute, formula, and
+source behind these rules, written so the engine could be reconstructed from
+it — see [RULES_AND_METHODOLOGY.md](RULES_AND_METHODOLOGY.md). Update the two
+documents together when current-law tables change.
+
 ## Timing
 
 - Projection starts in the current calendar year from `new Date().getFullYear()`.
@@ -46,7 +51,7 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 
 ## Taxes
 
-- Federal ordinary-income and long-term-capital-gain calculations use official 2026 MFJ parameters where available.
+- Federal ordinary-income and long-term-capital-gain calculations use official 2026 parameters for the selected filing status (single or MFJ). Individual mode defaults to single; couple mode always files MFJ. Filing status also selects the Social Security provisional-income thresholds, NIIT threshold, IRMAA tiers, and NY tables.
 - Future federal brackets and deductions are projected from the last known table year using the input inflation rate.
 - Long-term capital gains use the remaining standard deduction before applying preferential brackets.
 - NIIT is modeled at 3.8% above the non-indexed $250,000 MFJ MAGI threshold.
@@ -93,6 +98,19 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
   against that spouse's 401(k)/403(b) balance, age, Social Security timeline,
   and RMD requirement.
 
+## Roth Ordering Layers And SEPP
+
+- Roth withdrawals follow IRC 408A(d)(4) ordering: user-entered contribution
+  basis (`rothBasis`), then conversion vintages FIFO (each penalty-free five
+  tax years after conversion), then earnings. Only unseasoned conversion
+  principal and earnings incur the 10% penalty before 59½, so Roth conversion
+  ladders price correctly. Income tax on early earnings withdrawals is not
+  modeled.
+- Optional SEPP/72(t) program (individual mode, `useSepp` + `seppRate`):
+  fixed-amortization payment (Notice 2022-6, Single Life Table) from the
+  first retirement year's tax-deferred balance, forced yearly until the later
+  of 5 years or 59½ via the RMD channel, penalty-exempt up to the payment.
+
 ## RMDs
 
 - RMD start age defaults from inferred birth year and current projection year.
@@ -114,7 +132,7 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 - ACA subsidy estimation is optional and approximate.
 - Under current 2026 law, the model restores the 400% FPL subsidy cliff after the enhanced-credit period.
 - IRMAA uses 2026 MFJ Part B and Part D surcharge tiers and applies an inflation projection after 2026.
-- Real IRMAA uses a two-year MAGI lookback; the model uses same-year MAGI as an approximation.
+- IRMAA uses the real two-year MAGI lookback against modeled retirement-year MAGI; only the first Medicare years (whose lookback predates modeled income) fall back to the same-year iterative approximation.
 - In married-couple mode, lifestyle spending is shared, but healthcare costs
   are spouse-specific because Medicare/ACA eligibility depends on each spouse's
   age. ACA subsidy and IRMAA estimates remain household-level approximations

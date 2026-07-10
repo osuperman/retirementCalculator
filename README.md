@@ -4,6 +4,16 @@ A Vite + React retirement projection tool focused on tax-aware drawdowns, Roth c
 
 The active app is `src/App.jsx`. The older `src/retirement_planner.jsx` file is not mounted by `src/main.jsx`.
 
+## Documentation
+
+- **[RULES_AND_METHODOLOGY.md](RULES_AND_METHODOLOGY.md)** — the standalone
+  specification: every financial rule, law, and formula the engine uses
+  (account access rules, taxes, Social Security, RMDs, penalties, ACA/IRMAA,
+  NY tax), each with its authoritative source and every simplification
+  flagged. Sufficient to reconstruct the calculation engine without the UI.
+- **[CALCULATION_MODEL.md](CALCULATION_MODEL.md)** — the implementation map:
+  how those rules are wired into `src/App.jsx`.
+
 ## Run Locally
 
 ```bash

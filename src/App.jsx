@@ -17,36 +17,73 @@ import {
 
 const PROJECTION_START_YEAR = new Date().getFullYear();
 
-const FEDERAL_TAX_TABLES_MFJ = {
-  2024: {
-    standardDeduction: 29200,
-    ordinaryBrackets: [
-      [0, 23200, 0.1],
-      [23200, 94300, 0.12],
-      [94300, 201050, 0.22],
-      [201050, 383900, 0.24],
-      [383900, 487450, 0.32],
-      [487450, 731200, 0.35],
-      [731200, Infinity, 0.37],
-    ],
-    ltcgZeroTop: 94050,
-    ltcgFifteenTop: 583750,
+const FEDERAL_TAX_TABLES = {
+  mfj: {
+    2024: {
+      standardDeduction: 29200,
+      ordinaryBrackets: [
+        [0, 23200, 0.1],
+        [23200, 94300, 0.12],
+        [94300, 201050, 0.22],
+        [201050, 383900, 0.24],
+        [383900, 487450, 0.32],
+        [487450, 731200, 0.35],
+        [731200, Infinity, 0.37],
+      ],
+      ltcgZeroTop: 94050,
+      ltcgFifteenTop: 583750,
+    },
+    2026: {
+      standardDeduction: 32200,
+      ordinaryBrackets: [
+        [0, 24800, 0.1],
+        [24800, 100800, 0.12],
+        [100800, 211400, 0.22],
+        [211400, 403550, 0.24],
+        [403550, 512450, 0.32],
+        [512450, 768700, 0.35],
+        [768700, Infinity, 0.37],
+      ],
+      ltcgZeroTop: 98900,
+      ltcgFifteenTop: 613700,
+    },
   },
-  2026: {
-    standardDeduction: 32200,
-    ordinaryBrackets: [
-      [0, 24800, 0.1],
-      [24800, 100800, 0.12],
-      [100800, 211400, 0.22],
-      [211400, 403550, 0.24],
-      [403550, 512450, 0.32],
-      [512450, 768700, 0.35],
-      [768700, Infinity, 0.37],
-    ],
-    ltcgZeroTop: 98900,
-    ltcgFifteenTop: 613700,
+  single: {
+    2024: {
+      standardDeduction: 14600,
+      ordinaryBrackets: [
+        [0, 11600, 0.1],
+        [11600, 47150, 0.12],
+        [47150, 100525, 0.22],
+        [100525, 191950, 0.24],
+        [191950, 243725, 0.32],
+        [243725, 609350, 0.35],
+        [609350, Infinity, 0.37],
+      ],
+      ltcgZeroTop: 47025,
+      ltcgFifteenTop: 518900,
+    },
+    2026: {
+      standardDeduction: 16100,
+      ordinaryBrackets: [
+        [0, 12400, 0.1],
+        [12400, 50400, 0.12],
+        [50400, 105700, 0.22],
+        [105700, 201775, 0.24],
+        [201775, 256225, 0.32],
+        [256225, 640600, 0.35],
+        [640600, Infinity, 0.37],
+      ],
+      ltcgZeroTop: 49450,
+      ltcgFifteenTop: 545500,
+    },
   },
 };
+
+// IRC 86 provisional-income thresholds (statutorily unindexed) and the
+// IRC 1411 NIIT MAGI threshold, per filing status.
+const SS_TAX_THRESHOLDS = { mfj: [32000, 44000], single: [25000, 34000] };
+const NIIT_THRESHOLD = { mfj: 250000, single: 200000 };
 
 const LIMIT_TABLES = {
   2026: {
@@ -69,14 +106,28 @@ const ACA_APPLICABLE_PERCENTAGES_2026 = [
   [3.0, 4.0, 0.0996, 0.0996],
 ];
 
-const IRMAA_2026_MFJ = [
-  { top: 218000, monthlyPartB: 0, monthlyPartD: 0 },
-  { top: 274000, monthlyPartB: 81.2, monthlyPartD: 14.5 },
-  { top: 342000, monthlyPartB: 202.9, monthlyPartD: 37.5 },
-  { top: 410000, monthlyPartB: 324.6, monthlyPartD: 60.4 },
-  { top: 750000, monthlyPartB: 446.3, monthlyPartD: 83.3 },
-  { top: Infinity, monthlyPartB: 487, monthlyPartD: 91 },
-];
+// CMS 2026 IRMAA tiers. Surcharge amounts are per enrollee and identical
+// across statuses; only the MAGI thresholds differ. `exclusiveTop` marks the
+// tier whose upper bound belongs to the tier above (CMS defines the top tier
+// as >= $750,000 MFJ / >= $500,000 single).
+const IRMAA_2026 = {
+  mfj: [
+    { top: 218000, monthlyPartB: 0, monthlyPartD: 0 },
+    { top: 274000, monthlyPartB: 81.2, monthlyPartD: 14.5 },
+    { top: 342000, monthlyPartB: 202.9, monthlyPartD: 37.5 },
+    { top: 410000, monthlyPartB: 324.6, monthlyPartD: 60.4 },
+    { top: 750000, monthlyPartB: 446.3, monthlyPartD: 83.3, exclusiveTop: true },
+    { top: Infinity, monthlyPartB: 487, monthlyPartD: 91 },
+  ],
+  single: [
+    { top: 109000, monthlyPartB: 0, monthlyPartD: 0 },
+    { top: 137000, monthlyPartB: 81.2, monthlyPartD: 14.5 },
+    { top: 171000, monthlyPartB: 202.9, monthlyPartD: 37.5 },
+    { top: 205000, monthlyPartB: 324.6, monthlyPartD: 60.4 },
+    { top: 500000, monthlyPartB: 446.3, monthlyPartD: 83.3, exclusiveTop: true },
+    { top: Infinity, monthlyPartB: 487, monthlyPartD: 91 },
+  ],
+};
 
 function projectedFromKnownTable(table, year, inflation) {
   if (table[year]) return { baseYear: year, base: table[year], factor: 1 };
@@ -89,8 +140,9 @@ function projectedFromKnownTable(table, year, inflation) {
   return { baseYear, base, factor };
 }
 
-function getFederalTaxParams(year, inflation = 0.03) {
-  const projected = projectedFromKnownTable(FEDERAL_TAX_TABLES_MFJ, year, inflation);
+function getFederalTaxParams(year, inflation = 0.03, filingStatus = "mfj") {
+  const table = FEDERAL_TAX_TABLES[filingStatus] || FEDERAL_TAX_TABLES.mfj;
+  const projected = projectedFromKnownTable(table, year, inflation);
   const { base, factor } = projected;
   return {
     standardDeduction: base.standardDeduction * factor,
@@ -158,9 +210,13 @@ function adjustedSocialSecurityBenefit(fraBenefit, claimAge, fullRetirementAge =
 // TAX CALCULATIONS (MFJ, inflation-adjusted from 2024 brackets)
 // ============================================================
 
-function fedOrdinaryTaxMFJ(taxableIncome, year, inflation = 0.03) {
+function fedOrdinaryTax(taxableIncome, year, inflation = 0.03, filingStatus = "mfj") {
   if (taxableIncome <= 0) return 0;
-  const { ordinaryBrackets: brackets } = getFederalTaxParams(year, inflation);
+  const { ordinaryBrackets: brackets } = getFederalTaxParams(
+    year,
+    inflation,
+    filingStatus,
+  );
   let tax = 0;
   for (const [low, high, rate] of brackets) {
     if (taxableIncome > low) {
@@ -171,10 +227,10 @@ function fedOrdinaryTaxMFJ(taxableIncome, year, inflation = 0.03) {
   return tax;
 }
 
-function fedLtcgTaxMFJ(ltcg, ordinaryTaxable, year, inflation = 0.03) {
+function fedLtcgTax(ltcg, ordinaryTaxable, year, inflation = 0.03, filingStatus = "mfj") {
   if (ltcg <= 0) return 0;
   const { ltcgZeroTop: zeroTop, ltcgFifteenTop: fifteenTop } =
-    getFederalTaxParams(year, inflation);
+    getFederalTaxParams(year, inflation, filingStatus);
   let start = Math.max(0, ordinaryTaxable);
   let tax = 0;
   let remaining = ltcg;
@@ -199,25 +255,52 @@ function fedLtcgTaxMFJ(ltcg, ordinaryTaxable, year, inflation = 0.03) {
 // indexed and NY suffered unbounded bracket creep over a multi-decade horizon,
 // overstating NY tax and understating ending balances in later years.
 const NY_TAX_BASE_YEAR = 2024;
-function nyStateTaxMFJ(taxableIncome, year = NY_TAX_BASE_YEAR, inflation = 0.03) {
+// 2024 statutory NY tables (NY Tax Law 601). Single uses the same nine rates
+// with lower bracket thresholds and an $8,000 standard deduction.
+const NY_TAX_2024 = {
+  mfj: {
+    stdDed: 16050,
+    brackets: [
+      [0, 17150, 0.04],
+      [17150, 23600, 0.045],
+      [23600, 27900, 0.0525],
+      [27900, 161550, 0.055],
+      [161550, 323200, 0.06],
+      [323200, 2155350, 0.0685],
+      [2155350, 5000000, 0.0965],
+      [5000000, 25000000, 0.103],
+      [25000000, Infinity, 0.109],
+    ],
+  },
+  single: {
+    stdDed: 8000,
+    brackets: [
+      [0, 8500, 0.04],
+      [8500, 11700, 0.045],
+      [11700, 13900, 0.0525],
+      [13900, 80650, 0.055],
+      [80650, 215400, 0.06],
+      [215400, 1077550, 0.0685],
+      [1077550, 5000000, 0.0965],
+      [5000000, 25000000, 0.103],
+      [25000000, Infinity, 0.109],
+    ],
+  },
+};
+function nyStateTax(taxableIncome, year = NY_TAX_BASE_YEAR, inflation = 0.03, filingStatus = "mfj") {
   if (taxableIncome <= 0) return 0;
+  const nyTable = NY_TAX_2024[filingStatus] || NY_TAX_2024.mfj;
   const factor = Math.pow(1 + inflation, Math.max(0, year - NY_TAX_BASE_YEAR));
-  const stdDed = 16050 * factor;
+  const stdDed = nyTable.stdDed * factor;
   const nyTaxable = Math.max(0, taxableIncome - stdDed);
   // FY2026 NY budget (Ch. 59, Laws of 2025) cuts the bottom five rates by
   // 0.1pp in tax year 2026 and 0.2pp total from 2027 onward (permanent).
   const midClassCut = year >= 2027 ? 0.002 : year >= 2026 ? 0.001 : 0;
-  const baseBrackets = [
-    [0, 17150, 0.04 - midClassCut],
-    [17150, 23600, 0.045 - midClassCut],
-    [23600, 27900, 0.0525 - midClassCut],
-    [27900, 161550, 0.055 - midClassCut],
-    [161550, 323200, 0.06 - midClassCut],
-    [323200, 2155350, 0.0685],
-    [2155350, 5000000, 0.0965],
-    [5000000, 25000000, 0.103],
-    [25000000, Infinity, 0.109],
-  ];
+  const baseBrackets = nyTable.brackets.map(([low, high, rate], i) => [
+    low,
+    high,
+    i < 5 ? rate - midClassCut : rate,
+  ]);
   const brackets = baseBrackets.map(([low, high, rate]) => [
     low * factor,
     high === Infinity ? Infinity : high * factor,
@@ -237,24 +320,47 @@ function nyStateTaxMFJ(taxableIncome, year = NY_TAX_BASE_YEAR, inflation = 0.03)
 // Thresholds ($32K / $44K) are NOT inflation-adjusted by statute.
 // Returns the amount of SS benefits that is taxable (0 to 85% of gross SS).
 // `otherIncome` = AGI before SS + tax-exempt interest (we assume 0 tax-exempt)
-function taxableSocialSecurity(ssGross, otherIncome) {
+function taxableSocialSecurity(ssGross, otherIncome, filingStatus = "mfj") {
   if (ssGross <= 0) return 0;
+  const [threshold1, threshold2] =
+    SS_TAX_THRESHOLDS[filingStatus] || SS_TAX_THRESHOLDS.mfj;
   const halfSs = ssGross * 0.5;
   const provisional = Math.max(0, otherIncome) + halfSs;
-  const threshold1 = 32000; // MFJ statutory
-  const threshold2 = 44000; // MFJ statutory
   if (provisional <= threshold1) return 0;
   let taxable;
   if (provisional <= threshold2) {
     // Up to 50% of SS taxable (lesser of half SS or half the excess)
     taxable = Math.min(halfSs, (provisional - threshold1) * 0.5);
   } else {
-    // Above $44K: 85% of excess + lesser of $6K or 50% of SS
+    // Above the upper threshold: 85% of the excess, plus the lesser of the
+    // full tier-one amount (half the threshold gap) or 50% of benefits.
     const excess85 = (provisional - threshold2) * 0.85;
-    const plus = Math.min(6000, halfSs);
+    const plus = Math.min((threshold2 - threshold1) * 0.5, halfSs);
     taxable = excess85 + plus;
   }
   return Math.max(0, Math.min(taxable, ssGross * 0.85));
+}
+
+// Single Life Expectancy Table (Treas. Reg. 1.401(a)(9)-9(b), 2022+),
+// ages relevant to SEPP start. Notice 2022-6 permits this table for the
+// 72(t) fixed-amortization method.
+const SINGLE_LIFE_EXPECTANCY = {
+  40: 45.7, 41: 44.8, 42: 43.8, 43: 42.9, 44: 41.9, 45: 41.0, 46: 40.0,
+  47: 39.0, 48: 38.1, 49: 37.1, 50: 36.2, 51: 35.3, 52: 34.3, 53: 33.4,
+  54: 32.5, 55: 31.6, 56: 30.6, 57: 29.8, 58: 28.9, 59: 28.0,
+};
+
+// Fixed-amortization SEPP payment (Notice 2022-6): level annual payment that
+// amortizes the account balance over single-life expectancy at the chosen
+// interest rate (legally capped at 120% of the federal mid-term rate — the
+// cap is the user's responsibility; the UI carries the warning).
+function seppAmortizedPayment(balance, rate, startAge) {
+  if (balance <= 0) return 0;
+  const n =
+    SINGLE_LIFE_EXPECTANCY[Math.min(59, Math.max(40, Math.round(startAge)))] ??
+    30;
+  if (rate <= 0) return balance / n;
+  return (balance * rate) / (1 - Math.pow(1 + rate, -n));
 }
 
 // IRS Uniform Lifetime Table divisor for RMD calculation (2022+ revised table)
@@ -328,17 +434,28 @@ function totalTax(
   inflation = 0.03,
   nySocialSecurityExempt = 0,
   nyPensionAnnuityExclusion = 0,
+  filingStatus = "mfj",
 ) {
-  const { standardDeduction: stdDed } = getFederalTaxParams(year, inflation);
+  const { standardDeduction: stdDed } = getFederalTaxParams(
+    year,
+    inflation,
+    filingStatus,
+  );
   const taxableOrdinary = Math.max(0, ordinaryIncome - stdDed);
   // Apply any unused standard deduction to reduce taxable LTCG
   const unusedStdDed = Math.max(0, stdDed - ordinaryIncome);
   const taxableLtcg = Math.max(0, ltcg - unusedStdDed);
-  const fedOrd = fedOrdinaryTaxMFJ(taxableOrdinary, year, inflation);
-  const fedLtcg = fedLtcgTaxMFJ(taxableLtcg, taxableOrdinary, year, inflation);
-  // NIIT: 3.8% on investment income when MAGI > $250K MFJ (threshold not indexed)
+  const fedOrd = fedOrdinaryTax(taxableOrdinary, year, inflation, filingStatus);
+  const fedLtcg = fedLtcgTax(
+    taxableLtcg,
+    taxableOrdinary,
+    year,
+    inflation,
+    filingStatus,
+  );
+  // NIIT: 3.8% on investment income above the unindexed IRC 1411 threshold
   const magi = ordinaryIncome + ltcg;
-  const niitThreshold = 250000;
+  const niitThreshold = NIIT_THRESHOLD[filingStatus] || NIIT_THRESHOLD.mfj;
   const niit =
     magi > niitThreshold
       ? Math.min(ltcg, magi - niitThreshold) * 0.038
@@ -350,8 +467,45 @@ function totalTax(
       nySocialSecurityExempt -
       nyPensionAnnuityExclusion,
   );
-  const ny = nyStateTaxMFJ(nyOrdinary + ltcg, year, inflation);
+  const ny = nyStateTax(nyOrdinary + ltcg, year, inflation, filingStatus);
   return fedOrd + fedLtcg + niit + ny;
+}
+
+// Roth IRA ordering rules (IRC 408A(d)(4)): withdrawals come from
+// contribution basis first (never taxed or penalized), then conversion
+// principal FIFO (each conversion penalty-free once 5 tax years old), then
+// earnings. The engine tracks user-entered contribution basis plus every
+// conversion vintage it creates, so Roth conversion ladders price correctly.
+// Simplification: early *earnings* withdrawals are penalized but their income
+// tax is not modeled (they occur only when a plan is already collapsing).
+function rothEarlyPenaltyBase(wRoth, layers, currentYear) {
+  if (!layers) return wRoth;
+  let remaining = wRoth;
+  let penalized = 0;
+  remaining -= Math.min(remaining, Math.max(0, layers.contribBasis));
+  for (const v of layers.vintages) {
+    if (remaining <= 0) break;
+    const take = Math.min(remaining, v.amount);
+    if (currentYear - v.year < 5) penalized += take;
+    remaining -= take;
+  }
+  penalized += Math.max(0, remaining);
+  return penalized;
+}
+
+function consumeRothLayers(wRoth, layers) {
+  if (!layers || wRoth <= 0) return;
+  let remaining = wRoth;
+  const fromBasis = Math.min(remaining, Math.max(0, layers.contribBasis));
+  layers.contribBasis -= fromBasis;
+  remaining -= fromBasis;
+  for (const v of layers.vintages) {
+    if (remaining <= 0) break;
+    const take = Math.min(remaining, v.amount);
+    v.amount -= take;
+    remaining -= take;
+  }
+  layers.vintages = layers.vintages.filter((v) => v.amount > 0);
 }
 
 // User-selectable cash drawdown behavior. "cashFirst" reproduces the original
@@ -471,6 +625,9 @@ function solveGrossedUpWithdrawals({
   minimumRmd = 0,
   penaltyFree401k = false,
   cashPolicy = CASH_POLICY_DEFAULT,
+  filingStatus = "mfj",
+  rothLayers = null,
+  seppExempt = 0,
 }) {
   let tax = 0;
   let withdrawals = { wCash: 0, wTaxable: 0, w401k: 0, wIra: 0, wRoth: 0, reserveUsed: 0 };
@@ -513,7 +670,7 @@ function solveGrossedUpWithdrawals({
       withdrawals.wIra +
       conversion +
       realizedGain; // LTCG counts in provisional income
-    taxableSs = taxableSocialSecurity(ssGross, incomeBeforeSs);
+    taxableSs = taxableSocialSecurity(ssGross, incomeBeforeSs, filingStatus);
     ordIncome =
       ptIncome +
       taxableSs +
@@ -541,8 +698,16 @@ function solveGrossedUpWithdrawals({
     if (age < 59.5) {
       const penalized401k =
         penaltyFree401k && age >= 55 ? 0 : withdrawals.w401k;
-      earlyPenalty =
-        0.1 * (penalized401k + withdrawals.wIra + withdrawals.wRoth);
+      const penalizedRoth = rothLayers
+        ? rothEarlyPenaltyBase(withdrawals.wRoth, rothLayers, year)
+        : withdrawals.wRoth;
+      // A 72(t) SEPP stream exempts tax-deferred draws up to the fixed
+      // payment amount; anything beyond the payment is still penalized.
+      const penalizedTaxDeferred = Math.max(
+        0,
+        penalized401k + withdrawals.wIra - Math.max(0, seppExempt),
+      );
+      earlyPenalty = 0.1 * (penalizedTaxDeferred + penalizedRoth);
     } else {
       earlyPenalty = 0;
     }
@@ -555,6 +720,7 @@ function solveGrossedUpWithdrawals({
         inflation,
         taxableSs,
         nyPensionAnnuityExclusion,
+        filingStatus,
       ) + earlyPenalty;
     if (Math.abs(newTax - tax) < 1) {
       tax = newTax;
@@ -573,13 +739,19 @@ function solveGrossedUpWithdrawals({
 }
 
 // Compute annual Medicare Part B + Part D IRMAA surcharge for a MFJ household.
-function computeIrmaaSurcharge(magi, year, inflation = 0.03, medicareEnrollees = 2) {
+function computeIrmaaSurcharge(
+  magi,
+  year,
+  inflation = 0.03,
+  medicareEnrollees = 2,
+  filingStatus = "mfj",
+) {
   const factor = Math.pow(1 + inflation, Math.max(0, year - 2026));
   const coveredPeople = Math.max(1, Math.min(2, medicareEnrollees || 1));
-  for (const tier of IRMAA_2026_MFJ) {
+  const tiers = IRMAA_2026[filingStatus] || IRMAA_2026.mfj;
+  for (const tier of tiers) {
     const threshold = tier.top === Infinity ? Infinity : tier.top * factor;
-    const atExclusiveTopTierBoundary =
-      tier.top === 750000 && magi >= threshold;
+    const atExclusiveTopTierBoundary = tier.exclusiveTop && magi >= threshold;
     if (!atExclusiveTopTierBoundary && magi <= threshold) {
       return (tier.monthlyPartB + tier.monthlyPartD) * 12 * coveredPeople * factor;
     }
@@ -615,19 +787,19 @@ function runSelfTests() {
   // $100K taxable: 10% on first 23200 + 12% on next 71100 + 22% on last 5700
   // = 2320 + 8532 + 1254 = 12,106
   test(
-    "fedOrdinaryTaxMFJ: $100K taxable in 2024",
-    fedOrdinaryTaxMFJ(100000, 2024, 0.03),
+    "fedOrdinaryTax: $100K taxable in 2024",
+    fedOrdinaryTax(100000, 2024, 0.03),
     12106,
     pctEq,
   );
   test(
-    "fedOrdinaryTaxMFJ: $0 taxable = $0",
-    fedOrdinaryTaxMFJ(0, 2024, 0.03),
+    "fedOrdinaryTax: $0 taxable = $0",
+    fedOrdinaryTax(0, 2024, 0.03),
     0,
   );
   test(
-    "fedOrdinaryTaxMFJ: $23200 (top of 10% bracket) = $2320",
-    fedOrdinaryTaxMFJ(23200, 2024, 0.03),
+    "fedOrdinaryTax: $23200 (top of 10% bracket) = $2320",
+    fedOrdinaryTax(23200, 2024, 0.03),
     2320,
     pctEq,
   );
@@ -635,14 +807,14 @@ function runSelfTests() {
   // --- Federal LTCG (MFJ, 2024)
   // $50K LTCG + $0 ordinary: all in 0% bracket (below $94,050)
   test(
-    "fedLtcgTaxMFJ: $50K LTCG, $0 ordinary = $0 (0% bracket)",
-    fedLtcgTaxMFJ(50000, 0, 2024, 0.03),
+    "fedLtcgTax: $50K LTCG, $0 ordinary = $0 (0% bracket)",
+    fedLtcgTax(50000, 0, 2024, 0.03),
     0,
   );
   // $50K LTCG + $100K ordinary: ordinary taxable is above $94,050, so all LTCG at 15%
   test(
-    "fedLtcgTaxMFJ: $50K LTCG, $100K ordinary = $7500 (15%)",
-    fedLtcgTaxMFJ(50000, 100000, 2024, 0.03),
+    "fedLtcgTax: $50K LTCG, $100K ordinary = $7500 (15%)",
+    fedLtcgTax(50000, 100000, 2024, 0.03),
     7500,
     pctEq,
   );
@@ -1191,14 +1363,14 @@ function runSelfTests() {
   // drop 0.1pp in 2026 and 0.2pp total from 2027. $100K taxable, 0% inflation:
   // 2027 = 17150(3.8%) + 6450(4.3%) + 4300(5.05%) + 56050(5.3%) = $4,116.85
   test(
-    "nyStateTaxMFJ: 2027 middle-class rate cut applied",
-    nyStateTaxMFJ(100000, 2027, 0),
+    "nyStateTax: 2027 middle-class rate cut applied",
+    nyStateTax(100000, 2027, 0),
     4116.85,
     pctEq,
   );
   test(
-    "nyStateTaxMFJ: 2024 pre-cut rates unchanged",
-    nyStateTaxMFJ(100000, 2024, 0),
+    "nyStateTax: 2024 pre-cut rates unchanged",
+    nyStateTax(100000, 2024, 0),
     4284.75,
     pctEq,
   );
@@ -1691,6 +1863,188 @@ function runSelfTests() {
     },
   );
 
+  // --- Filing status: single-filer parameters
+  // 2026 single, $100K taxable: 12400@10% + 38000@12% + 49600@22% = $16,712
+  test(
+    "single filer 2026: $100K taxable ordinary tax = $16,712",
+    fedOrdinaryTax(100000, 2026, 0.03, "single"),
+    16712,
+    pctEq,
+  );
+  // Single provisional thresholds $25K/$34K: SS=$30K, other=$30K →
+  // provisional $45K → 0.85×11,000 + min(4,500, 15,000) = $13,850
+  test(
+    "single SS taxation: SS=$30K, other=$30K → $13,850 taxable",
+    taxableSocialSecurity(30000, 30000, "single"),
+    13850,
+    pctEq,
+  );
+  // Same income MFJ: provisional $45K → 0.85×1,000 + min(6,000, 15,000) = $6,850
+  test(
+    "mfj SS taxation: SS=$30K, other=$30K → $6,850 taxable",
+    taxableSocialSecurity(30000, 30000, "mfj"),
+    6850,
+    pctEq,
+  );
+  test(
+    "single IRMAA: $120K MAGI = tier 2 for one enrollee",
+    computeIrmaaSurcharge(120000, 2026, 0.03, 1, "single"),
+    (81.2 + 14.5) * 12,
+    pctEq,
+  );
+  test(
+    "single IRMAA: exactly $500K uses the top tier",
+    computeIrmaaSurcharge(500000, 2026, 0.03, 1, "single"),
+    (487 + 91) * 12,
+    pctEq,
+  );
+  // NY single 2024: $50K − $8K std ded = $42K taxable → $2,145
+  test(
+    "single NY 2024: $50K income = $2,145",
+    nyStateTax(50000, 2024, 0, "single"),
+    2145,
+    pctEq,
+  );
+
+  testScenario(
+    "Filing status: single filer pays materially more lifetime tax than MFJ",
+    () => {
+      const mfj = simulate({ ...baseInputs, filingStatus: "mfj" });
+      const single = simulate({ ...baseInputs, filingStatus: "single" });
+      return {
+        passed:
+          single.summary.totalTaxesPaid > mfj.summary.totalTaxesPaid * 1.1,
+        details: `single=${single.summary.totalTaxesPaid}, mfj=${mfj.summary.totalTaxesPaid}`,
+      };
+    },
+  );
+
+  // --- Roth ordering layers (IRC 408A(d)(4))
+  test(
+    "Roth layers: basis free, unseasoned conversion penalized",
+    rothEarlyPenaltyBase(
+      8000,
+      { contribBasis: 5000, vintages: [{ year: 2026, amount: 20000 }] },
+      2028,
+    ),
+    3000,
+  );
+  test(
+    "Roth layers: 5-year-seasoned conversion is penalty-free",
+    rothEarlyPenaltyBase(
+      8000,
+      { contribBasis: 0, vintages: [{ year: 2026, amount: 20000 }] },
+      2031,
+    ),
+    0,
+  );
+  test(
+    "Roth layers: earnings beyond layers are penalized",
+    rothEarlyPenaltyBase(
+      30000,
+      { contribBasis: 5000, vintages: [{ year: 2020, amount: 20000 }] },
+      2031,
+    ),
+    5000,
+  );
+
+  testScenario(
+    "Roth basis: early retiree spending contributions pays no penalty",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        currentAge: 50,
+        retirementAge: 52,
+        planThroughAge: 58,
+        balanceCash: 0,
+        balanceTaxable: 0,
+        balance401k: 0,
+        balanceTradIra: 0,
+        balanceHsa: 0,
+        balanceRoth: 400000,
+        rothBasis: 400000,
+        contrib401k: 0,
+        contribMatch: 0,
+        contribHsa: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+        ssIncome: 0,
+      });
+      const row = r.yearlyData.find((d) => d.age === 52);
+      return {
+        passed: row.fromRoth > 0 && row.earlyPenalty === 0,
+        details: `fromRoth=${row.fromRoth}, penalty=${row.earlyPenalty}`,
+      };
+    },
+  );
+
+  // --- SEPP / 72(t)
+  testScenario(
+    "SEPP: amortized stream eliminates the penalty when it covers the need",
+    () => {
+      const base = {
+        ...baseInputs,
+        currentAge: 50,
+        retirementAge: 52,
+        planThroughAge: 60,
+        balanceCash: 0,
+        balanceTaxable: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        balanceTradIra: 0,
+        balance401k: 1000000,
+        baseExpenses: 40000,
+        healthcarePre65: 10000,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+        ssIncome: 20000,
+      };
+      const withSepp = simulate({ ...base, useSepp: true, seppRate: 0.05 });
+      const withoutSepp = simulate(base);
+      const rowW = withSepp.yearlyData.find((d) => d.age === 52);
+      const rowWo = withoutSepp.yearlyData.find((d) => d.age === 52);
+      return {
+        passed:
+          rowW.earlyPenalty === 0 &&
+          rowWo.earlyPenalty > 0 &&
+          rowW.from401k > 0,
+        details: `sepp: penalty=${rowW.earlyPenalty} draw=${rowW.from401k}; no sepp: penalty=${rowWo.earlyPenalty}`,
+      };
+    },
+  );
+
+  // --- IRMAA two-year lookback
+  testScenario(
+    "IRMAA lookback: pre-65 conversions surface as surcharges after 65",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        currentAge: 60,
+        retirementAge: 61,
+        planThroughAge: 68,
+        balance401k: 2000000,
+        balanceCash: 200000,
+        balanceTaxable: 300000,
+        balanceTradIra: 0,
+        conversionBridge: 0,
+        conversionMid: 300000,
+        conversionFinal: 0,
+        ssIncome: 30000,
+        ssAge: 67,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+      });
+      const at63 = r.yearlyData.find((d) => d.age === 63);
+      const at65 = r.yearlyData.find((d) => d.age === 65);
+      return {
+        passed: at63.magi > 218000 && at65.irmaaSurcharge > 0,
+        details: `magi@63=${at63.magi}, surcharge@65=${at65.irmaaSurcharge}`,
+      };
+    },
+  );
+
   const passed = results.filter((r) => r.passed).length;
   const failed = results.filter((r) => !r.passed).length;
   return { passed, failed, total: results.length, results };
@@ -1745,6 +2099,10 @@ function simulate(inputs, options = {}) {
     cashStrategy = "cashFirst",
     cashReserveFloor = 0,
     allowReserveAsLastResort = false,
+    filingStatus = "mfj",
+    rothBasis = 0,
+    useSepp = false,
+    seppRate = 0.05,
   } = inputs;
 
   // Guard against invalid inputs during manual typing
@@ -1814,6 +2172,22 @@ function simulate(inputs, options = {}) {
   let depleted = unpaidDebt > 1;
   let priorYearEndTotal = bCash + bTaxable + b401k + bTradIra + bRoth + bHsa - unpaidDebt;
   let priorPriorYearEndTotal = 0;
+  // Modeled MAGI per retirement year, for the IRMAA two-year lookback.
+  const magiByYear = new Map();
+  // Roth ordering layers: user-entered contribution basis + conversion
+  // vintages created below. Basis is capped at the starting balance.
+  const rothLayers = {
+    contribBasis: Math.max(0, Math.min(rothBasis || 0, balanceRoth)),
+    vintages: [],
+  };
+  // 72(t) SEPP: payment is fixed from the first retirement year's starting
+  // tax-deferred balance and forced until the later of 5 years or age 59½
+  // (busting the schedule is not modeled — payments always continue).
+  let seppPayment = null;
+  const seppLockEndAge =
+    useSepp && retirementAge < 59.5
+      ? Math.max(retirementAge + 5, 59.5)
+      : null;
 
   for (let year = currentYear; year <= endYear; year++) {
     const age = currentAge + (year - currentYear);
@@ -1936,6 +2310,17 @@ function simulate(inputs, options = {}) {
         ? Math.round(pensionIncome * pensionMult)
         : 0;
 
+    // 72(t) SEPP stream: fix the payment in the first retirement year.
+    if (
+      seppLockEndAge !== null &&
+      seppPayment === null &&
+      age >= retirementAge
+    ) {
+      seppPayment = seppAmortizedPayment(b401k + bTradIra, seppRate, age);
+    }
+    const seppActive =
+      seppLockEndAge !== null && seppPayment > 0 && age < seppLockEndAge;
+
     // Determine Roth conversion target based on age phase
     let conversion = 0;
     let strategy = "";
@@ -2008,6 +2393,21 @@ function simulate(inputs, options = {}) {
     let finalSpending = spending;
     let hsaWithdrawal = 0;
 
+    // IRMAA lookback: real Medicare premiums for year Y are set from the
+    // tax return two years prior. When the projection has a modeled MAGI for
+    // Y-2, the surcharge is FIXED before the solve (no iteration needed).
+    // Only the first Medicare years, whose lookback predates modeled
+    // retirement income, fall back to the same-year iterative approximation.
+    const irmaaLookbackMagi = age >= 65 ? magiByYear.get(year - 2) : undefined;
+    if (age >= 65 && irmaaLookbackMagi !== undefined) {
+      irmaaSurcharge = computeIrmaaSurcharge(
+        irmaaLookbackMagi,
+        year,
+        inflation,
+        Math.min(2, householdSize),
+        filingStatus,
+      );
+    }
     for (let outerIter = 0; outerIter < 4; outerIter++) {
       // Effective spending includes IRMAA surcharge (post-65)
       // ACA (pre-65) is handled below as a separate branch
@@ -2033,16 +2433,22 @@ function simulate(inputs, options = {}) {
         year,
         age,
         inflation,
-        minimumRmd: rmdAmount,
+        minimumRmd: seppActive
+          ? Math.max(rmdAmount, seppPayment)
+          : rmdAmount,
         penaltyFree401k,
         cashPolicy,
+        filingStatus,
+        rothLayers,
+        seppExempt: seppActive ? seppPayment : 0,
       });
 
       finalSpending = effectiveSpending;
       hsaWithdrawal = hsaOffset;
 
-      // Only post-65 IRMAA iteration matters here; break early for pre-65
-      if (age < 65) break;
+      // Pre-65 has no IRMAA; a known lookback MAGI means the surcharge was
+      // fixed before the solve — either way, one pass suffices.
+      if (age < 65 || irmaaLookbackMagi !== undefined) break;
 
       // Recompute MAGI from converged solve
       const postOrdIncome =
@@ -2059,6 +2465,7 @@ function simulate(inputs, options = {}) {
         year,
         inflation,
         Math.min(2, householdSize),
+        filingStatus,
       );
 
       // Converged when IRMAA tier is stable
@@ -2103,9 +2510,14 @@ function simulate(inputs, options = {}) {
         year,
         age,
         inflation,
-        minimumRmd: rmdAmount,
+        minimumRmd: seppActive
+          ? Math.max(rmdAmount, seppPayment)
+          : rmdAmount,
         penaltyFree401k,
         cashPolicy,
+        filingStatus,
+        rothLayers,
+        seppExempt: seppActive ? seppPayment : 0,
       });
     }
 
@@ -2125,6 +2537,8 @@ function simulate(inputs, options = {}) {
     bTaxable = Math.max(0, bTaxable - wTaxable);
     bTaxableBasis = Math.max(0, bTaxableBasis - basisReduction);
     b401k = Math.max(0, b401k - w401k - conversion);
+    consumeRothLayers(wRoth, rothLayers);
+    if (conversion > 0) rothLayers.vintages.push({ year, amount: conversion });
     bRoth = bRoth + conversion;
     bTradIra = Math.max(0, bTradIra - wIra);
     bRoth = Math.max(0, bRoth - wRoth);
@@ -2152,6 +2566,7 @@ function simulate(inputs, options = {}) {
     const finalOrdIncome =
       ptIncome + taxableSs + pensionGross + w401k + wIra + conversion;
     const magi = finalOrdIncome + realizedGain;
+    magiByYear.set(year, magi);
 
     // Grow balances
     bCash *= 1 + cashReturn;
@@ -2442,6 +2857,7 @@ function solveCoupleGrossedUpWithdrawals({
   inflation,
   penaltyFree401k = { primary: false, spouse: false },
   cashPolicy = CASH_POLICY_DEFAULT,
+  rothLayers = { primary: null, spouse: null },
 }) {
   let tax = 0;
   let withdrawals = doCoupleWithdrawalWaterfall(0, state, preHouseholdSs, rmds, cashPolicy);
@@ -2508,10 +2924,13 @@ function solveCoupleGrossedUpWithdrawals({
 
     // IRC §72(t) 10% early-distribution penalty, applied per spouse.
     // See solveGrossedUpWithdrawals for the Rule-of-55 / IRA / Roth treatment.
-    const personPenalty = (age, ruleOf55, w401k, wIra, wRoth) => {
+    const personPenalty = (age, ruleOf55, w401k, wIra, wRoth, layers) => {
       if (age >= 59.5) return 0;
       const penalized401k = ruleOf55 && age >= 55 ? 0 : w401k;
-      return 0.1 * (penalized401k + wIra + wRoth);
+      const penalizedRoth = layers
+        ? rothEarlyPenaltyBase(wRoth, layers, year)
+        : wRoth;
+      return 0.1 * (penalized401k + wIra + penalizedRoth);
     };
     earlyPenalty =
       personPenalty(
@@ -2520,6 +2939,7 @@ function solveCoupleGrossedUpWithdrawals({
         withdrawals.primary401k,
         withdrawals.primaryIra,
         withdrawals.primaryRoth,
+        rothLayers.primary,
       ) +
       personPenalty(
         ages.spouse,
@@ -2527,6 +2947,7 @@ function solveCoupleGrossedUpWithdrawals({
         withdrawals.spouse401k,
         withdrawals.spouseIra,
         withdrawals.spouseRoth,
+        rothLayers.spouse,
       );
 
     const newTax =
@@ -2613,6 +3034,25 @@ function simulateCouple(coupleInputs, options = {}) {
   let totalUnmetCashFlow = unpaidDebt;
   let depleted = unpaidDebt > 1;
   let priorPriorYearEndTotal = 0;
+  // Modeled household MAGI per retirement year (IRMAA two-year lookback).
+  const magiByYear = new Map();
+  // Per-spouse Roth ordering layers (IRC 408A(d)(4)).
+  const coupleRothLayers = {
+    primary: {
+      contribBasis: Math.max(
+        0,
+        Math.min(primary.rothBasis || 0, primary.balanceRoth),
+      ),
+      vintages: [],
+    },
+    spouse: {
+      contribBasis: Math.max(
+        0,
+        Math.min(spouse.rothBasis || 0, spouse.balanceRoth),
+      ),
+      vintages: [],
+    },
+  };
   let priorYearEndTotal =
     cash +
     taxable +
@@ -2951,6 +3391,7 @@ function simulateCouple(coupleInputs, options = {}) {
       inflation: shared.inflation,
       penaltyFree401k: couplePenaltyFree401k,
       cashPolicy: coupleCashPolicy,
+      rothLayers: coupleRothLayers,
     });
     let acaSubsidy = 0;
     const pre65HealthcareSticker =
@@ -3007,6 +3448,7 @@ function simulateCouple(coupleInputs, options = {}) {
         inflation: shared.inflation,
         penaltyFree401k: couplePenaltyFree401k,
         cashPolicy: coupleCashPolicy,
+        rothLayers: coupleRothLayers,
       });
     }
 
@@ -3015,9 +3457,14 @@ function simulateCouple(coupleInputs, options = {}) {
       const medicareEnrollees =
         (primaryAge >= 65 ? 1 : 0) + (spouseAge >= 65 ? 1 : 0);
       const baseSpendingBeforeIrmaa = spending;
+      // Two-year lookback (see individual engine note). With a known Y-2
+      // MAGI the surcharge is fixed and needs exactly one re-solve to fund it.
+      const irmaaLookbackMagi = magiByYear.get(year - 2);
       for (let outerIter = 0; outerIter < 4; outerIter++) {
         const newIrmaa = computeIrmaaSurcharge(
-          solve.ordIncome + solve.realizedGain,
+          irmaaLookbackMagi !== undefined
+            ? irmaaLookbackMagi
+            : solve.ordIncome + solve.realizedGain,
           year,
           shared.inflation,
           medicareEnrollees,
@@ -3068,6 +3515,7 @@ function simulateCouple(coupleInputs, options = {}) {
           inflation: shared.inflation,
           penaltyFree401k: couplePenaltyFree401k,
           cashPolicy: coupleCashPolicy,
+          rothLayers: coupleRothLayers,
         });
       }
       spending = Math.round(baseSpendingBeforeIrmaa + irmaaSurcharge);
@@ -3091,6 +3539,12 @@ function simulateCouple(coupleInputs, options = {}) {
     );
     primaryState.bTradIra = Math.max(0, primaryState.bTradIra - withdrawals.primaryIra);
     spouseState.bTradIra = Math.max(0, spouseState.bTradIra - withdrawals.spouseIra);
+    consumeRothLayers(withdrawals.primaryRoth, coupleRothLayers.primary);
+    consumeRothLayers(withdrawals.spouseRoth, coupleRothLayers.spouse);
+    if (primaryConversion > 0)
+      coupleRothLayers.primary.vintages.push({ year, amount: primaryConversion });
+    if (spouseConversion > 0)
+      coupleRothLayers.spouse.vintages.push({ year, amount: spouseConversion });
     primaryState.bRoth = Math.max(
       0,
       primaryState.bRoth + primaryConversion - withdrawals.primaryRoth,
@@ -3140,6 +3594,8 @@ function simulateCouple(coupleInputs, options = {}) {
     priorPriorYearEndTotal = priorYearEndTotal;
     priorYearEndTotal = total;
     if ((total <= 0 || unmetCashFlow > 1) && !depleted) depleted = true;
+
+    magiByYear.set(year, solve.ordIncome + realizedGain);
 
     let phase = "bridge";
     if (primarySs + spouseSs > 0) phase = "ss";
@@ -3807,6 +4263,7 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
           [`${planLabel} Balance`, fmtMoney(person.balance401k)],
           ["Traditional IRA", fmtMoney(person.balanceTradIra)],
           ["Roth IRA", fmtMoney(person.balanceRoth)],
+          ["Roth Contributions to Date", fmtMoney(person.rothBasis || 0)],
           ["HSA", fmtMoney(person.balanceHsa)],
         ],
       },
@@ -3897,6 +4354,12 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
         ["Current Age", fmtNum(exportInputs.currentAge)],
         ["Retirement Age", fmtNum(exportInputs.retirementAge)],
         ["Plan Through Age", fmtNum(exportInputs.planThroughAge)],
+        [
+          "Filing Status",
+          exportInputs.filingStatus === "mfj"
+            ? "Married filing jointly"
+            : "Single",
+        ],
       ],
     },
     {
@@ -3908,6 +4371,7 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
         ["401k / 403b", fmtMoney(exportInputs.balance401k)],
         ["Traditional IRA", fmtMoney(exportInputs.balanceTradIra)],
         ["Roth IRA", fmtMoney(exportInputs.balanceRoth)],
+        ["Roth Contributions to Date", fmtMoney(exportInputs.rothBasis || 0)],
         ["HSA", fmtMoney(exportInputs.balanceHsa)],
         ["Credit Card Debt", fmtMoney(exportInputs.creditCardDebt)],
       ],
@@ -4463,6 +4927,10 @@ function CashFlowTooltip({ active, payload, isCouple, showNeedBreakdown = false 
 // every field is meant to be overwritten with the visitor's own numbers.
 const DEFAULT_INPUTS = {
   mode: "single",
+  // Tax filing status for individual mode: "single" or "mfj". Couple mode
+  // always files jointly. Individual mode defaults to single-filer tables;
+  // a married user modeling only their own accounts should switch to MFJ.
+  filingStatus: "single",
   currentAge: 45,
   retirementAge: 60,
   planThroughAge: 95,
@@ -4476,6 +4944,9 @@ const DEFAULT_INPUTS = {
   balanceTradIra: 50000,
   // Roth IRA
   balanceRoth: 75000,
+  // Total Roth *contributions* to date (not conversions, not growth) —
+  // withdrawable anytime tax- and penalty-free. 0 = conservative.
+  rothBasis: 0,
   // HSA cash + HSA investment
   balanceHsa: 25000,
   // Credit card debt (subtracted from net worth)
@@ -4525,6 +4996,11 @@ const DEFAULT_INPUTS = {
   // (flagged in the year-by-year table). If false, the plan shows a shortfall
   // instead of touching the reserve.
   allowReserveAsLastResort: false,
+  // 72(t) SEPP program (individual mode): fixed-amortization payments from
+  // tax-deferred accounts, penalty-free, from retirement until the later of
+  // 5 years or 59½. Rate must not exceed 120% of the federal mid-term rate.
+  useSepp: false,
+  seppRate: 0.05,
   conversionBridge: 0,
   conversionMid: 0,
   conversionFinal: 0,
@@ -4548,6 +5024,7 @@ const DEFAULT_COUPLE_INPUTS = {
     balance401k: DEFAULT_INPUTS.balance401k,
     balanceTradIra: DEFAULT_INPUTS.balanceTradIra,
     balanceRoth: DEFAULT_INPUTS.balanceRoth,
+    rothBasis: DEFAULT_INPUTS.rothBasis,
     balanceHsa: DEFAULT_INPUTS.balanceHsa,
     contrib401k: DEFAULT_INPUTS.contrib401k,
     contribMatch: DEFAULT_INPUTS.contribMatch,
@@ -4576,6 +5053,7 @@ const DEFAULT_COUPLE_INPUTS = {
     balance401k: 0,
     balanceTradIra: 0,
     balanceRoth: 0,
+    rothBasis: 0,
     balanceHsa: 0,
     contrib401k: 0,
     contribMatch: 0,
@@ -5595,6 +6073,14 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
         onChange={onChange("balanceRoth")}
         prefix="$"
         step={1000}
+      />
+      <NumberInput
+        label="Roth Contributions to Date"
+        value={person.rothBasis || 0}
+        onChange={onChange("rothBasis")}
+        prefix="$"
+        step={1000}
+        hint="Lifetime contributions (not conversions/growth) — withdrawable anytime penalty-free. 0 if unsure."
       />
       <NumberInput
         label="HSA"
@@ -6969,6 +7455,42 @@ export default function RetirementPlanner() {
                   Married Couple
                 </button>
               </div>
+              {!isCouple && (
+                <div className="mt-2">
+                  <p className="mb-1 text-[11px] font-medium text-slate-500">
+                    Tax filing status
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => update("filingStatus")("single")}
+                      className={`rounded border px-3 py-1.5 text-xs font-medium transition ${
+                        (inputs.filingStatus || "single") === "single"
+                          ? "border-indigo-600 bg-indigo-600 text-white"
+                          : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      Single
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => update("filingStatus")("mfj")}
+                      className={`rounded border px-3 py-1.5 text-xs font-medium transition ${
+                        inputs.filingStatus === "mfj"
+                          ? "border-indigo-600 bg-indigo-600 text-white"
+                          : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      Married (MFJ)
+                    </button>
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-500 leading-relaxed">
+                    Drives federal + NY brackets, deductions, Social Security
+                    taxation, NIIT, and IRMAA tiers. Pick MFJ if you are
+                    married but modeling only your own accounts.
+                  </p>
+                </div>
+              )}
             </div>
 
             {isCouple ? (
@@ -7038,6 +7560,14 @@ export default function RetirementPlanner() {
                 onChange={update("balanceRoth")}
                 prefix="$"
                 step={1000}
+              />
+              <NumberInput
+                label="Roth Contributions to Date"
+                value={inputs.rothBasis || 0}
+                onChange={update("rothBasis")}
+                prefix="$"
+                step={1000}
+                hint="Lifetime contributions (not conversions/growth) — withdrawable anytime penalty-free before 59½. Leave 0 if unsure (conservative)."
               />
               <NumberInput
                 label="HSA"
@@ -7396,6 +7926,40 @@ export default function RetirementPlanner() {
                   onChange={update("householdSize")}
                   hint="For Federal Poverty Level calculation"
                 />
+              )}
+              {inputs.retirementAge < 59.5 && (
+                <div className="mb-3 mt-2 p-2 bg-slate-50 rounded border border-slate-200">
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={inputs.useSepp === true}
+                      onChange={(e) => update("useSepp")(e.target.checked)}
+                      className="mt-0.5"
+                    />
+                    <div>
+                      <div className="text-xs font-medium text-slate-700">
+                        Model a SEPP / 72(t) program
+                      </div>
+                      <div className="text-xs text-slate-500 mt-0.5">
+                        Fixed-amortization payments from your 401k/IRA, taken
+                        every year from retirement until the later of 5 years
+                        or 59½ — penalty-free up to the payment amount. Rigid
+                        in real life: breaking the schedule triggers
+                        retroactive penalties (not modeled).
+                      </div>
+                    </div>
+                  </label>
+                  {inputs.useSepp && (
+                    <div className="mt-2">
+                      <PctInput
+                        label="SEPP Interest Rate"
+                        value={inputs.seppRate ?? 0.05}
+                        onChange={update("seppRate")}
+                        hint="Legal cap: 120% of the federal mid-term rate (AFR) for the start month — verify the current AFR before relying on this."
+                      />
+                    </div>
+                  )}
+                </div>
               )}
               <div className="mt-2 text-xs text-slate-500 leading-relaxed">
                 <TermLabel info={TERM_HELP.irmaa}>IRMAA</TermLabel> surcharges
@@ -8431,22 +8995,28 @@ export default function RetirementPlanner() {
                 not indexed (statutory).
               </li>
               <li>
-                <TermLabel info={TERM_HELP.irmaa}>IRMAA</TermLabel>: flagged per
-                year using same-year <TermLabel info={TERM_HELP.magi}>MAGI</TermLabel>{" "}
-                as approximation. Real IRMAA uses a 2-year lookback.
+                <TermLabel info={TERM_HELP.irmaa}>IRMAA</TermLabel>: computed
+                from <TermLabel info={TERM_HELP.magi}>MAGI</TermLabel> two years
+                prior (the real Medicare lookback). Only the first Medicare
+                years, whose lookback predates modeled retirement income, fall
+                back to same-year MAGI.
               </li>
               <li>
                 <TermLabel info={TERM_HELP.aca}>ACA subsidy</TermLabel> (if enabled): bracketed approximation using
                 post-IRA applicable-percentage formula. Real subsidies depend
                 on state, plan choice, age, and specific FPL tables.
               </li>
-              {!isCouple && (
-                <li>
-                  Individual mode still uses married-filing-jointly tax
-                  brackets — a single filer's actual federal tax would be
-                  meaningfully higher than shown.
-                </li>
-              )}
+              <li>
+                Tax: computed with{" "}
+                {isCouple || inputs.filingStatus === "mfj"
+                  ? "married-filing-jointly"
+                  : "single-filer"}{" "}
+                federal and NY parameters
+                {!isCouple
+                  ? " (switch under Plan Type if your filing status differs)"
+                  : ""}
+                .
+              </li>
               <li>
                 Social Security earnings test not modeled: claiming before
                 full retirement age while earning part-time income would
