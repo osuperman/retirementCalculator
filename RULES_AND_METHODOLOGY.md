@@ -1,6 +1,6 @@
 # Retirement Planning Engine — Rules, Law, and Methodology
 
-**Version:** 2026-06 r2 (current law as of tax year 2026; adds single-filer support, IRMAA two-year lookback, Roth ordering layers, and optional SEPP/72(t) modeling)
+**Version:** 2026-07 r3 (current law as of tax year 2026; adds single-filer support, IRMAA two-year lookback, Roth ordering layers, and optional SEPP/72(t) modeling. r3 audit fixes: 2025 FPL base, ACA 400%-FPL boundary, cash interest taxed, conversions stop at Social Security, materiality-gated depletion flag, debt-payoff gain taxed, Monte Carlo draw floor)
 **Scope:** United States federal tax law, New York State tax law, Social Security, Medicare, and ACA rules as implemented by the projection engine in `src/App.jsx`.
 **Audience:** A developer or reviewer who needs to understand, verify, or reconstruct the calculation engine without reference to the user interface.
 
@@ -17,7 +17,7 @@ The engine models seven account types. For each: how money goes in, how it grows
 | Property | Rule |
 |---|---|
 | Growth | User-set nominal rate (`cashReturn`), applied annually. |
-| Taxation | ⚠️ Interest is **not** taxed in the model (real HYSA interest is ordinary income). This slightly understates tax for large cash balances. |
+| Taxation | Interest (start-of-year cash balance × `cashReturn`) is taxed as **ordinary income** and counted in provisional income and MAGI (federal + NY). ⚠️ Simplification: interest is computed on the start-of-year balance, so mid-year draws are ignored. |
 | Access | Any age, no penalty. |
 | At death | Passes to heirs with no income tax. |
 
@@ -112,8 +112,8 @@ Because the model steps in whole years, "59½" is implemented as `age < 59.5` wi
 3. **Order of operations in a distribution year:** compute income and spending → solve withdrawals + taxes (iteratively, §11) → subtract withdrawals from start-of-year balances → apply growth once at year end. Start-of-year balances therefore equal prior-December-31 balances, which is what RMD law requires.
 4. **Accumulation years:** contributions are capped at statutory limits (§1.3, §1.6), added with growth; Traditional IRA RMDs are still enforced if past the start age (gross amount moves to the taxable account, raising basis; ⚠️ the income tax on it is not modeled because salary-year taxes are out of scope).
 5. **Inflation anchoring:** all today's-dollar inputs (spending, healthcare, part-time income, conversion targets, SS benefit, cash reserve floor) inflate from the **current year**: multiplier = (1 + inflation)^(year − currentYear). The "Today's $" display divides every nominal figure by the same multiplier.
-6. **Debt:** credit-card debt is paid off at time zero from cash, then taxable (realizing gains against basis); any residual counts as unmet cash flow.
-7. **Depletion / failure:** a year fails when spending + tax cannot be covered by available withdrawals (`unmetCashFlow`) or total assets ≤ 0. Headline "failure" uses a materiality threshold — cumulative unmet cash flow must exceed max($1,000, 0.5% of year-one spending) — so sub-dollar solver rounding never fails a plan.
+6. **Debt:** credit-card debt is paid off at time zero from cash, then taxable (realizing gains against basis; the gain is taxed in the first distribution year, §15.15); any residual counts as unmet cash flow.
+7. **Depletion / failure:** a year fails when spending + tax cannot be covered by available withdrawals (`unmetCashFlow`) or total assets ≤ 0. The engine's own `summary.depleted` flag (not just the UI banner) applies the materiality threshold — cumulative unmet cash flow must exceed max($1,000, 0.5% of year-one spending) — so sub-dollar solver rounding never marks a funded plan depleted, and the flag the Ask-AI context receives agrees with the banner. A single year whose total assets hit ≤ 0 still flags immediately.
 
 ---
 
@@ -214,7 +214,7 @@ RMD = **prior December 31 balance ÷ Uniform Lifetime Table divisor** (Treas. Re
 
 ## 8. Roth conversions
 
-- Mechanics: a user-set annual amount (in today's dollars, inflation-adjusted) moves 401k → Roth in three age windows: retirement–59, 60–64, and 65 until SS claim age. Conversions stop once Social Security starts (by design, since SS + conversions stack income).
+- Mechanics: a user-set annual amount (in today's dollars, inflation-adjusted) moves 401k → Roth in three age windows: retirement–59, 60–64, and 65+. Conversions stop the year Social Security starts, in **every** window (by design, since SS + conversions stack income) — so an early claim at 62 ends conversions at 62, before the 60–64 or 65+ targets would otherwise apply. The engine and couple engine both enforce this per person.
 - Conversions are **ordinary income** in the conversion year, increase provisional income for SS taxation, MAGI for NIIT/IRMAA/ACA, and NY taxable income (eligible for the NY $20K exclusion, §10.3).
 - Conversions are capped at the available 401k balance after the year's RMD (see §6.3) and planned withdrawals.
 - The strategic rationale (documented for users): fill low tax brackets in the years between retirement and SS/RMDs, shrinking future RMDs and building tax-free assets; the trade-offs are current-year tax, ACA subsidy loss before 65, and IRMAA two years later.
@@ -225,9 +225,9 @@ RMD = **prior December 31 balance ÷ Uniform Lifetime Table divisor** (Treas. Re
 ## 9. Healthcare costs: ACA and Medicare/IRMAA
 
 ### 9.1 Before 65 — ACA premium tax credit (optional estimate)
-- Under **current 2026 law** the enhanced credits expired: no credit above **400% of the Federal Poverty Level** (the "subsidy cliff" is back). Below 400% FPL, the household's expected premium contribution is MAGI × applicable percentage, interpolated within these 2026 brackets (Rev. Proc. 2025-25): ≤133% FPL → 2.10%; 133–150% → 3.14→4.19%; 150–200% → 4.19→6.60%; 200–250% → 6.60→8.44%; 250–300% → 8.44→9.96%; 300–400% → 9.96% flat.
-- FPL: 2024 guidelines ($15,060 + $5,380 per additional household member, lower-48) projected forward by user inflation (⚠️ approximation of annual HHS updates).
-- The model treats the user's pre-65 healthcare input as the sticker cost, reserves ~$2,000/yr as non-premium out-of-pocket, and pays min(premium, expected contribution).
+- Under **current 2026 law** the enhanced credits expired: no credit **above** 400% of the Federal Poverty Level (the "subsidy cliff" is back). Income **at or below** 400% FPL is eligible (§36B: household income that "does not exceed" 400%), so the top band is inclusive at exactly 400%. Below/at 400% FPL, the household's expected premium contribution is MAGI × applicable percentage, interpolated within these 2026 brackets (Rev. Proc. 2025-25): ≤133% FPL → 2.10%; 133–150% → 3.14→4.19%; 150–200% → 4.19→6.60%; 200–250% → 6.60→8.44%; 250–300% → 8.44→9.96%; 300–400% → 9.96% flat.
+- FPL: **2025** guidelines ($15,650 + $5,500 per additional household member, lower-48 — the guideline set that governs 2026 ACA eligibility) projected forward by user inflation (⚠️ approximation of annual HHS updates).
+- The model treats the user's pre-65 healthcare input as the sticker cost, reserves a non-premium out-of-pocket floor (~$2,000/yr in 2025 dollars, inflated on the FPL clock), and pays min(premium, expected contribution).
 - ⚠️ MAGI for ACA should add back **non-taxable** Social Security; the model uses taxable SS only (only matters when claiming SS before 65). Benchmark-plan (SLCSP) mechanics, state variations, and cost-sharing reductions are not modeled.
 
 ### 9.2 At 65+ — Medicare and IRMAA
@@ -303,7 +303,7 @@ The reserve floor is entered in today's dollars and inflates with the plan.
 ## 13. Monte Carlo risk analysis
 
 - 500 simulations; each feeds randomized **retirement-year** returns into the *same full engine* (taxes, RMDs, IRMAA, penalties, cash strategy all recompute per path). Accumulation years use the deterministic pre-retirement return.
-- Returns are i.i.d. draws from Normal(μ = post-retirement return, σ = `portfolioVolatility`, default 9%). ⚠️ No serial correlation, regime switching, or fat tails; prolonged bear markets are only approximately represented.
+- Returns are i.i.d. draws from Normal(μ = post-retirement return, σ = `portfolioVolatility`, default 9%), each floored at −95%. ⚠️ No serial correlation, regime switching, or fat tails; prolonged bear markets are only approximately represented. ⚠️ Because draws are symmetric around the deterministic mean, the Monte Carlo **median** path sits slightly below the single deterministic projection (volatility drag ≈ σ²/2 ≈ 0.4%/yr at the default 9%).
 - **Success criterion:** a path fails if ending assets ≤ 0, any year's total ≤ 0, or cumulative unmet cash flow exceeds the materiality threshold (§3.7). Sub-dollar rounding never fails a path.
 - **Flexible spending** (optional): if the portfolio's year-end total fell more than 15% versus the prior year end, the next year's spending is cut 10% — a documented retiree behavior that materially improves survival.
 - Outputs: success rate, percentile fans (10/25/50/75/90), median/worst/best ending balances, average depletion age.
@@ -327,7 +327,7 @@ Anyone reconstructing or auditing this engine should know these are *deliberate*
 3. Roth ordering layers are tracked, but income tax on early *earnings* withdrawals is not modeled, and pre-existing conversion basis from before the plan start must be folded into `rothBasis` by the user.
 4. SS earnings test, spousal/survivor/divorced benefits not modeled; FRA fixed at 67.
 5. IRMAA lookback uses modeled MAGI only — the first Medicare years fall back to same-year MAGI because working-year income is out of scope; ACA MAGI omits non-taxable SS.
-6. Interest on cash untaxed; all brokerage gains long-term; no loss harvesting; no step-up simulation.
+6. Cash interest **is** taxed (ordinary income on the start-of-year balance); all brokerage gains long-term; no loss harvesting; no step-up simulation; NIIT investment income is approximated as realized LTCG only (cash interest excluded from the NIIT base).
 7. No AMT, itemized deductions, credits, trust/estate tax, or gift planning.
 8. Federal/NY brackets projected by user inflation, not statutory indexing (chained CPI / NY non-indexation).
 9. Survivor scenarios, inherited accounts, long-term care, and annuitization not modeled.
@@ -335,6 +335,9 @@ Anyone reconstructing or auditing this engine should know these are *deliberate*
 11. IRA contributions during accumulation not modeled (401k + HSA only).
 12. SECURE 2.0 Roth catch-up mandate for high earners not modeled.
 13. Single tax-deferred bucket per person (RMD aggregation nuance in §6.3).
+14. HSA offsets the healthcare portion of spending at any age, including pre-65 ACA premiums — which are generally **not** §223(d)-qualified before 65 (COBRA/unemployment/LTC excepted). This slightly overstates HSA usefulness for early retirees.
+15. Debt paid at time zero from taxable assets realizes a capital gain that is taxed in the **first distribution year** (folded into that year's solve). For a user still working in year 1 this defers the tax to the first retirement year — a minor timing approximation; salary-year taxes are otherwise out of scope.
+16. Monte Carlo return draws are floored at −95% so an unbounded Normal sample below −100% cannot drive an account negative at very high volatility.
 
 ---
 
@@ -377,6 +380,6 @@ Anyone reconstructing or auditing this engine should know these are *deliberate*
 
 ## 17. Verification
 
-The engine ships with an **86-case self-test suite** (run via the in-app "Run Diagnostics" button or by extracting the engine into Node). It pins: exact bracket math for 2024/2026/2027 (incl. NY rate cuts), LTCG stacking and the standard-deduction spillover, §86 SS taxation at all three tiers, SSA claim-age clamps, the full RMD divisor table and prior-year-end timing, §72(t) penalties with and without Rule of 55, IRMAA boundary behavior at exactly $750K, ACA subsidy tiers, cost-basis gain realization, the gross-up solver's convergence, cash-strategy ordering for all four modes (including the acceptance case: $300K cash with a $100K floor uses at most $200K), the inflation-adjusted reserve floor, couple-mode growth timing and per-spouse RMDs, HSA family-cap allocation, the max-spend solver round-trip, the horizon-aware guideline tiers, single-filer brackets/SS thresholds/IRMAA tiers/NY tables, the single-vs-MFJ lifetime-tax gap, Roth ordering-layer penalties (basis, seasoned and unseasoned conversions, earnings), the SEPP amortized stream, and the IRMAA two-year lookback.
+The engine ships with a **107-case self-test suite** (run via the in-app "Run Diagnostics" button or by extracting the engine into Node). It pins: exact bracket math for 2024/2026/2027 (incl. NY rate cuts), LTCG stacking and the standard-deduction spillover, §86 SS taxation at all three tiers, SSA claim-age clamps, the full RMD divisor table and prior-year-end timing, §72(t) penalties with and without Rule of 55, IRMAA boundary behavior at exactly $750K, ACA subsidy tiers (including the exactly-400%-FPL boundary and the inflated out-of-pocket floor), the 2025 FPL base, cost-basis gain realization, the gross-up solver's convergence, cash-strategy ordering for all four modes (including the acceptance case: $300K cash with a $100K floor uses at most $200K), the inflation-adjusted reserve floor, couple-mode growth timing and per-spouse RMDs, HSA family-cap allocation, the max-spend solver round-trip, the horizon-aware guideline tiers, single-filer brackets/SS thresholds/IRMAA tiers/NY tables, the single-vs-MFJ lifetime-tax gap, Roth ordering-layer penalties (basis, seasoned and unseasoned conversions, earnings), the SEPP amortized stream, the IRMAA two-year lookback, conversions halting the year Social Security starts, the claim-age-above-70 clamp, the materiality-gated depletion flag, and the debt-payoff gain being taxed.
 
 `CALCULATION_MODEL.md` in this repository maps each of these rules to its implementation in `src/App.jsx`; the two documents plus the test suite are intended to be sufficient to reconstruct the engine and validate the reconstruction.

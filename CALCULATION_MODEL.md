@@ -86,10 +86,11 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
   gross-up solve for withdrawals before age 59½: traditional IRA draws are
   always penalized; 401(k)/403(b) draws are exempt only under the Rule of 55
   (retirement age 55+, and only from age 55); early Roth draws are penalized
-  in full as a conservative approximation since contribution/conversion basis
-  layers are not tracked. Roth conversions themselves are never penalized.
-  The penalty appears in each row's `earlyPenalty` field and is included in
-  `tax`.
+  per the §408A(d)(4) ordering layers (contribution basis and 5-year seasoned
+  conversions penalty-free, only unseasoned conversion principal and earnings
+  penalized — see "Roth Ordering Layers And SEPP" below). Roth conversions
+  themselves are never penalized. The penalty appears in each row's
+  `earlyPenalty` field and is included in `tax`.
 - Tax is solved iteratively so withdrawals cover both spending needs and tax created by those withdrawals.
 - Married-couple mode uses the same tax engine with the MFJ parameter set. It
   sums household ordinary income, LTCG, taxable Social Security, MAGI,
@@ -101,9 +102,11 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 ## Social Security
 
 - `ssIncome` is treated as the annual full-retirement-age benefit in today's dollars.
-- Claim age is clamped to the legal window: benefits cannot start before 62,
-  and delayed retirement credits stop accruing at 70. FRA is modeled as 67
-  (exact only for those born 1960+).
+- Claim age is clamped to the legal window 62–70 for the benefit **start**,
+  not just the benefit factor: an entry below 62 starts at 62, and an entry
+  above 70 starts at 70 (delayed credits stop accruing at 70, so a later start
+  would only forfeit benefits). FRA is modeled as 67 (exact only for those
+  born 1960+).
 - Claiming before FRA reduces the benefit using SSA-style monthly reduction factors.
 - Claiming after FRA increases the benefit by 8% per year up to 36 delayed months.
 - Taxable Social Security uses provisional-income thresholds by filing
@@ -118,6 +121,8 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 ## Roth Conversions
 
 - Conversion targets vary by age phase: bridge, mid, and Medicare/pre-SS years.
+- Conversions stop the year Social Security starts, in every age window (an
+  early claim at 62 ends conversions at 62). Enforced in both engines.
 - Conversions are taxable ordinary income.
 - In RMD years, required distributions are reserved before conversion so RMD amounts are not implicitly converted.
 - In married-couple mode, conversion targets and caps are calculated per spouse
@@ -158,7 +163,10 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 
 - HSA withdrawals are applied against healthcare spending before taxable account withdrawals.
 - ACA subsidy estimation is optional and approximate.
-- Under current 2026 law, the model restores the 400% FPL subsidy cliff after the enhanced-credit period.
+- Under current 2026 law, the model restores the 400% FPL subsidy cliff after
+  the enhanced-credit period. Income above 400% FPL pays full sticker; income
+  at or below 400% (inclusive) is subsidized. The non-premium out-of-pocket
+  floor (~$2,000 in 2025 dollars) inflates on the FPL clock.
 - IRMAA uses 2026 Part B and Part D surcharge tiers for the plan's filing
   status (MFJ thresholds $218K-$750K; single thresholds $109K-$500K) and
   applies an inflation projection after 2026. Single filers are charged
@@ -167,8 +175,9 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
   whenever the projection has one — i.e., from the third retirement year on.
   The first two retirement years fall back to same-year MAGI because
   working-year (salary) MAGI is out of scope.
-- The Federal Poverty Level is household-size aware: $15,060 for the first
-  person plus $5,380 per additional person (2024 base, inflation projected).
+- The Federal Poverty Level is household-size aware: $15,650 for the first
+  person plus $5,500 per additional person (2025 HHS base — the guidelines
+  that govern 2026 ACA eligibility — inflation projected).
 - In married-couple mode, lifestyle spending is shared, but healthcare costs
   are spouse-specific because Medicare/ACA eligibility depends on each spouse's
   age. ACA subsidy and IRMAA estimates remain household-level approximations
@@ -227,7 +236,12 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 
 ## Depletion And Success
 
-- A plan is marked depleted if total modeled assets fall to zero or if spending plus taxes cannot be covered by modeled withdrawals.
+- A plan is marked depleted if total modeled assets fall to zero in any year,
+  or if cumulative unmet cash flow clears the materiality threshold
+  (max($1,000, 0.5% of year-1 spending)). `summary.depleted` applies this gate
+  itself — not just the UI banner — so sub-dollar solver rounding never marks a
+  funded plan depleted, and the flag sent to the Ask-AI context agrees with the
+  banner.
 - `totalUnmetCashFlow` accumulates uncovered spending/tax needs.
 - HSA balances remain part of total assets, but healthcare withdrawals now make them spendable for qualifying healthcare expenses.
 
@@ -267,7 +281,10 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 
 - Monte Carlo runs feed randomized annual retirement returns into the same deterministic engine used by the main projection.
 - This keeps taxes, Roth conversions, RMDs, ACA, IRMAA, HSA withdrawals, and unmet cash-flow logic consistent with the main plan.
-- Volatility is controlled by `portfolioVolatility`.
+- Volatility is controlled by `portfolioVolatility`. Each annual return draw is
+  floored at -95% so an unbounded Normal sample cannot drive an account
+  negative. Because draws are symmetric, the MC median path sits slightly below
+  the deterministic projection (volatility drag ~0.4%/yr at the default 9%).
 - Flexible spending, if enabled, reduces spending 10% in years after the
   portfolio's year-end total fell more than 15% versus the prior year end.
   (The guard previously compared a year-end total to itself and never fired;

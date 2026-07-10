@@ -5,7 +5,14 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist', 'docs/assets']),
+  // Ignore build output, the committed docs bundle, Claude worktrees/scratch,
+  // and the audit-only engine extract (a byte snapshot, not linted source).
+  globalIgnores([
+    'dist',
+    'docs/assets',
+    '.claude/**',
+    'REFERENCE_ENGINE_CODE.js',
+  ]),
   {
     files: ['**/*.{js,jsx}'],
     ignores: ['vite.config.js', 'server/**/*.mjs'],

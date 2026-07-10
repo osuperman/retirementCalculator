@@ -204,6 +204,13 @@ function defaultRmdStartAge(currentAge, currentYear = PROJECTION_START_YEAR) {
 const SS_MIN_CLAIM_AGE = 62;
 const SS_MAX_CREDIT_AGE = 70;
 
+// Claim age used to gate when benefits START. Clamped to the legal 62–70
+// window: entering an age above 70 is treated as claiming at 70 (delayed
+// credits stop accruing at 70, so a later start only forfeits benefits).
+function effectiveSsClaimAge(ssAge) {
+  return Math.min(SS_MAX_CREDIT_AGE, Math.max(SS_MIN_CLAIM_AGE, ssAge));
+}
+
 function adjustedSocialSecurityBenefit(fraBenefit, claimAge, fullRetirementAge = 67) {
   const effectiveClaimAge = Math.min(
     SS_MAX_CREDIT_AGE,
@@ -405,11 +412,13 @@ function rmdDivisor(age) {
   return 2.0;
 }
 
-// 2024 Federal Poverty Level (lower 48), projected by inflation.
-// $15,060 for the first person + $5,380 for each additional person.
+// 2025 Federal Poverty Level (lower 48), projected by inflation.
+// $15,650 for the first person + $5,500 for each additional person
+// (HHS/ASPE guidelines, Jan 2025 — the guideline set that governs 2026 ACA
+// eligibility). Future years approximate the annual HHS update by inflation.
 function federalPovertyLevel(householdSize, year, inflation = 0.03) {
-  const base2024 = 15060 + 5380 * Math.max(0, Math.max(1, householdSize) - 1);
-  return base2024 * Math.pow(1 + inflation, year - 2024);
+  const base2025 = 15650 + 5500 * Math.max(0, Math.max(1, householdSize) - 1);
+  return base2025 * Math.pow(1 + inflation, year - 2025);
 }
 
 // Simplified ACA premium subsidy estimation (post-IRA 2022 rules, extended through 2025)
@@ -431,23 +440,27 @@ function estimateAcaHealthcareCost(baseHealthcareCost, magi, householdSize, year
     else expectedPct = 0.085;
   } else {
     // Current 2026 law: original ACA cliff is back; no PTC above 400% FPL.
+    // Exactly 400% is still eligible (§36B: household income "does not
+    // exceed" 400%), so the top band is inclusive at its upper edge — the
+    // lookup must not fall through to the first band at fplRatio == 4.0.
     if (fplRatio > 4.0) return baseHealthcareCost;
-    const band = ACA_APPLICABLE_PERCENTAGES_2026.find(
-      ([low, high]) => fplRatio >= low && fplRatio < high,
-    );
-    if (!band) expectedPct = ACA_APPLICABLE_PERCENTAGES_2026[0][2];
-    else {
-      const [low, high, startPct, endPct] = band;
-      const span = high - low || 1;
-      expectedPct = startPct + ((fplRatio - low) / span) * (endPct - startPct);
-    }
+    const band =
+      ACA_APPLICABLE_PERCENTAGES_2026.find(
+        ([low, high]) => fplRatio >= low && fplRatio < high,
+      ) ??
+      ACA_APPLICABLE_PERCENTAGES_2026[ACA_APPLICABLE_PERCENTAGES_2026.length - 1];
+    const [low, high, startPct, endPct] = band;
+    const span = high - low || 1;
+    expectedPct = startPct + ((fplRatio - low) / span) * (endPct - startPct);
   }
   const expectedContribution = magi * expectedPct;
-  // User pays the lesser of sticker or expected contribution (plus OOP / deductibles)
-  // Add ~$2K/year floor for deductibles, copays, dental not covered by subsidy
-  const premiumPortion = Math.max(0, baseHealthcareCost - 2000);
+  // User pays the lesser of sticker or expected contribution, plus a
+  // non-premium out-of-pocket floor (deductibles, copays, dental) that is
+  // entered in ~2025 dollars and inflates on the same clock as the FPL.
+  const oopFloor = 2000 * Math.pow(1 + inflation, Math.max(0, year - 2025));
+  const premiumPortion = Math.max(0, baseHealthcareCost - oopFloor);
   const subsidizedPremium = Math.min(premiumPortion, Math.max(0, expectedContribution));
-  return subsidizedPremium + 2000;
+  return subsidizedPremium + oopFloor;
 }
 
 function totalTax(
@@ -680,6 +693,12 @@ function solveGrossedUpWithdrawals({
   // Annual SEPP/72(t) payment amount - tax-deferred draws up to this are
   // exempt from the early-withdrawal penalty.
   seppExempt = 0,
+  // Extra long-term capital gain to tax this year that is NOT produced by a
+  // taxable withdrawal (e.g. gain realized when selling taxable assets at
+  // time zero to clear debt). It is added to the tax base and provisional
+  // income only; the account basis is already reduced by the caller, so it
+  // is deliberately excluded from the returned `realizedGain` used for basis.
+  additionalRealizedGain = 0,
 }) {
   let tax = 0;
   let withdrawals = { wCash: 0, wTaxable: 0, w401k: 0, wIra: 0, wRoth: 0, reserveUsed: 0 };
@@ -715,6 +734,9 @@ function solveGrossedUpWithdrawals({
       state.bTaxable,
       state.bTaxableBasis,
     );
+    // Gain taxed this year = withdrawal gain + any caller-supplied extra gain
+    // (debt-payoff sale). Basis for the extra gain is already handled upstream.
+    const taxableRealizedGain = realizedGain + Math.max(0, additionalRealizedGain);
     const incomeBeforeSs =
       ptIncome +
       pensionGross +
@@ -722,7 +744,7 @@ function solveGrossedUpWithdrawals({
       withdrawals.w401k +
       withdrawals.wIra +
       conversion +
-      realizedGain; // LTCG counts in provisional income
+      taxableRealizedGain; // LTCG counts in provisional income
     taxableSs = taxableSocialSecurity(ssGross, incomeBeforeSs, filingStatus);
     ordIncome =
       ptIncome +
@@ -745,9 +767,11 @@ function solveGrossedUpWithdrawals({
     // - 401k: exempt when the Rule of 55 applies (separation at 55+), and only
     //   from age 55 onward.
     // - Traditional IRA: always penalized before 59½ (Rule of 55 never applies).
-    // - Roth: conservative approximation — basis/conversion layers aren't
-    //   tracked, so early Roth draws are penalized in full. The waterfall taps
-    //   Roth last, so this rarely binds.
+    // - Roth: §408A(d)(4) ordering layers — contribution basis and 5-year
+    //   seasoned conversions are penalty-free; only unseasoned conversion
+    //   principal and earnings are penalized (rothEarlyPenaltyBase). Callers
+    //   that pass no layer data fall back to penalizing early Roth draws in
+    //   full, as a conservative approximation.
     // RMDs cannot coexist with age < 59½, so forced RMD draws are never hit.
     if (age < 59.5) {
       const penalized401k =
@@ -766,7 +790,7 @@ function solveGrossedUpWithdrawals({
     const newTax =
       totalTax(
         ordIncome,
-        realizedGain,
+        taxableRealizedGain,
         year,
         nyExemptAmount,
         inflation,
@@ -1034,25 +1058,25 @@ function runSelfTests() {
     1,
   );
 
-  // --- FPL projection
+  // --- FPL projection (2025 HHS guidelines base: $15,650 + $5,500/person)
   test(
-    "federalPovertyLevel: household of 2 in 2024 ≈ $20,440",
-    federalPovertyLevel(2, 2024, 0.03),
-    20440,
+    "federalPovertyLevel: household of 2 in 2025 = $21,150",
+    federalPovertyLevel(2, 2025, 0.03),
+    21150,
     pctEq,
   );
   test(
-    "federalPovertyLevel: household of 2 in 2034 with 3% inflation",
-    federalPovertyLevel(2, 2034, 0.03),
-    20440 * Math.pow(1.03, 10),
+    "federalPovertyLevel: household of 2 in 2035 with 3% inflation",
+    federalPovertyLevel(2, 2035, 0.03),
+    21150 * Math.pow(1.03, 10),
     pctEq,
   );
-  // Household of 1 must use the 1-person FPL ($15,060 in 2024), not the
+  // Household of 1 must use the 1-person FPL ($15,650 in 2025), not the
   // 2-person figure — regression test for the ACA over-subsidy bug.
   test(
-    "federalPovertyLevel: household of 1 in 2024 = $15,060",
-    federalPovertyLevel(1, 2024, 0.03),
-    15060,
+    "federalPovertyLevel: household of 1 in 2025 = $15,650",
+    federalPovertyLevel(1, 2025, 0.03),
+    15650,
     pctEq,
   );
 
@@ -2315,6 +2339,210 @@ function runSelfTests() {
     },
   );
 
+  // ============================================================
+  // AUDIT 2026-07 REGRESSION TESTS
+  // ============================================================
+
+  // --- ACA current-law (2026) band, incl. the 400%-FPL boundary. Exactly
+  // 400% FPL is still eligible (§36B): it must use the top 9.96% band, not
+  // fall through to the 2.1% first band, and not price as the over-cliff
+  // full-sticker case. Continuity across 3.99x -> 4.00x confirms the fix.
+  {
+    const fpl2026 = federalPovertyLevel(2, 2026, 0.03);
+    const at399 = estimateAcaHealthcareCost(30000, fpl2026 * 3.99, 2, 2026, 0.03);
+    const at400 = estimateAcaHealthcareCost(30000, fpl2026 * 4.0, 2, 2026, 0.03);
+    const at401 = estimateAcaHealthcareCost(30000, fpl2026 * 4.01, 2, 2026, 0.03);
+    test(
+      "ACA 2026: cost is continuous across exactly 400% FPL (no 2.1% fallback)",
+      Math.abs(at400 - at399) < 500 ? 1 : 0,
+      1,
+    );
+    test(
+      "ACA 2026: exactly 400% FPL still subsidized (below full sticker)",
+      at400 < 30000 ? 1 : 0,
+      1,
+    );
+    test("ACA 2026: just above 400% FPL = full sticker (cliff)", at401, 30000, pctEq);
+  }
+  // OOP floor inflates from its 2025 base: $2,000 in 2025, $2,060 in 2026.
+  // A sub-floor sticker cost ($1,000) at an in-subsidy MAGI isolates the
+  // floor as the whole result, so the delta is purely the floor's inflation.
+  test(
+    "ACA: OOP floor inflates ($2,000 in 2025 -> $2,060 in 2026)",
+    estimateAcaHealthcareCost(1000, 25000, 2, 2026, 0.03) -
+      estimateAcaHealthcareCost(1000, 25000, 2, 2025, 0.03),
+    60,
+    (a, e) => Math.abs(a - e) <= 5,
+  );
+
+  // --- Conversions stop once Social Security starts (early claim at 62)
+  testScenario(
+    "Conversions stop when SS starts (early claim at 62)",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        currentAge: 58,
+        retirementAge: 59,
+        planThroughAge: 70,
+        ssAge: 62,
+        conversionBridge: 0,
+        conversionMid: 30000,
+        conversionFinal: 0,
+      });
+      const preSs = r.yearlyData.find((d) => d.age === 61);
+      const postSs = r.yearlyData.filter((d) => d.age >= 62 && d.age <= 64);
+      const ok =
+        preSs.conversion > 0 &&
+        postSs.every((d) => d.ss > 0 && d.conversion === 0);
+      return {
+        passed: ok,
+        details: `age61 conv=${preSs.conversion}; 62-64 conv=[${postSs.map((d) => d.conversion).join(",")}]`,
+      };
+    },
+  );
+
+  // --- SS claim age above 70 is treated as a start at 70 (delayed credits
+  // stop at 70; a later start would only forfeit benefits).
+  testScenario(
+    "SS claim age > 70 starts benefits at 70",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        currentAge: 60,
+        retirementAge: 61,
+        planThroughAge: 80,
+        ssAge: 75,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+      });
+      const first = r.yearlyData.find((d) => d.ss > 0);
+      return {
+        passed: !!first && first.age === 70,
+        details: `first SS benefit at age ${first ? first.age : "never"} (expected 70)`,
+      };
+    },
+  );
+
+  // --- Depletion flag respects materiality: sub-dollar solver rounding must
+  // NOT mark a plan that ends with millions as depleted, but a genuinely
+  // broke plan still must.
+  testScenario(
+    "Depleted flag: funded plan not flagged; broke plan flagged",
+    () => {
+      const funded = simulate({ ...DEFAULT_INPUTS });
+      const broke = simulate({
+        ...DEFAULT_INPUTS,
+        currentAge: 60,
+        retirementAge: 61,
+        planThroughAge: 90,
+        balanceCash: 1000,
+        balanceTaxable: 0,
+        balance401k: 0,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        baseExpenses: 80000,
+      });
+      const ok =
+        funded.summary.depleted === false &&
+        funded.summary.portfolioAtEnd > 0 &&
+        broke.summary.depleted === true;
+      return {
+        passed: ok,
+        details: `funded depleted=${funded.summary.depleted} (unmet ${funded.summary.totalUnmetCashFlow}); broke depleted=${broke.summary.depleted}`,
+      };
+    },
+  );
+
+  // --- Debt-payoff LTCG is taxed in the first distribution year (previously
+  // realized silently and never taxed). Already-retired user so year 1 is a
+  // distribution year; low basis makes the payoff gain large.
+  testScenario(
+    "Debt payoff at time zero: realized gain is taxed in year 1",
+    () => {
+      const common = {
+        ...DEFAULT_INPUTS,
+        currentAge: 65,
+        retirementAge: 60,
+        planThroughAge: 70,
+        balanceCash: 0,
+        balanceTaxable: 300000,
+        taxableBasisPct: 0.2,
+        balance401k: 0,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        ssIncome: 0,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+      };
+      const noDebt = simulate({ ...common, creditCardDebt: 0 });
+      const withDebt = simulate({ ...common, creditCardDebt: 100000 });
+      const t0 = noDebt.yearlyData[0].tax;
+      const t1 = withDebt.yearlyData[0].tax;
+      return {
+        passed: t1 > t0 + 500,
+        details: `year1 tax: no-debt=${t0}, with-$100K-payoff=${t1}`,
+      };
+    },
+  );
+
+  // --- Couple conversion cap nets the IRA against the RMD (matches the
+  // individual engine): a large IRA that fully covers the RMD frees the 401k
+  // to convert its full target in a pre-SS Medicare-window year.
+  testScenario(
+    "Couple: conversion cap nets IRA against RMD (pre-SS)",
+    () => {
+      const person = {
+        currentAge: 66,
+        retirementAge: 65,
+        planThroughAge: 75,
+        ssAge: 70,
+        balance401k: 500000,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        rmdStartAge: 73,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 40000,
+        pensionIncome: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        contrib401k: 0,
+        contribMatch: 0,
+        contribHsa: 0,
+        healthcarePre65: 0,
+        healthcarePost65: 0,
+      };
+      const couple = normalizeCoupleInputs({
+        primary: { ...DEFAULT_COUPLE_INPUTS.primary, ...person },
+        spouse: {
+          ...DEFAULT_COUPLE_INPUTS.spouse,
+          ...person,
+          balance401k: 0,
+          conversionFinal: 0,
+        },
+        shared: {
+          ...DEFAULT_COUPLE_INPUTS.shared,
+          balanceCash: 300000,
+          balanceTaxable: 0,
+          baseExpenses: 40000,
+        },
+      });
+      const r = simulateCouple(couple);
+      const row = r.yearlyData[0];
+      const conv = row.ownerDetails.primary.conversion;
+      // ~$40K inflated one year (age 66 vs current 66 => inflMult 1) and pre-SS.
+      return {
+        passed: conv >= 39000 && row.ss === 0,
+        details: `age66 primary conversion=${conv} (expected ~40000, pre-SS)`,
+      };
+    },
+  );
+
   const passed = results.filter((r) => r.passed).length;
   const failed = results.filter((r) => !r.passed).length;
   return { passed, failed, total: results.length, results };
@@ -2410,8 +2638,8 @@ function simulate(inputs, options = {}) {
   const filingStatus = inputs.filingStatus === "single" ? "single" : "mfj";
   const effectiveRmdStartAge =
     rmdStartAge ?? defaultRmdStartAge(currentAge, currentYear);
-  // Benefits cannot start before 62 even if the user types a lower age.
-  const ssClaimAge = Math.max(SS_MIN_CLAIM_AGE, ssAge);
+  // Benefits start within the legal 62–70 window (clamped both ways).
+  const ssClaimAge = effectiveSsClaimAge(ssAge);
   // Rule of 55: separating from service in/after the year you turn 55 makes
   // withdrawals from THAT employer's 401k penalty-free (never IRAs). Retiring
   // before 55 forfeits it permanently for this model.
@@ -2431,19 +2659,31 @@ function simulate(inputs, options = {}) {
   const initialCashPayoff = Math.min(bCash, unpaidDebt);
   bCash -= initialCashPayoff;
   unpaidDebt -= initialCashPayoff;
+  // Any LTCG realized selling taxable assets to clear debt at time zero. It is
+  // taxed in the first distribution year (folded into that year's solve). For
+  // a user still working in year 1 this defers the tax to the first retirement
+  // year — a minor timing approximation, consistent with accumulation-year
+  // salary/gains taxes being out of scope; previously the gain was untaxed.
+  let pendingDebtPayoffGain = 0;
   if (unpaidDebt > 0 && bTaxable > 0) {
     const taxablePayoff = Math.min(bTaxable, unpaidDebt);
     const payoffGain = computeRealizedGain(taxablePayoff, bTaxable, bTaxableBasis);
     bTaxable -= taxablePayoff;
     bTaxableBasis = Math.max(0, bTaxableBasis - Math.max(0, taxablePayoff - payoffGain));
     unpaidDebt -= taxablePayoff;
+    pendingDebtPayoffGain = payoffGain;
   }
 
   const yearlyData = [];
   let totalTaxesPaid = 0;
   let totalConverted = 0;
   let totalUnmetCashFlow = unpaidDebt;
-  let depleted = unpaidDebt > 1;
+  // `depleted` is finalized after the loop: assets hitting zero flag it
+  // immediately; unmet cash flow is judged cumulatively against the same
+  // materiality threshold as the plan banner, so sub-dollar solver rounding
+  // can never mark a funded plan depleted (the raw flag used to leak to the
+  // Ask AI context and contradict the banner).
+  let depleted = false;
   // Projected MAGI by year — real IRMAA is based on MAGI from two years
   // earlier, so retirement years look back where a projected MAGI exists.
   const magiByYear = {};
@@ -2596,10 +2836,16 @@ function simulate(inputs, options = {}) {
     const seppActive =
       seppLockEndAge !== null && seppPayment > 0 && age < seppLockEndAge;
 
-    // Determine Roth conversion target based on age phase
+    // Determine Roth conversion target based on age phase. Conversions stop
+    // in every window once Social Security starts: SS stacks with conversion
+    // income (ordinary + provisional), and the strategy's purpose is filling
+    // the low-tax years before benefits begin.
     let conversion = 0;
     let strategy = "";
-    if (age < 60) {
+    if (age >= ssClaimAge) {
+      conversion = 0;
+      strategy = "SS active | Roth preserved";
+    } else if (age < 60) {
       conversion = Math.max(
         0,
         Math.min(Math.round(conversionBridge * inflMult), b401k),
@@ -2611,15 +2857,12 @@ function simulate(inputs, options = {}) {
         Math.min(Math.round(conversionMid * inflMult), b401k),
       );
       strategy = `Flex | Convert $${Math.round(conversionMid / 1000)}K`;
-    } else if (age < ssClaimAge) {
+    } else {
       conversion = Math.max(
         0,
         Math.min(Math.round(conversionFinal * inflMult), b401k),
       );
       strategy = `Medicare | Final convert $${Math.round(conversionFinal / 1000)}K`;
-    } else {
-      conversion = 0;
-      strategy = "SS active | Roth preserved";
     }
 
     // Calculate RMD requirement (if applicable)
@@ -2673,6 +2916,11 @@ function simulate(inputs, options = {}) {
     const medicareEnrollees =
       filingStatus === "single" ? 1 : Math.min(2, householdSize);
 
+    // Debt-payoff LTCG (realized at time zero) is taxed in this first
+    // distribution year, then cleared so it applies only once.
+    const debtPayoffGainThisYear = pendingDebtPayoffGain;
+    pendingDebtPayoffGain = 0;
+
     // === Converged solve: withdrawals, tax, RMD, and IRMAA all converge together ===
     // Outer loop: iterate IRMAA (and ACA pre-65) until spending stabilizes.
     // Inner: solveGrossedUpWithdrawals handles tax gross-up AND RMD internally.
@@ -2718,6 +2966,7 @@ function simulate(inputs, options = {}) {
         filingStatus,
         rothLayers,
         seppExempt: seppActive ? seppPayment : 0,
+        additionalRealizedGain: debtPayoffGainThisYear,
       });
 
       finalSpending = effectiveSpending;
@@ -2735,7 +2984,7 @@ function simulate(inputs, options = {}) {
         solve.withdrawals.w401k +
         solve.withdrawals.wIra +
         conversion;
-      const postMagi = postOrdIncome + solve.realizedGain;
+      const postMagi = postOrdIncome + solve.realizedGain + debtPayoffGainThisYear;
 
       // Real IRMAA uses MAGI from two years earlier. Use the projected MAGI
       // from that year when the projection has one (i.e. the household has
@@ -2763,7 +3012,8 @@ function simulate(inputs, options = {}) {
 
     // ACA subsidy (pre-65 only, opt-in) — re-solve once with subsidized healthcare
     if (useAcaSubsidyEstimate && age < 65 && age >= retirementAge) {
-      const estimatedMagi = solve.ordIncome + solve.realizedGain;
+      const estimatedMagi =
+        solve.ordIncome + solve.realizedGain + debtPayoffGainThisYear;
       const healthcareNominal = healthcareSticker * inflMult;
       const subsidizedNominal = estimateAcaHealthcareCost(
         healthcareNominal,
@@ -2804,6 +3054,7 @@ function simulate(inputs, options = {}) {
         filingStatus,
         rothLayers,
         seppExempt: seppActive ? seppPayment : 0,
+        additionalRealizedGain: debtPayoffGainThisYear,
       });
     }
 
@@ -2857,7 +3108,7 @@ function simulate(inputs, options = {}) {
       w401k +
       wIra +
       conversion;
-    const magi = finalOrdIncome + realizedGain;
+    const magi = finalOrdIncome + realizedGain + debtPayoffGainThisYear;
     magiByYear[year] = magi;
 
     // Grow balances
@@ -2877,8 +3128,9 @@ function simulate(inputs, options = {}) {
     priorPriorYearEndTotal = priorYearEndTotal;
     priorYearEndTotal = total;
 
-    // Depletion: total portfolio hits zero (consistent with Monte Carlo)
-    if ((total <= 0 || unmetCashFlow > 1) && !depleted) depleted = true;
+    // Depletion: total portfolio hits zero (consistent with Monte Carlo).
+    // Unmet cash flow is evaluated cumulatively after the loop.
+    if (total <= 0 && !depleted) depleted = true;
 
     let phase = "bridge";
     if (age >= 60 && age < 65) phase = "mid";
@@ -2959,6 +3211,16 @@ function simulate(inputs, options = {}) {
           ? year1Data.total
           : 1; // Avoid divide-by-zero
 
+  // Cumulative unmet cash flow marks the plan depleted only when it clears
+  // the same materiality bar the banner uses (hasMaterialUnmetCashFlow):
+  // max($1,000, 0.5% of year-1 spending). Includes any unpayable time-zero debt.
+  const year1SpendingForThreshold = year1Data ? year1Data.spending : 0;
+  if (
+    totalUnmetCashFlow > Math.max(1000, year1SpendingForThreshold * 0.005)
+  ) {
+    depleted = true;
+  }
+
   return {
     yearlyData,
     summary: {
@@ -2991,14 +3253,20 @@ function getCoupleHsaLimit(primaryAge, spouseAge, year, inflation, householdSize
   return familyLimit + catchUps;
 }
 
-function personConversionTarget(person, age, inflMult, b401k, rmdAmount) {
+function personConversionTarget(person, age, inflMult, b401k, bTradIra, rmdAmount) {
   if (age < person.retirementAge) return 0;
+  // Conversions stop in every window once this spouse's Social Security
+  // starts, matching the individual engine (SS stacks with conversion income).
+  if (age >= effectiveSsClaimAge(person.ssAge)) return 0;
   let target = 0;
   if (age < 60) target = person.conversionBridge;
   else if (age < 65) target = person.conversionMid;
-  else if (age < Math.max(SS_MIN_CLAIM_AGE, person.ssAge)) target = person.conversionFinal;
+  else target = person.conversionFinal;
   const conversion = Math.max(0, Math.min(Math.round(target * inflMult), b401k));
-  const rmdThatMustComeFrom401k = Math.max(0, rmdAmount);
+  // Reserve only the RMD share the 401k must supply: the couple waterfall
+  // satisfies RMDs from the Traditional IRA first (enforcePersonRmd), so a
+  // large IRA frees the 401k for conversion — matching the individual engine.
+  const rmdThatMustComeFrom401k = Math.max(0, rmdAmount - Math.max(0, bTradIra));
   return Math.min(conversion, Math.max(0, b401k - rmdThatMustComeFrom401k));
 }
 
@@ -3162,6 +3430,9 @@ function solveCoupleGrossedUpWithdrawals({
   interestIncome = 0,
   // Per-spouse Roth ordering layers (IRC 408A(d)(4)).
   rothLayers = { primary: null, spouse: null },
+  // Extra LTCG to tax this year not produced by a withdrawal (debt-payoff
+  // sale at time zero). Added to the tax base and provisional income only.
+  additionalRealizedGain = 0,
 }) {
   const seniors65 =
     (ages.primary >= 65 ? 1 : 0) + (ages.spouse >= 65 ? 1 : 0);
@@ -3186,6 +3457,7 @@ function solveCoupleGrossedUpWithdrawals({
       state.taxable,
       state.taxableBasis,
     );
+    const taxableRealizedGain = realizedGain + Math.max(0, additionalRealizedGain);
 
     const taxDeferredWithdrawals =
       withdrawals.primary401k +
@@ -3202,7 +3474,7 @@ function solveCoupleGrossedUpWithdrawals({
       interestIncome +
       taxDeferredWithdrawals +
       totalConversions +
-      realizedGain;
+      taxableRealizedGain;
     taxableSs = taxableSocialSecurity(ssGross, incomeBeforeSs);
     ordIncome =
       partTimeGross +
@@ -3261,7 +3533,7 @@ function solveCoupleGrossedUpWithdrawals({
     const newTax =
       totalTax(
         ordIncome,
-        realizedGain,
+        taxableRealizedGain,
         year,
         nyExemptAmount,
         inflation,
@@ -3329,19 +3601,26 @@ function simulateCouple(coupleInputs, options = {}) {
   const initialCashPayoff = Math.min(cash, unpaidDebt);
   cash -= initialCashPayoff;
   unpaidDebt -= initialCashPayoff;
+  // LTCG realized selling taxable assets to clear debt at time zero, taxed in
+  // the first distribution year (see the individual engine for rationale).
+  let pendingDebtPayoffGain = 0;
   if (unpaidDebt > 0 && taxable > 0) {
     const taxablePayoff = Math.min(taxable, unpaidDebt);
     const payoffGain = computeRealizedGain(taxablePayoff, taxable, taxableBasis);
     taxable -= taxablePayoff;
     taxableBasis = Math.max(0, taxableBasis - Math.max(0, taxablePayoff - payoffGain));
     unpaidDebt -= taxablePayoff;
+    pendingDebtPayoffGain = payoffGain;
   }
 
   const yearlyData = [];
   let totalTaxesPaid = 0;
   let totalConverted = 0;
   let totalUnmetCashFlow = unpaidDebt;
-  let depleted = unpaidDebt > 1;
+  // Finalized after the loop: zero assets flag immediately; unmet cash flow
+  // is judged cumulatively against the banner's materiality threshold (see
+  // the individual engine for rationale).
+  let depleted = false;
   // Projected household MAGI by year, for the IRMAA two-year lookback.
   const coupleMagiByYear = {};
   // Per-spouse Roth ordering layers (IRC 408A(d)(4)).
@@ -3575,14 +3854,14 @@ function simulateCouple(coupleInputs, options = {}) {
         ? Math.round(spouse.partTimeIncome * inflMult)
         : 0;
     const primarySs =
-      primaryAge >= Math.max(SS_MIN_CLAIM_AGE, primary.ssAge)
+      primaryAge >= effectiveSsClaimAge(primary.ssAge)
         ? Math.round(
             adjustedSocialSecurityBenefit(primary.ssIncome, primary.ssAge) *
               Math.pow(1 + shared.inflation, year - currentYear),
           )
         : 0;
     const spouseSs =
-      spouseAge >= Math.max(SS_MIN_CLAIM_AGE, spouse.ssAge)
+      spouseAge >= effectiveSsClaimAge(spouse.ssAge)
         ? Math.round(
             adjustedSocialSecurityBenefit(spouse.ssIncome, spouse.ssAge) *
               Math.pow(1 + shared.inflation, year - currentYear),
@@ -3626,6 +3905,7 @@ function simulateCouple(coupleInputs, options = {}) {
       primaryAge,
       inflMult,
       primaryState.b401k,
+      primaryState.bTradIra,
       primaryRmd,
     );
     const spouseConversion = personConversionTarget(
@@ -3633,6 +3913,7 @@ function simulateCouple(coupleInputs, options = {}) {
       spouseAge,
       inflMult,
       spouseState.b401k,
+      spouseState.bTradIra,
       spouseRmd,
     );
 
@@ -3670,6 +3951,10 @@ function simulateCouple(coupleInputs, options = {}) {
     };
     // Taxable interest on the shared Cash/HYSA balance (start-of-year).
     const coupleCashInterest = Math.max(0, cash * shared.cashReturn);
+    // Debt-payoff LTCG (time zero) is taxed in this first distribution year,
+    // then cleared so it applies only once.
+    const debtPayoffGainThisYear = pendingDebtPayoffGain;
+    pendingDebtPayoffGain = 0;
     let netNeed = Math.max(0, spending - hsaWithdrawal - incomeTotal);
     let solve = solveCoupleGrossedUpWithdrawals({
       netNeed,
@@ -3704,6 +3989,7 @@ function simulateCouple(coupleInputs, options = {}) {
       cashPolicy: coupleCashPolicy,
       rothLayers: coupleRothLayers,
       interestIncome: coupleCashInterest,
+      additionalRealizedGain: debtPayoffGainThisYear,
     });
     let acaSubsidy = 0;
     const pre65HealthcareSticker =
@@ -3762,6 +4048,7 @@ function simulateCouple(coupleInputs, options = {}) {
         cashPolicy: coupleCashPolicy,
         rothLayers: coupleRothLayers,
         interestIncome: coupleCashInterest,
+        additionalRealizedGain: debtPayoffGainThisYear,
       });
     }
 
@@ -3831,6 +4118,7 @@ function simulateCouple(coupleInputs, options = {}) {
           cashPolicy: coupleCashPolicy,
           rothLayers: coupleRothLayers,
           interestIncome: coupleCashInterest,
+          additionalRealizedGain: debtPayoffGainThisYear,
         });
       }
       spending = Math.round(baseSpendingBeforeIrmaa + irmaaSurcharge);
@@ -3904,12 +4192,13 @@ function simulateCouple(coupleInputs, options = {}) {
 
     totalTaxesPaid += tax;
     totalConverted += primaryConversion + spouseConversion;
-    coupleMagiByYear[year] = solve.ordIncome + realizedGain;
+    coupleMagiByYear[year] = solve.ordIncome + realizedGain + debtPayoffGainThisYear;
 
     const total = totalAssets();
     priorPriorYearEndTotal = priorYearEndTotal;
     priorYearEndTotal = total;
-    if ((total <= 0 || unmetCashFlow > 1) && !depleted) depleted = true;
+    // Unmet cash flow is evaluated cumulatively after the loop.
+    if (total <= 0 && !depleted) depleted = true;
 
     let phase = "bridge";
     if (primarySs + spouseSs > 0) phase = "ss";
@@ -3947,7 +4236,7 @@ function simulateCouple(coupleInputs, options = {}) {
       rmdAmount: Math.round(primaryRmd + spouseRmd),
       realizedGain: Math.round(realizedGain),
       taxableSs: Math.round(solve.taxableSs),
-      magi: Math.round(solve.ordIncome + realizedGain),
+      magi: Math.round(solve.ordIncome + realizedGain + debtPayoffGainThisYear),
       taxableBasisEnd: Math.round(taxableBasis),
       irmaaSurcharge: Math.round(irmaaSurcharge),
       irmaaTriggered: irmaaSurcharge > 0,
@@ -4002,6 +4291,13 @@ function simulateCouple(coupleInputs, options = {}) {
       : retirementData && retirementData.total > 0
         ? retirementData.total
         : 1;
+
+  // Cumulative unmet cash flow marks the plan depleted only when it clears the
+  // banner's materiality bar: max($1,000, 0.5% of year-1 spending).
+  const coupleYear1Spending = retirementData ? retirementData.spending : 0;
+  if (totalUnmetCashFlow > Math.max(1000, coupleYear1Spending * 0.005)) {
+    depleted = true;
+  }
 
   return {
     yearlyData,
@@ -6544,8 +6840,11 @@ function runMonteCarlo(inputs, numSims = 500) {
   const depletionAges = [];
 
   for (let i = 0; i < numSims; i++) {
+    // Clamp each annual draw to a plausible floor. A Normal draw is unbounded,
+    // so at high user volatility a sample below -100% would otherwise drive an
+    // account negative; -95% is a severe but survivable single-year loss.
     const yearlyReturns = Array.from({ length: yearsInRetirement + 10 }, () =>
-      randomNormal(meanReturn, stdDev),
+      Math.max(-0.95, randomNormal(meanReturn, stdDev)),
     );
     const result = simulateWithReturns(inputs, yearlyReturns);
     allRuns.push(result.history);
@@ -7214,7 +7513,7 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
         label="Age to Claim SS"
         value={person.ssAge}
         onChange={onChange("ssAge")}
-        hint="62 (earliest) to 70; 67 = full benefit"
+        hint="62 (earliest) to 70; 67 = full benefit. Entries above 70 are treated as 70 (delayed credits stop there)."
       />
       <NumberInput
         label="Annual Pension"
@@ -8939,7 +9238,7 @@ export default function RetirementPlanner() {
                 label="Age to Claim SS"
                 value={inputs.ssAge}
                 onChange={update("ssAge")}
-                hint="62 (earliest) to 70; 67 = full benefit"
+                hint="62 (earliest) to 70; 67 = full benefit. Entries above 70 are treated as 70 (delayed credits stop there)."
               />
             </Section>
 
