@@ -6177,7 +6177,7 @@ function MiniStackedBar({ row }) {
   const segments = [
     { value: row.cash, color: "#94a3b8", name: "Cash" },
     { value: row.taxable, color: "#7dd3fc", name: "Taxable" },
-    { value: row.inherited, color: "#bef264", name: "Inherited" },
+    { value: row.inherited, color: "#bef264", name: "Inherited (BCO)" },
     { value: row.k401, color: "#c4b5fd", name: "401k" },
     { value: row.tradIra, color: "#f9a8d4", name: "Trad IRA" },
     { value: row.roth, color: "#6ee7b7", name: "Roth" },
@@ -11165,6 +11165,7 @@ export default function RetirementPlanner() {
                   <Area
                     type="monotone"
                     dataKey="Inherited"
+                    name="Inherited (BCO)"
                     stackId="1"
                     stroke="#4d7c0f"
                     fill="#bef264"
@@ -11257,7 +11258,12 @@ export default function RetirementPlanner() {
                 <Bar dataKey="Cash" stackId="sources" fill="#64748b" />
                 <Bar dataKey="Taxable" stackId="sources" fill="#06b6d4" />
                 {(displayInputs.balanceInherited || 0) > 0 && (
-                  <Bar dataKey="Inherited" stackId="sources" fill="#84cc16" />
+                  <Bar
+                    dataKey="Inherited"
+                    name="Inherited (BCO)"
+                    stackId="sources"
+                    fill="#84cc16"
+                  />
                 )}
                 <Bar dataKey={employerPlanChartKey} stackId="sources" fill="#7c3aed" />
                 <Bar dataKey="IRA" stackId="sources" fill="#db2777" />
@@ -11588,8 +11594,11 @@ export default function RetirementPlanner() {
                       Taxable
                     </th>
                     {showInheritedCol && (
-                      <th className="px-3 py-2 text-right font-semibold text-sky-700 bg-sky-50">
-                        Inherited
+                      <th
+                        className="px-3 py-2 text-right font-semibold text-sky-700 bg-sky-50"
+                        title="Withdrawals from the inherited account held under a Beneficiary Continuation Option — penalty-free at any age"
+                      >
+                        BCO
                       </th>
                     )}
                     <th className="px-3 py-2 text-right font-semibold text-sky-700 bg-sky-50">
