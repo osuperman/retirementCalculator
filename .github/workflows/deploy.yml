@@ -38,11 +38,14 @@ jobs:
         run: npm ci --legacy-peer-deps
 
       - name: Build
-        # The Vite `base` is '/retirementCalculator/', which matches the repo
-        # name, so assets resolve correctly under the project Pages URL.
-        # If you deploy the Ask AI backend, set VITE_CHAT_API_URL here, e.g.:
-        #   env:
-        #     VITE_CHAT_API_URL: https://your-backend.example.com/api/chat
+        # Vite `base` now defaults to '/'; pin it to the repo name here so assets
+        # resolve under the project Pages URL (https://<user>.github.io/retirementCalculator/).
+        # NOTE: GitHub Pages is static and cannot run the Ask AI chat backend.
+        # The chat backend runs on Cloudflare Pages (see functions/api/chat.js).
+        # To make chat work from this Pages build too, point it at that backend:
+        #     VITE_CHAT_API_URL: https://<your-cloudflare-project>.pages.dev/api/chat
+        env:
+          VITE_BASE: /retirementCalculator/
         run: npm run build
 
       - name: Configure Pages

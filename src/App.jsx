@@ -374,11 +374,36 @@ function taxableSocialSecurity(ssGross, otherIncome, filingStatus = "mfj") {
 // Single Life Expectancy Table (Treas. Reg. 1.401(a)(9)-9(b), 2022+),
 // ages relevant to SEPP start. Notice 2022-6 permits this table for the
 // 72(t) fixed-amortization method.
+// IRS Single Life Expectancy Table (Pub 590-B Appendix B Table I; the 2022+
+// version from Reg. §1.401(a)(9)-9(b)). Used for SEPP amortization (ages
+// 40–59) and for beneficiary RMDs on inherited (BCO) accounts (all ages).
 const SINGLE_LIFE_EXPECTANCY = {
+  18: 67.0, 19: 66.0,
+  20: 65.0, 21: 64.1, 22: 63.1, 23: 62.1, 24: 61.1, 25: 60.2, 26: 59.2,
+  27: 58.2, 28: 57.3, 29: 56.3, 30: 55.3, 31: 54.4, 32: 53.4, 33: 52.5,
+  34: 51.5, 35: 50.5, 36: 49.6, 37: 48.6, 38: 47.7, 39: 46.7,
   40: 45.7, 41: 44.8, 42: 43.8, 43: 42.9, 44: 41.9, 45: 41.0, 46: 40.0,
   47: 39.0, 48: 38.1, 49: 37.1, 50: 36.2, 51: 35.3, 52: 34.3, 53: 33.4,
   54: 32.5, 55: 31.6, 56: 30.6, 57: 29.8, 58: 28.9, 59: 28.0,
+  60: 27.1, 61: 26.2, 62: 25.4, 63: 24.5, 64: 23.7, 65: 22.9, 66: 22.0,
+  67: 21.2, 68: 20.4, 69: 19.6, 70: 18.8, 71: 18.0, 72: 17.2, 73: 16.4,
+  74: 15.6, 75: 14.8, 76: 14.1, 77: 13.3, 78: 12.6, 79: 11.9, 80: 11.2,
+  81: 10.5, 82: 9.9, 83: 9.3, 84: 8.7, 85: 8.1, 86: 7.6, 87: 7.1,
+  88: 6.6, 89: 6.1, 90: 5.7, 91: 5.3, 92: 4.9, 93: 4.6, 94: 4.3,
+  95: 4.0, 96: 3.7, 97: 3.4, 98: 3.2, 99: 3.0, 100: 2.8, 101: 2.6,
+  102: 2.5, 103: 2.3, 104: 2.2, 105: 2.1, 106: 2.1, 107: 2.1, 108: 2.0,
+  109: 2.0, 110: 2.0, 111: 2.0, 112: 2.0, 113: 1.9, 114: 1.9, 115: 1.8,
+  116: 1.8, 117: 1.6, 118: 1.4, 119: 1.1, 120: 1.0,
 };
+
+function singleLifeDivisor(age) {
+  const a = Math.round(age);
+  // Below the table's floor, extend by ~1 year of expectancy per year of age
+  // (matches the table's slope at young ages); above 120, use the 1.0 floor.
+  if (a <= 18) return SINGLE_LIFE_EXPECTANCY[18] + (18 - a);
+  if (a >= 120) return SINGLE_LIFE_EXPECTANCY[120];
+  return SINGLE_LIFE_EXPECTANCY[a];
+}
 
 // Fixed-amortization SEPP payment (Notice 2022-6): level annual payment that
 // amortizes the account balance over single-life expectancy at the chosen
@@ -410,6 +435,65 @@ function rmdDivisor(age) {
   if (table[age] != null) return table[age];
   if (age < 72) return null;
   return 2.0;
+}
+
+// Required distribution this year from an inherited (BCO — Beneficiary
+// Continuation Option) account, per post-SECURE beneficiary rules (final
+// regulations T.D. 10001, July 2024):
+//  - "lifeExpectancy" (eligible designated beneficiaries): Single Life Table
+//    stretch. A surviving spouse recalculates the divisor annually and — when
+//    the owner died before their required beginning date — may delay the
+//    first payment until the year the owner would have reached RMD age. Other
+//    EDBs fix the divisor in the first payment year and subtract 1 per year.
+//  - "tenYear": the account must be empty by Dec 31 of the 10th year after
+//    death. When the owner died on or after their RBD, annual Single Life
+//    RMDs also run in years 1–9 (required starting 2025; the 2021–2024
+//    penalty waivers predate this projection).
+// Beneficiary RMDs run whether or not the beneficiary is retired or under
+// 59½ — and none of these forced draws ever carries the 10% early penalty.
+// Simplification: a spouse's annual RMDs inside the 10-year rule recalculate
+// annually rather than using the longer-of "ghost" life-expectancy rule.
+function inheritedRmdRequirement({
+  year,
+  age, // beneficiary's age attained in `year`
+  balance, // start-of-year balance (prior Dec 31)
+  payoutRule, // "lifeExpectancy" | "tenYear"
+  relationship, // "spouse" | "nonSpouse"
+  deathYear,
+  deceasedBirthYear,
+}) {
+  if (balance <= 0 || year <= deathYear) return 0;
+  const isSpouse = relationship === "spouse";
+  const deceasedRmdAge = rmdStartAgeForBirthYear(deceasedBirthYear);
+  // Annual-model RBD: April 1 of the year after the owner's RMD-age year, so
+  // a death in any later year is "on or after" the RBD.
+  const diedAfterRbd = deathYear > deceasedBirthYear + deceasedRmdAge;
+  const firstPaymentYear = deathYear + 1;
+
+  if (payoutRule === "tenYear") {
+    if (year >= deathYear + 10) return balance; // depletion deadline
+    if (!diedAfterRbd) return 0; // death before RBD: nothing due in years 1–9
+    const yearsSinceFirst = year - firstPaymentYear;
+    const divisor = isSpouse
+      ? singleLifeDivisor(age)
+      : singleLifeDivisor(age - yearsSinceFirst) - yearsSinceFirst;
+    return divisor > 1 ? balance / divisor : balance;
+  }
+
+  // Life-expectancy stretch.
+  let startYear = firstPaymentYear;
+  if (isSpouse && !diedAfterRbd) {
+    startYear = Math.max(
+      firstPaymentYear,
+      deceasedBirthYear + deceasedRmdAge,
+    );
+  }
+  if (year < startYear) return 0;
+  const yearsSinceStart = year - startYear;
+  const divisor = isSpouse
+    ? singleLifeDivisor(age)
+    : singleLifeDivisor(age - yearsSinceStart) - yearsSinceStart;
+  return divisor > 1 ? balance / divisor : balance;
 }
 
 // 2025 Federal Poverty Level (lower 48), projected by inflation.
@@ -578,7 +662,11 @@ const CASH_POLICY_DEFAULT = {
 // `cashPolicy` controls where cash sits in the order and how much of it is
 // reachable. Returned `reserveUsed` is included in `wCash`.
 function doWithdrawalWaterfall(grossNeed, state, preSs, cashPolicy = CASH_POLICY_DEFAULT) {
-  const w = { wCash: 0, wTaxable: 0, w401k: 0, wIra: 0, wRoth: 0, reserveUsed: 0 };
+  // The inherited (BCO) bucket sits immediately ahead of the owner's own
+  // 401k/IRA in every order: its draws carry the same ordinary-income tax but
+  // are penalty-free at any age (death exception) and the account is already
+  // on a forced-distribution clock, so it should empty before own deferred.
+  const w = { wCash: 0, wTaxable: 0, wInherited: 0, w401k: 0, wIra: 0, wRoth: 0, reserveUsed: 0 };
   let rem = grossNeed;
   const take = (bucketKey, available) => {
     const t = Math.min(rem, Math.max(0, available));
@@ -598,6 +686,7 @@ function doWithdrawalWaterfall(grossNeed, state, preSs, cashPolicy = CASH_POLICY
     const buckets = [
       ["wCash", spendableCash()],
       ["wTaxable", Math.max(0, state.bTaxable)],
+      ["wInherited", Math.max(0, state.bInherited || 0)],
       ["w401k", Math.max(0, state.b401k)],
       ["wIra", Math.max(0, state.bTradIra)],
     ];
@@ -612,6 +701,7 @@ function doWithdrawalWaterfall(grossNeed, state, preSs, cashPolicy = CASH_POLICY
       // Sweep float residue through the same buckets in order.
       take("wCash", spendableCash());
       take("wTaxable", state.bTaxable - w.wTaxable);
+      take("wInherited", (state.bInherited || 0) - w.wInherited);
       take("w401k", state.b401k - w.w401k);
       take("wIra", state.bTradIra - w.wIra);
     }
@@ -621,9 +711,11 @@ function doWithdrawalWaterfall(grossNeed, state, preSs, cashPolicy = CASH_POLICY
     // ahead of Roth (Roth preservation is the model's standing philosophy).
     if (preSs) {
       take("wTaxable", state.bTaxable);
+      take("wInherited", state.bInherited || 0);
       take("w401k", state.b401k);
       take("wIra", state.bTradIra);
     } else {
+      take("wInherited", state.bInherited || 0);
       take("w401k", state.b401k);
       take("wIra", state.bTradIra);
       take("wTaxable", state.bTaxable);
@@ -634,10 +726,12 @@ function doWithdrawalWaterfall(grossNeed, state, preSs, cashPolicy = CASH_POLICY
     // cashFirst (reserve = 0) and preserveReserve share this order.
     take("wCash", spendableCash());
     take("wTaxable", state.bTaxable);
+    take("wInherited", state.bInherited || 0);
     take("w401k", state.b401k);
     take("wIra", state.bTradIra);
     take("wRoth", state.bRoth);
   } else {
+    take("wInherited", state.bInherited || 0);
     take("w401k", state.b401k);
     take("wIra", state.bTradIra);
     take("wTaxable", state.bTaxable);
@@ -699,13 +793,21 @@ function solveGrossedUpWithdrawals({
   // income only; the account basis is already reduced by the caller, so it
   // is deliberately excluded from the returned `realizedGain` used for basis.
   additionalRealizedGain = 0,
+  // Inherited (BCO) account: required distribution this year (forced like an
+  // RMD, from the inherited balance only), tax character of its draws, and
+  // whether its taxable income can use NY's $20K pension/annuity exclusion
+  // through the decedent's eligibility (beneficiary rule).
+  inheritedRmd = 0,
+  inheritedTaxType = "qualified",
+  inheritedNyExcludable = false,
 }) {
   let tax = 0;
-  let withdrawals = { wCash: 0, wTaxable: 0, w401k: 0, wIra: 0, wRoth: 0, reserveUsed: 0 };
+  let withdrawals = { wCash: 0, wTaxable: 0, wInherited: 0, w401k: 0, wIra: 0, wRoth: 0, reserveUsed: 0 };
   let realizedGain = 0;
   let taxableSs = 0;
   let ordIncome = 0;
   let earlyPenalty = 0;
+  let inheritedTaxable = 0;
   for (let iter = 0; iter < 10; iter++) {
     const grossNeed = Math.max(0, netNeed + tax);
     withdrawals = doWithdrawalWaterfall(grossNeed, state, preSs, cashPolicy);
@@ -729,6 +831,35 @@ function solveGrossedUpWithdrawals({
       }
     }
 
+    // Enforce the inherited (BCO) required distribution the same way: if the
+    // waterfall drew less than the beneficiary schedule demands, force the
+    // difference out of the inherited balance. Surplus beyond netNeed + tax
+    // becomes cash in the caller, exactly like an RMD surplus.
+    if (inheritedRmd > 0) {
+      const availInherited = Math.max(
+        0,
+        (state.bInherited || 0) - withdrawals.wInherited,
+      );
+      if (withdrawals.wInherited < inheritedRmd) {
+        withdrawals.wInherited += Math.min(
+          inheritedRmd - withdrawals.wInherited,
+          availInherited,
+        );
+      }
+    }
+
+    // Taxable portion of inherited (BCO) draws: qualified accounts (inherited
+    // IRA/401k/403b) are fully taxable ordinary income; non-qualified
+    // annuities distribute earnings first (LIFO, IRC §72(e)) — fully taxable
+    // until only cost basis (investment in the contract) remains.
+    inheritedTaxable =
+      inheritedTaxType === "nonqualified"
+        ? Math.min(
+            withdrawals.wInherited,
+            Math.max(0, (state.bInherited || 0) - (state.bInheritedBasis || 0)),
+          )
+        : withdrawals.wInherited;
+
     realizedGain = computeRealizedGain(
       withdrawals.wTaxable,
       state.bTaxable,
@@ -743,6 +874,7 @@ function solveGrossedUpWithdrawals({
       interestIncome +
       withdrawals.w401k +
       withdrawals.wIra +
+      inheritedTaxable +
       conversion +
       taxableRealizedGain; // LTCG counts in provisional income
     taxableSs = taxableSocialSecurity(ssGross, incomeBeforeSs, filingStatus);
@@ -753,6 +885,7 @@ function solveGrossedUpWithdrawals({
       interestIncome +
       withdrawals.w401k +
       withdrawals.wIra +
+      inheritedTaxable +
       conversion;
     const nyExemptAmount = pensionNyExempt ? pensionGross : 0;
     const privateRetirementIncome =
@@ -761,8 +894,17 @@ function solveGrossedUpWithdrawals({
       conversion +
       (pensionNyExempt ? 0 : pensionGross);
     // NY pension/annuity exclusion applies from age 59½ (annual model: 60).
-    const nyPensionAnnuityExclusion =
-      age >= 59.5 ? Math.min(20000, privateRetirementIncome) : 0;
+    // Inherited (BCO) income also qualifies through the DECEDENT's
+    // eligibility: a beneficiary may claim the exclusion for inherited
+    // pension/annuity income once the decedent was (or would have been) 59½,
+    // regardless of the beneficiary's own age. Combined cap stays $20K.
+    const nyEligibleRetirementIncome =
+      (age >= 59.5 ? privateRetirementIncome : 0) +
+      (age >= 59.5 || inheritedNyExcludable ? inheritedTaxable : 0);
+    const nyPensionAnnuityExclusion = Math.min(
+      20000,
+      nyEligibleRetirementIncome,
+    );
     // IRC §72(t): 10% additional tax on early distributions before age 59½.
     // - 401k: exempt when the Rule of 55 applies (separation at 55+), and only
     //   from age 55 onward.
@@ -773,6 +915,12 @@ function solveGrossedUpWithdrawals({
     //   that pass no layer data fall back to penalizing early Roth draws in
     //   full, as a conservative approximation.
     // RMDs cannot coexist with age < 59½, so forced RMD draws are never hit.
+    // Inherited (BCO) draws are deliberately absent from every penalized sum:
+    // distributions to a beneficiary are exempt from the 10% additional tax
+    // at any age (death exception — IRC §72(t)(2)(A)(ii) for qualified plans
+    // and §72(q)(2)(A) for non-qualified annuities). This exception is lost
+    // if a surviving spouse instead elects spousal continuation (treating the
+    // account as their own), which this model does not do.
     if (age < 59.5) {
       const penalized401k =
         penaltyFree401k && age >= 55 ? 0 : withdrawals.w401k;
@@ -812,6 +960,7 @@ function solveGrossedUpWithdrawals({
     taxableSs,
     ordIncome,
     earlyPenalty: Math.round(earlyPenalty),
+    inheritedTaxable,
   };
 }
 
@@ -2543,6 +2692,465 @@ function runSelfTests() {
     },
   );
 
+  // ============================================================
+  // INHERITED (BCO) ACCOUNT — beneficiary RMD rules + engine integration
+  // ============================================================
+
+  // --- Single Life Table lookups (Pub 590-B Table I, 2022+ version)
+  test("singleLifeDivisor(50) = 36.2", singleLifeDivisor(50), 36.2, (a, e) =>
+    Math.abs(a - e) < 0.01,
+  );
+  test("singleLifeDivisor(70) = 18.8", singleLifeDivisor(70), 18.8, (a, e) =>
+    Math.abs(a - e) < 0.01,
+  );
+  test("singleLifeDivisor(85) = 8.1", singleLifeDivisor(85), 8.1, (a, e) =>
+    Math.abs(a - e) < 0.01,
+  );
+
+  // --- Beneficiary RMD rules (pure function, explicit years)
+  // Spouse recalculates annually: owner b.1958 (RMD age 73, reached 2031),
+  // died 2030 = before RBD; payments start 2031; in 2041 at age 70 the
+  // divisor is the fresh table lookup 18.8.
+  test(
+    "inheritedRmd: spouse recalculated = balance / 18.8 at age 70",
+    inheritedRmdRequirement({
+      year: 2041, age: 70, balance: 188000,
+      payoutRule: "lifeExpectancy", relationship: "spouse",
+      deathYear: 2030, deceasedBirthYear: 1958,
+    }),
+    10000,
+  );
+  // Spouse may delay until the owner (b.1975, RMD age 75) would have reached
+  // RMD age in 2050 — nothing is required in 2040.
+  test(
+    "inheritedRmd: spouse delay until owner's RMD age (2040 → $0)",
+    inheritedRmdRequirement({
+      year: 2040, age: 65, balance: 500000,
+      payoutRule: "lifeExpectancy", relationship: "spouse",
+      deathYear: 2030, deceasedBirthYear: 1975,
+    }),
+    0,
+  );
+  // Non-spouse EDB uses the subtract-one method: first payment year 2030 at
+  // age 60 fixes 27.1; by 2034 the divisor is 27.1 - 4 = 23.1.
+  test(
+    "inheritedRmd: non-spouse minus-1 divisor (27.1 → 23.1)",
+    inheritedRmdRequirement({
+      year: 2034, age: 64, balance: 100000,
+      payoutRule: "lifeExpectancy", relationship: "nonSpouse",
+      deathYear: 2029, deceasedBirthYear: 1975,
+    }),
+    100000 / 23.1,
+  );
+  // 10-year rule, owner died before RBD: nothing due in years 1–9...
+  test(
+    "inheritedRmd: 10-year (death before RBD) mid-window = $0",
+    inheritedRmdRequirement({
+      year: 2035, age: 60, balance: 150000,
+      payoutRule: "tenYear", relationship: "spouse",
+      deathYear: 2030, deceasedBirthYear: 1975,
+    }),
+    0,
+  );
+  // ...but the entire balance is forced out in year 10.
+  test(
+    "inheritedRmd: 10-year deadline forces full balance",
+    inheritedRmdRequirement({
+      year: 2040, age: 65, balance: 150000,
+      payoutRule: "tenYear", relationship: "spouse",
+      deathYear: 2030, deceasedBirthYear: 1975,
+    }),
+    150000,
+  );
+  // 10-year rule, owner died after RBD (b.1950, RMD age 72 reached 2022):
+  // annual Single Life RMDs run during years 1–9 (spouse at 68 → 20.4).
+  test(
+    "inheritedRmd: 10-year (death after RBD) has annual RMDs",
+    inheritedRmdRequirement({
+      year: 2027, age: 68, balance: 204000,
+      payoutRule: "tenYear", relationship: "spouse",
+      deathYear: 2026, deceasedBirthYear: 1950,
+    }),
+    10000,
+  );
+
+  // --- Scenario: BCO bridges early retirement with zero penalty
+  testScenario(
+    "BCO: inherited drawn before 59½ with no penalty, own 401k untouched",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        filingStatus: "single",
+        householdSize: 1,
+        currentAge: 50,
+        retirementAge: 50,
+        planThroughAge: 58,
+        balanceCash: 0,
+        balanceTaxable: 0,
+        balance401k: 500000,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        partTimeIncome: 0,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+        balanceInherited: 400000,
+        inheritedTaxType: "qualified",
+        inheritedPayoutRule: "lifeExpectancy",
+        inheritedRelationship: "spouse",
+        inheritedDeathYear: PROJECTION_START_YEAR - 1,
+        inheritedDeceasedBirthYear: 1965,
+      });
+      const row = r.yearlyData[0];
+      return {
+        passed:
+          row.fromInherited > 0 &&
+          row.earlyPenalty === 0 &&
+          row.from401k === 0 &&
+          row.fromIra === 0,
+        details: `year1: fromInherited=${row.fromInherited}, penalty=${row.earlyPenalty}, from401k=${row.from401k}`,
+      };
+    },
+  );
+
+  // --- Scenario: 10-year rule forces full depletion at the deadline
+  testScenario(
+    "BCO: 10-year rule empties the account by the deadline (penalty-free)",
+    () => {
+      const deathYear = PROJECTION_START_YEAR - 2;
+      const r = simulate({
+        ...baseInputs,
+        balanceInherited: 200000,
+        inheritedTaxType: "qualified",
+        inheritedPayoutRule: "tenYear",
+        inheritedRelationship: "spouse",
+        inheritedDeathYear: deathYear,
+        inheritedDeceasedBirthYear: 1975,
+      });
+      const deadlineRow = r.yearlyData.find(
+        (d) => d.year === deathYear + 10,
+      );
+      if (!deadlineRow)
+        return { passed: false, details: "deadline year not in plan" };
+      const after = r.yearlyData.filter((d) => d.year > deathYear + 10);
+      return {
+        passed:
+          deadlineRow.inherited === 0 &&
+          deadlineRow.fromInherited > 0 &&
+          deadlineRow.earlyPenalty === 0 &&
+          after.every((d) => d.inherited === 0),
+        details: `deadline ${deadlineRow.year} (age ${deadlineRow.age}): balance=${deadlineRow.inherited}, draw=${deadlineRow.fromInherited}, penalty=${deadlineRow.earlyPenalty}`,
+      };
+    },
+  );
+
+  // --- Scenario: spouse life-expectancy RMDs are enforced and taxed as MAGI
+  testScenario(
+    "BCO: life-expectancy RMD forced every year and counted in MAGI",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        filingStatus: "single",
+        currentAge: 60,
+        retirementAge: 60,
+        planThroughAge: 75,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+        balanceInherited: 300000,
+        inheritedTaxType: "qualified",
+        inheritedPayoutRule: "lifeExpectancy",
+        inheritedRelationship: "spouse",
+        inheritedDeathYear: PROJECTION_START_YEAR - 1,
+        inheritedDeceasedBirthYear: 1950, // died after RBD → payments start now
+      });
+      const row = r.yearlyData[0];
+      const expectedRmd = 300000 / 27.1; // age 60, recalculated Single Life
+      const everyYearForced = r.yearlyData.every(
+        (d) =>
+          d.phase === "accumulation" ||
+          d.inheritedRmdAmount <= 0 ||
+          d.fromInherited >= d.inheritedRmdAmount - 1,
+      );
+      return {
+        passed:
+          Math.abs(row.inheritedRmdAmount - expectedRmd) < 2 &&
+          row.fromInherited >= row.inheritedRmdAmount - 1 &&
+          row.magi >= row.fromInherited - 1 &&
+          everyYearForced,
+        details: `year1 RMD=${row.inheritedRmdAmount} (expected ~${Math.round(expectedRmd)}), draw=${row.fromInherited}, magi=${row.magi}`,
+      };
+    },
+  );
+
+  // --- Scenario: non-qualified annuity taxes gains first, then basis
+  testScenario(
+    "BCO: non-qualified draw taxes only the gain portion (no penalty)",
+    () => {
+      const solve = solveGrossedUpWithdrawals({
+        netNeed: 30000,
+        state: {
+          bCash: 0, bTaxable: 0, bTaxableBasis: 0,
+          b401k: 0, bTradIra: 0, bRoth: 0,
+          bInherited: 100000, bInheritedBasis: 80000,
+        },
+        preSs: true,
+        conversion: 0,
+        ptIncome: 0,
+        ssGross: 0,
+        pensionGross: 0,
+        pensionNyExempt: false,
+        year: PROJECTION_START_YEAR,
+        age: 50,
+        inflation: 0.03,
+        filingStatus: "single",
+        inheritedRmd: 0,
+        inheritedTaxType: "nonqualified",
+        inheritedNyExcludable: true,
+      });
+      return {
+        passed:
+          Math.abs(solve.inheritedTaxable - 20000) < 1 &&
+          solve.earlyPenalty === 0 &&
+          solve.withdrawals.wInherited >= 30000,
+        details: `wInherited=${Math.round(solve.withdrawals.wInherited)}, taxable=${Math.round(solve.inheritedTaxable)} (expected 20000 of gains), penalty=${solve.earlyPenalty}`,
+      };
+    },
+  );
+
+  // ============================================================
+  // SETTINGS IMPORT — parse pasted "Label: value" text
+  // ============================================================
+  const importSample = [
+    "# Retirement Planner Settings",
+    "",
+    "## Timing",
+    "Filing Status: Single",
+    "Current Age: 50",
+    "Retirement Age: 51",
+    "Plan Through Age: 85",
+    "",
+    "## Current Balances",
+    "Cash / HYSA: $1,400,000",
+    "Taxable Brokerage: $400,000",
+    "Taxable Cost Basis %: 70.00%",
+    "401k / 403b: $1,258,000",
+    "Traditional IRA: $24,213",
+    "Roth IRA: $81,458",
+    "HSA: $30,392",
+    "Credit Card Debt: $3,800",
+    "",
+    "## Cash Strategy",
+    "Cash Withdrawal Strategy: Preserve cash reserve",
+    "Minimum Cash Reserve: $1,000,000",
+    "Allow Reserve As Last Resort: Yes",
+    "",
+    "## Returns & Inflation",
+    "Pre-Retirement Return: 5.00%",
+    "Inflation: 3.00%",
+    "",
+    "## Income",
+    "Age to Claim SS: 62",
+    "",
+    "## Advanced Tax Model",
+    "RMD Start Age: 75",
+    "ACA Subsidy Estimate: Yes",
+    "Household Size: 1",
+    "A totally unknown line: 123",
+  ].join("\n");
+  const importParsed = parseSettingsText(importSample);
+
+  test(
+    "import: money parses ($1,400,000 → balanceCash)",
+    importParsed.updates.balanceCash,
+    1400000,
+  );
+  test(
+    "import: percent parses (70.00% → 0.70 basis)",
+    importParsed.updates.taxableBasisPct,
+    0.7,
+    (a, e) => Math.abs(a - e) < 1e-9,
+  );
+  test(
+    "import: return percent (5.00% → 0.05)",
+    importParsed.updates.preReturn,
+    0.05,
+    (a, e) => Math.abs(a - e) < 1e-9,
+  );
+  test("import: age int (51 → retirementAge)", importParsed.updates.retirementAge, 51);
+  test("import: SS claim age (62)", importParsed.updates.ssAge, 62);
+  test("import: RMD start age (75)", importParsed.updates.rmdStartAge, 75);
+  testScenario("import: filing status enum → single", () => ({
+    passed: importParsed.updates.filingStatus === "single",
+    details: `filingStatus=${importParsed.updates.filingStatus}`,
+  }));
+  testScenario("import: cash strategy label → preserveReserve", () => ({
+    passed: importParsed.updates.cashStrategy === "preserveReserve",
+    details: `cashStrategy=${importParsed.updates.cashStrategy}`,
+  }));
+  testScenario("import: boolean yes → true (allowReserve, ACA)", () => ({
+    passed:
+      importParsed.updates.allowReserveAsLastResort === true &&
+      importParsed.updates.useAcaSubsidyEstimate === true,
+    details: `allowReserve=${importParsed.updates.allowReserveAsLastResort}, aca=${importParsed.updates.useAcaSubsidyEstimate}`,
+  }));
+  testScenario("import: unknown line is skipped, not applied", () => ({
+    passed:
+      importParsed.skipped.some((s) => /unknown line/i.test(s.label)) &&
+      importParsed.updates.mode === "single",
+    details: `skipped ${importParsed.skipped.length}, mode=${importParsed.updates.mode}`,
+  }));
+  testScenario("import: applied set flows through simulate()", () => {
+    const merged = normalizeInputs({ ...DEFAULT_INPUTS, ...importParsed.updates });
+    const r = simulate(merged);
+    return {
+      passed: r.yearlyData.length > 0 && merged.balanceCash === 1400000,
+      details: `rows=${r.yearlyData.length}, cash=${merged.balanceCash}`,
+    };
+  });
+  // Section scoping: bare "Balance" only maps to the inherited account when it
+  // appears inside the Inherited (BCO) section.
+  testScenario("import: 'Balance' scoped to Inherited (BCO) section", () => {
+    const scoped = parseSettingsText(
+      [
+        "## Inherited (BCO)",
+        "Balance: $250,000",
+        "Account Type: Non-qualified annuity",
+        "Cost Basis: $180,000",
+        "Payout Rule: 10-year rule",
+        "Relationship to Owner: Surviving spouse",
+      ].join("\n"),
+    );
+    const loose = parseSettingsText("## Timing\nBalance: $250,000");
+    return {
+      passed:
+        scoped.updates.balanceInherited === 250000 &&
+        scoped.updates.inheritedTaxType === "nonqualified" &&
+        scoped.updates.inheritedBasis === 180000 &&
+        scoped.updates.inheritedPayoutRule === "tenYear" &&
+        loose.updates.balanceInherited === undefined,
+      details: `scoped balanceInherited=${scoped.updates.balanceInherited}, loose=${loose.updates.balanceInherited}`,
+    };
+  });
+  testScenario("import: couple-mode text is detected and refused", () => {
+    const couple = parseSettingsText(
+      "## Plan Type\nMode: Married Couple\n\n## Primary Timing\nCurrent Age: 60",
+    );
+    return {
+      passed: couple.isCouple === true,
+      details: `isCouple=${couple.isCouple}`,
+    };
+  });
+
+  // ============================================================
+  // RMD SURPLUS → CASH — the recorded sweep explains cash growth
+  // ============================================================
+  testScenario(
+    "RMD surplus: excess over need is recorded and lands in cash",
+    () => {
+      // Already-retired 72-year-old with a large 401k and modest spending:
+      // from 73 the RMD (~$113K+) dwarfs the need, so the sweep must fire.
+      const r = simulate({
+        ...baseInputs,
+        filingStatus: "single",
+        householdSize: 1,
+        currentAge: 72,
+        retirementAge: 70,
+        planThroughAge: 78,
+        balanceCash: 50000,
+        balanceTaxable: 0,
+        balance401k: 3000000,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        balanceInherited: 0,
+        baseExpenses: 40000,
+        healthcarePre65: 0,
+        healthcarePost65: 8000,
+        partTimeIncome: 0,
+        ssIncome: 30000,
+        ssAge: 67,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+        rmdStartAge: 73,
+      });
+      const idx = r.yearlyData.findIndex((d) => d.surplusToCash > 1000);
+      if (idx < 1)
+        return {
+          passed: false,
+          details: `no surplus year found (idx=${idx})`,
+        };
+      const row = r.yearlyData[idx];
+      const identityGap = Math.abs(
+        row.grossWithdrawal - (row.netNeed + row.tax) - row.surplusToCash,
+      );
+      const prev = r.yearlyData[idx - 1];
+      // With SS flowing, the waterfall draws 401k first; cash is untouched,
+      // so end-of-year cash must rise by at least the swept surplus.
+      const cashGrew = row.fromCash === 0 ? row.cash > prev.cash : true;
+      return {
+        passed: identityGap <= 2 && cashGrew && row.rmdAmount > 0,
+        details: `age ${row.age}: surplus=${row.surplusToCash}, gross=${row.grossWithdrawal}, need+tax=${row.netNeed + row.tax}, cash ${prev.cash}→${row.cash}`,
+      };
+    },
+  );
+  testScenario(
+    "Couple: RMD surplus recorded on shared-cash sweep",
+    () => {
+      const person = {
+        currentAge: 73,
+        retirementAge: 70,
+        planThroughAge: 80,
+        ssAge: 67,
+        ssIncome: 25000,
+        balance401k: 2000000,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        rmdStartAge: 73,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+        pensionIncome: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        contrib401k: 0,
+        contribMatch: 0,
+        contribHsa: 0,
+        healthcarePre65: 0,
+        healthcarePost65: 4000,
+      };
+      const couple = normalizeCoupleInputs({
+        primary: { ...DEFAULT_COUPLE_INPUTS.primary, ...person },
+        spouse: {
+          ...DEFAULT_COUPLE_INPUTS.spouse,
+          ...person,
+          balance401k: 0,
+          ssIncome: 15000,
+        },
+        shared: {
+          ...DEFAULT_COUPLE_INPUTS.shared,
+          balanceCash: 50000,
+          balanceTaxable: 0,
+          baseExpenses: 50000,
+        },
+      });
+      const r = simulateCouple(couple);
+      const row = r.yearlyData.find((d) => d.surplusToCash > 1000);
+      if (!row)
+        return { passed: false, details: "no couple surplus year found" };
+      const identityGap = Math.abs(
+        row.grossWithdrawal - (row.netNeed + row.tax) - row.surplusToCash,
+      );
+      return {
+        passed: identityGap <= 2 && row.rmdAmount > 0,
+        details: `year ${row.year}: surplus=${row.surplusToCash}, RMD=${row.rmdAmount}`,
+      };
+    },
+  );
+
   const passed = results.filter((r) => r.passed).length;
   const failed = results.filter((r) => !r.passed).length;
   return { passed, failed, total: results.length, results };
@@ -2600,6 +3208,15 @@ function simulate(inputs, options = {}) {
     rothBasis = 0,
     useSepp = false,
     seppRate = 0.05,
+    // Inherited (BCO) account — an inherited IRA/403(b)/annuity kept in
+    // beneficiary form under a Beneficiary Continuation Option.
+    balanceInherited = 0,
+    inheritedTaxType = "qualified",
+    inheritedBasis = 0,
+    inheritedPayoutRule = "lifeExpectancy",
+    inheritedRelationship = "spouse",
+    inheritedDeathYear = PROJECTION_START_YEAR,
+    inheritedDeceasedBirthYear = 1965,
   } = inputs;
 
   // Guard against invalid inputs during manual typing. A retirement age at or
@@ -2655,6 +3272,20 @@ function simulate(inputs, options = {}) {
   let bTradIra = balanceTradIra;
   let bRoth = balanceRoth;
   let bHsa = balanceHsa;
+  let bInherited = Math.max(0, balanceInherited);
+  // Non-qualified annuity cost basis ("investment in the contract"): the
+  // portion of the balance that returns tax-free after gains distribute
+  // first. Qualified inherited accounts have no after-tax basis here.
+  let bInheritedBasis =
+    inheritedTaxType === "nonqualified"
+      ? Math.max(0, Math.min(inheritedBasis, bInherited))
+      : 0;
+  const inheritedConfig = {
+    payoutRule: inheritedPayoutRule,
+    relationship: inheritedRelationship,
+    deathYear: inheritedDeathYear,
+    deceasedBirthYear: inheritedDeceasedBirthYear,
+  };
   let unpaidDebt = Math.max(0, creditCardDebt);
   const initialCashPayoff = Math.min(bCash, unpaidDebt);
   bCash -= initialCashPayoff;
@@ -2701,7 +3332,8 @@ function simulate(inputs, options = {}) {
     useSepp && retirementAge < 59.5
       ? Math.max(retirementAge + 5, 59.5)
       : null;
-  let priorYearEndTotal = bCash + bTaxable + b401k + bTradIra + bRoth + bHsa - unpaidDebt;
+  let priorYearEndTotal =
+    bCash + bTaxable + b401k + bTradIra + bRoth + bHsa + bInherited - unpaidDebt;
   let priorPriorYearEndTotal = 0;
 
   for (let year = currentYear; year <= endYear; year++) {
@@ -2740,14 +3372,50 @@ function simulate(inputs, options = {}) {
           bTradIra -= accumIraRmd;
         }
       }
+      // Inherited (BCO) required distributions run even while working — the
+      // still-working exception never applies to beneficiary accounts. As
+      // with the IRA RMD above, income tax on the forced draw is out of
+      // scope in accumulation years; the gross amount is reinvested in the
+      // taxable account at full basis.
+      let accumInheritedRmd = 0;
+      if (bInherited > 0) {
+        accumInheritedRmd = Math.min(
+          bInherited,
+          inheritedRmdRequirement({
+            year,
+            age,
+            balance: bInherited,
+            ...inheritedConfig,
+          }),
+        );
+        if (accumInheritedRmd > 0) {
+          const gainPart =
+            inheritedTaxType === "nonqualified"
+              ? Math.min(
+                  accumInheritedRmd,
+                  Math.max(0, bInherited - bInheritedBasis),
+                )
+              : accumInheritedRmd;
+          bInheritedBasis = Math.max(
+            0,
+            bInheritedBasis - (accumInheritedRmd - gainPart),
+          );
+          bInherited -= accumInheritedRmd;
+        }
+      }
       b401k = b401k * (1 + marketReturn) + applied401k + appliedMatch;
-      bTaxable = bTaxable * (1 + taxableReturn(marketReturn)) + accumIraRmd;
-      bTaxableBasis += accumIraRmd;
+      bTaxable =
+        bTaxable * (1 + taxableReturn(marketReturn)) +
+        accumIraRmd +
+        accumInheritedRmd;
+      bTaxableBasis += accumIraRmd + accumInheritedRmd;
       bTradIra = bTradIra * (1 + marketReturn);
       bRoth = bRoth * (1 + marketReturn);
       bHsa = bHsa * (1 + marketReturn) + appliedHsa;
+      bInherited = bInherited * (1 + marketReturn);
       bCash = bCash * (1 + cashReturn);
-      const total = bCash + bTaxable + b401k + bTradIra + bRoth + bHsa - unpaidDebt;
+      const total =
+        bCash + bTaxable + b401k + bTradIra + bRoth + bHsa + bInherited - unpaidDebt;
       priorPriorYearEndTotal = priorYearEndTotal;
       priorYearEndTotal = total;
 
@@ -2766,6 +3434,7 @@ function simulate(inputs, options = {}) {
         from401k: 0,
         fromIra: 0,
         fromRoth: 0,
+        fromInherited: Math.round(accumInheritedRmd),
         conversion: 0,
         tax: 0,
         strategy: "Accumulating",
@@ -2775,8 +3444,10 @@ function simulate(inputs, options = {}) {
         tradIra: Math.round(bTradIra),
         roth: Math.round(bRoth),
         hsa: Math.round(bHsa),
+        inherited: Math.round(bInherited),
         total: Math.round(total),
         rmdAmount: Math.round(accumIraRmd),
+        inheritedRmdAmount: Math.round(accumInheritedRmd),
         realizedGain: 0,
         taxableSs: 0,
         magi: 0,
@@ -2878,6 +3549,26 @@ function simulate(inputs, options = {}) {
       conversion = Math.min(conversion, Math.max(0, b401k - rmdThatMustComeFrom401k));
     }
 
+    // Inherited (BCO) required distribution for this year. Forced in the
+    // solver like an RMD; any excess beyond spending + tax sweeps to cash.
+    const inheritedRmd =
+      bInherited > 0
+        ? Math.min(
+            bInherited,
+            inheritedRmdRequirement({
+              year,
+              age,
+              balance: bInherited,
+              ...inheritedConfig,
+            }),
+          )
+        : 0;
+    // NY beneficiary rule: inherited pension/annuity income can use the $20K
+    // exclusion through the DECEDENT's age eligibility (59½+, actual or
+    // would-have-been), regardless of the beneficiary's own age.
+    const inheritedNyExcludable =
+      bInherited > 0 && year - inheritedDeceasedBirthYear >= 60;
+
     // Available balance for conversion (can't convert more than remains after expected draw)
     // Reserve conversion amount from 401k pool for the waterfall
     const state = {
@@ -2887,6 +3578,8 @@ function simulate(inputs, options = {}) {
       b401k: Math.max(0, b401k - conversion),
       bTradIra,
       bRoth,
+      bInherited: Math.max(0, bInherited),
+      bInheritedBasis,
     };
 
     const preSs = age < ssClaimAge;
@@ -2967,6 +3660,9 @@ function simulate(inputs, options = {}) {
         rothLayers,
         seppExempt: seppActive ? seppPayment : 0,
         additionalRealizedGain: debtPayoffGainThisYear,
+        inheritedRmd,
+        inheritedTaxType,
+        inheritedNyExcludable,
       });
 
       finalSpending = effectiveSpending;
@@ -2983,6 +3679,7 @@ function simulate(inputs, options = {}) {
         cashInterestIncome +
         solve.withdrawals.w401k +
         solve.withdrawals.wIra +
+        (solve.inheritedTaxable || 0) +
         conversion;
       const postMagi = postOrdIncome + solve.realizedGain + debtPayoffGainThisYear;
 
@@ -3055,16 +3752,21 @@ function simulate(inputs, options = {}) {
         rothLayers,
         seppExempt: seppActive ? seppPayment : 0,
         additionalRealizedGain: debtPayoffGainThisYear,
+        inheritedRmd,
+        inheritedTaxType,
+        inheritedNyExcludable,
       });
     }
 
     // Update displayed spending to include IRMAA (shows true economic cost)
     spending = finalSpending;
 
-    const { wCash, wTaxable, w401k, wIra, wRoth } = solve.withdrawals;
+    const { wCash, wTaxable, wInherited = 0, w401k, wIra, wRoth } =
+      solve.withdrawals;
     const tax = solve.tax;
     const realizedGain = solve.realizedGain;
     const taxableSs = solve.taxableSs;
+    const inheritedTaxable = solve.inheritedTaxable || 0;
 
     // Apply realized gain to basis tracking BEFORE executing withdrawal
     const basisReduction = Math.max(0, wTaxable - realizedGain);
@@ -3080,6 +3782,13 @@ function simulate(inputs, options = {}) {
     bTradIra = Math.max(0, bTradIra - wIra);
     bRoth = Math.max(0, bRoth - wRoth);
     bHsa = Math.max(0, bHsa - hsaWithdrawal);
+    // Inherited (BCO): the non-taxable slice of a non-qualified draw is
+    // returned cost basis — reduce basis by exactly that amount.
+    bInherited = Math.max(0, bInherited - wInherited);
+    bInheritedBasis = Math.max(
+      0,
+      bInheritedBasis - Math.max(0, wInherited - inheritedTaxable),
+    );
 
     // Any RMD surplus beyond net need + tax goes to cash (reinvested in HYSA-equivalent)
     const netNeedFinal = Math.max(
@@ -3088,14 +3797,15 @@ function simulate(inputs, options = {}) {
     );
     const surplusFromRmd = Math.max(
       0,
-      (wCash + wTaxable + w401k + wIra + wRoth) - (netNeedFinal + tax),
+      (wCash + wTaxable + wInherited + w401k + wIra + wRoth) -
+        (netNeedFinal + tax),
     );
     if (surplusFromRmd > 0) {
       bCash += surplusFromRmd;
     }
     const unmetCashFlow = Math.max(
       0,
-      netNeedFinal + tax - (wCash + wTaxable + w401k + wIra + wRoth),
+      netNeedFinal + tax - (wCash + wTaxable + wInherited + w401k + wIra + wRoth),
     );
     totalUnmetCashFlow += unmetCashFlow;
 
@@ -3107,6 +3817,7 @@ function simulate(inputs, options = {}) {
       cashInterestIncome +
       w401k +
       wIra +
+      inheritedTaxable +
       conversion;
     const magi = finalOrdIncome + realizedGain + debtPayoffGainThisYear;
     magiByYear[year] = magi;
@@ -3119,12 +3830,14 @@ function simulate(inputs, options = {}) {
     bTradIra *= 1 + marketReturn;
     bRoth *= 1 + marketReturn;
     bHsa *= 1 + marketReturn;
+    bInherited *= 1 + marketReturn;
 
     totalTaxesPaid += tax;
     totalConverted += conversion;
 
-    const total = bCash + bTaxable + b401k + bTradIra + bRoth + bHsa - unpaidDebt;
-    const grossWithdrawal = wCash + wTaxable + w401k + wIra + wRoth;
+    const total =
+      bCash + bTaxable + b401k + bTradIra + bRoth + bHsa + bInherited - unpaidDebt;
+    const grossWithdrawal = wCash + wTaxable + wInherited + w401k + wIra + wRoth;
     priorPriorYearEndTotal = priorYearEndTotal;
     priorYearEndTotal = total;
 
@@ -3152,6 +3865,7 @@ function simulate(inputs, options = {}) {
       from401k: Math.round(w401k),
       fromIra: Math.round(wIra),
       fromRoth: Math.round(wRoth),
+      fromInherited: Math.round(wInherited),
       hsaWithdrawal: Math.round(hsaWithdrawal),
       conversion: Math.round(conversion),
       tax,
@@ -3162,9 +3876,16 @@ function simulate(inputs, options = {}) {
       tradIra: Math.round(bTradIra),
       roth: Math.round(bRoth),
       hsa: Math.round(bHsa),
+      inherited: Math.round(bInherited),
       total: Math.round(total),
       // Debug/validation fields
       rmdAmount: Math.round(rmdAmount),
+      inheritedRmdAmount: Math.round(inheritedRmd),
+      inheritedTaxable: Math.round(inheritedTaxable),
+      // Forced withdrawals (RMDs / SEPP / inherited payouts) above spending +
+      // tax are deposited into Cash — recorded so the UI can explain why the
+      // cash balance grows in RMD years instead of silently swelling.
+      surplusToCash: Math.round(surplusFromRmd),
       realizedGain: Math.round(realizedGain),
       taxableSs: Math.round(taxableSs),
       magi: Math.round(magi),
@@ -3185,7 +3906,8 @@ function simulate(inputs, options = {}) {
     inputs.balance401k +
     inputs.balanceTradIra +
     inputs.balanceRoth +
-    inputs.balanceHsa -
+    inputs.balanceHsa +
+    (inputs.balanceInherited || 0) -
     (inputs.creditCardDebt || 0);
   // First retirement-year row. For an already-retired user (retirementAge <=
   // currentAge) there is no row at exactly retirementAge, so fall back to the
@@ -4245,6 +4967,9 @@ function simulateCouple(coupleInputs, options = {}) {
       cashFloor: coupleCashPolicy.reserveNominal,
       reserveUsed: Math.round(withdrawals.reserveUsed || 0),
       unmetCashFlow: Math.round(unmetCashFlow),
+      // RMD excess over spending + tax, deposited into shared cash (same
+      // sweep as the single engine) — surfaced so cash growth is explainable.
+      surplusToCash: Math.round(surplusFromRmd),
       ownerDetails: {
         primary: {
           name: primary.name,
@@ -4358,6 +5083,8 @@ function fmtPct(n) {
 const TERM_HELP = {
   aca:
     "Affordable Care Act marketplace health insurance. Subsidies can lower pre-Medicare premiums, but they depend heavily on MAGI and household size.",
+  bco:
+    "Beneficiary Continuation Option. Offered on inherited annuity/retirement contracts (e.g. EQUI-VEST): the beneficiary keeps the account invested in inherited form instead of cashing out. Because the account stays in beneficiary form, withdrawals at ANY age are exempt from the 10% early-withdrawal penalty (the IRS death exception) — but the taxable portion is still ordinary income, and required payouts apply (life-expectancy payments for eligible beneficiaries, or full depletion within 10 years). Caution: a surviving spouse who instead elects spousal continuation (treating the account as their own) gives up the penalty exemption before 59½.",
   flexibleSpending:
     "A Monte Carlo assumption that cuts discretionary spending by 10% after a year when the portfolio falls more than 15%. This models retirees tightening spending after bad markets.",
   fra:
@@ -4487,6 +5214,28 @@ function PctInput({ label, value, onChange, hint, info }) {
       hint={hint}
       info={info}
     />
+  );
+}
+
+function SelectInput({ label, value, onChange, options, hint, info }) {
+  return (
+    <div className="mb-3">
+      <label className="block text-xs font-medium text-slate-600 mb-1">
+        {info ? <TermLabel info={info}>{label}</TermLabel> : label}
+      </label>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded-md border border-slate-300 bg-white text-slate-900 text-sm py-1.5 px-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {hint && <p className="text-xs text-slate-500 mt-1">{hint}</p>}
+    </div>
   );
 }
 
@@ -4837,8 +5586,158 @@ function PhasePill({ phase }) {
 }
 
 // ============================================================
-// SettingsExport — collapsible table of all input values, easy to copy/paste
+// SettingsImport — modal dialog: paste an exported settings block to fill in
+// every matching field at once. Opened from the "Load from text…" toolbar
+// button so it's discoverable regardless of the active tab or scroll position.
 // ============================================================
+function SettingsImport({ open, onClose, onApply }) {
+  const [text, setText] = useState("");
+  const [result, setResult] = useState(null);
+
+  // Reset the form each time the dialog is opened so stale text/results from a
+  // previous session don't linger.
+  useEffect(() => {
+    if (open) {
+      setText("");
+      setResult(null);
+    }
+  }, [open]);
+
+  if (!open) return null;
+
+  const handleLoad = () => {
+    const parsed = parseSettingsText(text);
+    if (parsed.isCouple) {
+      setResult({ kind: "couple" });
+      return;
+    }
+    if (parsed.applied.length === 0) {
+      setResult({ kind: "empty", skipped: parsed.skipped });
+      return;
+    }
+    onApply(parsed.updates);
+    setResult({
+      kind: "ok",
+      applied: parsed.applied,
+      skipped: parsed.skipped,
+    });
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/50 p-4 sm:p-8 print:hidden"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Load settings from text"
+    >
+      <div
+        className="w-full max-w-2xl my-auto bg-white rounded-lg shadow-xl border border-slate-200"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200">
+          <h3 className="text-sm font-semibold text-slate-800">
+            Load Settings from Text
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="text-slate-400 hover:text-slate-700 text-xl leading-none"
+          >
+            ×
+          </button>
+        </div>
+        <div className="p-5">
+          <p className="text-xs text-slate-500 mb-2">
+            Paste a settings block in the same format as “Current Settings
+            (Copy/Paste)” at the bottom of the plan — section headings like{" "}
+            <code className="bg-slate-100 px-1 rounded">## Current Balances</code>{" "}
+            and one{" "}
+            <code className="bg-slate-100 px-1 rounded">Label: value</code> per
+            line. Unknown lines are ignored. This replaces the matching values
+            in your current plan; it does not delete any saved scenarios.
+          </p>
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            autoFocus
+            placeholder={"# Retirement Planner Settings\n\n## Timing\nFiling Status: Single\nCurrent Age: 50\nRetirement Age: 51\n\n## Current Balances\nCash / HYSA: $1,400,000\n401k / 403b: $1,258,000\n..."}
+            className="w-full h-64 text-xs font-mono p-2 border border-slate-300 rounded bg-slate-50 text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+          <div className="flex items-center gap-3 mt-3">
+            <button
+              type="button"
+              onClick={handleLoad}
+              disabled={!text.trim()}
+              className="text-xs bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded font-medium transition"
+            >
+              Load Settings
+            </button>
+            {text.trim() && (
+              <button
+                type="button"
+                onClick={() => {
+                  setText("");
+                  setResult(null);
+                }}
+                className="text-xs text-slate-500 hover:text-slate-700"
+              >
+                Clear
+              </button>
+            )}
+            <span className="flex-1" />
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-xs text-slate-600 hover:text-slate-900 px-3 py-1.5 rounded border border-slate-300 transition"
+            >
+              {result?.kind === "ok" ? "Done" : "Cancel"}
+            </button>
+          </div>
+
+          {result?.kind === "couple" && (
+            <div className="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              This looks like a{" "}
+              <span className="font-semibold">Married Couple</span> settings
+              block. Text import currently supports individual-mode plans only.
+              Switch the plan to Individual, or load couple plans from a saved
+              scenario instead.
+            </div>
+          )}
+          {result?.kind === "empty" && (
+            <div className="mt-3 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900">
+              No recognized settings were found. Check that each line reads
+              <span className="font-mono"> Label: value</span> using the labels
+              from the “Current Settings (Copy/Paste)” block.
+            </div>
+          )}
+          {result?.kind === "ok" && (
+            <div className="mt-3 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+              <p className="font-semibold">
+                ✓ Applied {result.applied.length} setting
+                {result.applied.length === 1 ? "" : "s"}. The plan has been
+                updated — close this dialog to see the results.
+              </p>
+              {result.skipped.length > 0 && (
+                <p className="mt-1 text-emerald-800">
+                  Ignored {result.skipped.length} unrecognized line
+                  {result.skipped.length === 1 ? "" : "s"}:{" "}
+                  {result.skipped
+                    .slice(0, 6)
+                    .map((s) => s.label)
+                    .join(", ")}
+                  {result.skipped.length > 6 ? "…" : ""}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SettingsExport({ inputs, sourceInputs = inputs }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -4990,6 +5889,42 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
         ["Credit Card Debt", fmtMoney(exportInputs.creditCardDebt)],
       ],
     },
+    ...((exportInputs.balanceInherited || 0) > 0
+      ? [
+          {
+            title: "Inherited (BCO)",
+            rows: [
+              ["Balance", fmtMoney(exportInputs.balanceInherited)],
+              [
+                "Account Type",
+                exportInputs.inheritedTaxType === "nonqualified"
+                  ? "Non-qualified annuity"
+                  : "Qualified (inherited IRA / 403b / 401k)",
+              ],
+              ...(exportInputs.inheritedTaxType === "nonqualified"
+                ? [["Cost Basis", fmtMoney(exportInputs.inheritedBasis || 0)]]
+                : []),
+              [
+                "Payout Rule",
+                exportInputs.inheritedPayoutRule === "tenYear"
+                  ? "10-year rule"
+                  : "Life expectancy (stretch)",
+              ],
+              [
+                "Relationship to Owner",
+                exportInputs.inheritedRelationship === "nonSpouse"
+                  ? "Other beneficiary"
+                  : "Surviving spouse",
+              ],
+              ["Year of Owner's Death", fmtNum(exportInputs.inheritedDeathYear)],
+              [
+                "Owner's Birth Year",
+                fmtNum(exportInputs.inheritedDeceasedBirthYear),
+              ],
+            ],
+          },
+        ]
+      : []),
     {
       title: "Cash Strategy",
       rows: [
@@ -5167,24 +6102,28 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
             — share your setup with someone else or save for later
           </span>
         </div>
-        <span className="text-slate-400 text-lg">{open ? "−" : "+"}</span>
+        <span className="text-slate-400 text-lg print:hidden">{open ? "−" : "+"}</span>
       </button>
-      {open && (
-        <div className="border-t border-slate-200 p-4">
-          <div className="flex justify-end mb-3">
-            <button
-              type="button"
-              onClick={handleCopy}
-              className="text-xs bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded font-medium transition"
-            >
-              {copied ? "✓ Copied!" : "Copy All as Text"}
-            </button>
+      {/* Body is always rendered so "Save as PDF" (window.print) captures the
+          full settings table even while the section is collapsed on screen:
+          `hidden` hides it when closed, `print:block` re-shows it in print. */}
+      <div
+        className={`border-t border-slate-200 p-4 ${open ? "" : "hidden print:block"}`}
+      >
+        <div className="flex justify-end mb-3 print:hidden">
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="text-xs bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded font-medium transition"
+          >
+            {copied ? "✓ Copied!" : "Copy All as Text"}
+          </button>
+        </div>
+        {copyError && (
+          <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 print:hidden">
+            Browser clipboard access was blocked. The plain-text settings are open below; press Ctrl+C to copy the selected text.
           </div>
-          {copyError && (
-            <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-              Browser clipboard access was blocked. The plain-text settings are open below; press Ctrl+C to copy the selected text.
-            </div>
-          )}
+        )}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {groups.map((g) => (
               <div
@@ -5213,7 +6152,7 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
             ))}
           </div>
           <details
-            className="mt-4"
+            className="mt-4 print:hidden"
             open={plainTextOpen}
             onToggle={(event) => setPlainTextOpen(event.currentTarget.open)}
           >
@@ -5228,8 +6167,7 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
               onClick={(e) => e.target.select()}
             />
           </details>
-        </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -5239,6 +6177,7 @@ function MiniStackedBar({ row }) {
   const segments = [
     { value: row.cash, color: "#94a3b8", name: "Cash" },
     { value: row.taxable, color: "#7dd3fc", name: "Taxable" },
+    { value: row.inherited, color: "#bef264", name: "Inherited" },
     { value: row.k401, color: "#c4b5fd", name: "401k" },
     { value: row.tradIra, color: "#f9a8d4", name: "Trad IRA" },
     { value: row.roth, color: "#6ee7b7", name: "Roth" },
@@ -5620,6 +6559,19 @@ function CashFlowTooltip({ active, payload, isCouple, showNeedBreakdown = false 
                 </td>
               </tr>
             )}
+            {(row.surplusToCash || 0) > 0 && (
+              <tr>
+                <td className="py-0.5 pr-4 text-slate-600">
+                  <span className="inline-flex items-center gap-1.5">
+                    <SeriesSwatch color="#64748b" />
+                    Excess over need — saved to Cash
+                  </span>
+                </td>
+                <td className="py-0.5 text-right font-mono tabular-nums text-slate-900">
+                  {fmtMoneyFull(row.surplusToCash)}
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       )}
@@ -5712,6 +6664,9 @@ function EarlyAccessStrategyPanel({
   const fromCash = sumAdj((d) => d.fromCash);
   const fromTaxable = sumAdj((d) => d.fromTaxable);
   const fromHsa = sumAdj((d) => d.hsaWithdrawal);
+  // Inherited (BCO) draws are penalty-free at any age (death exception), so
+  // they count with the bridge-friendly sources, never the penalized ones.
+  const fromInherited = sumAdj((d) => d.fromInherited || 0);
   const fromPreTax = sumAdj((d) => d.from401k + d.fromIra);
   const fromRoth = sumAdj((d) => d.fromRoth);
   const totalPenalties = results.yearlyData.reduce(
@@ -5745,6 +6700,13 @@ function EarlyAccessStrategyPanel({
       balance: displayInputs.balanceHsa,
       status:
         "Tax- and penalty-free at any age for qualified medical costs (including many insurance premiums and out-of-pocket bills).",
+      tone: "good",
+    },
+    {
+      name: "Inherited (BCO)",
+      balance: displayInputs.balanceInherited,
+      status:
+        "No 10% penalty at ANY age — beneficiary distributions use the IRS death exception. The taxable portion is ordinary income, and required payouts continue on the beneficiary schedule. (Spousal continuation — retitling as your own — would give up this exemption before 59½.)",
       tone: "good",
     },
     {
@@ -5842,6 +6804,7 @@ function EarlyAccessStrategyPanel({
               Good news: this projection does exactly that.
             </span>{" "}
             Your penalty-free money (cash, taxable, HSA
+            {fromInherited > 0 ? ", inherited BCO" : ""}
             {bridgeIncome > 0 ? ", plus part-time/pension income" : ""}) covers
             all {bridgeYearCount} bridge year{bridgeYearCount === 1 ? "" : "s"}{" "}
             without touching retirement accounts early.
@@ -5990,10 +6953,11 @@ function EarlyAccessStrategyPanel({
             </div>
             <div className="rounded border border-slate-200 bg-slate-50 p-2">
               <div className="text-slate-500">
-                From penalty-free savings (cash, taxable, HSA)
+                From penalty-free savings (cash, taxable, HSA
+                {fromInherited > 0 ? ", inherited BCO" : ""})
               </div>
               <div className="font-bold text-sky-700 text-sm">
-                {fmtMoney(fromCash + fromTaxable + fromHsa)}
+                {fmtMoney(fromCash + fromTaxable + fromHsa + fromInherited)}
               </div>
             </div>
             <div className="rounded border border-slate-200 bg-slate-50 p-2">
@@ -6044,6 +7008,16 @@ function EarlyAccessStrategyPanel({
             tax-free at any age for healthcare, which is often a big bridge
             expense.
           </li>
+          {(displayInputs.balanceInherited || 0) > 0 && (
+            <li>
+              <span className="font-medium">Inherited (BCO) account</span> —
+              no early-withdrawal penalty at any age (death exception), and
+              required payouts must come out on the beneficiary schedule
+              anyway — so it bridges the gap before your own 401k/IRA are
+              touched. Draws are ordinary income, so large ones can affect
+              ACA subsidies and tax brackets.
+            </li>
+          )}
           <li>
             <span className="font-medium">Retirement accounts last</span>
             {anyRuleOf55
@@ -6273,6 +7247,30 @@ const DEFAULT_INPUTS = {
   // 5 years or 59.5. Rate must not exceed 120% of the federal mid-term rate.
   useSepp: false,
   seppRate: 0.05,
+  // Inherited account under a Beneficiary Continuation Option (BCO) — an
+  // inherited IRA/403(b)/401(k) or non-qualified annuity kept in beneficiary
+  // form (e.g. EQUI-VEST BCO). Withdrawals at ANY age are exempt from the
+  // 10% early-withdrawal penalty (death exception, IRC §72(t)/(q)), but the
+  // taxable portion is ordinary income, and beneficiary required
+  // distributions apply. $0 = no inherited account.
+  balanceInherited: 0,
+  // "qualified" (inherited IRA/403b/401k — fully taxable) or "nonqualified"
+  // (annuity — earnings taxed first, then cost basis returns tax-free).
+  inheritedTaxType: "qualified",
+  // Non-qualified only: investment in the contract (cost basis).
+  inheritedBasis: 0,
+  // "lifeExpectancy" (eligible designated beneficiary stretch) or "tenYear"
+  // (empty by Dec 31 of the 10th year after death).
+  inheritedPayoutRule: "lifeExpectancy",
+  // "spouse" (recalculated divisor + RMD-delay option) or "nonSpouse"
+  // (fixed-term divisor, minus 1 each year).
+  inheritedRelationship: "spouse",
+  // Year the original owner died.
+  inheritedDeathYear: PROJECTION_START_YEAR,
+  // Original owner's birth year — sets when required payouts must begin
+  // (a spouse may wait until the owner would have reached RMD age) and
+  // whether annual RMDs apply during the 10-year rule.
+  inheritedDeceasedBirthYear: 1965,
   conversionBridge: 0,
   conversionMid: 0,
   conversionFinal: 0,
@@ -6734,6 +7732,357 @@ function buildAppliedInputChanges(currentInputs, changes) {
   return { updates, applied, skipped };
 }
 
+// ============================================================
+// SETTINGS IMPORT — parse the pasted "Label: value" text
+// ============================================================
+// Reverses SettingsExport's plain-text format: `## Section` headers plus
+// `Label: Value` rows. Labels are matched case-insensitively against the same
+// labels the export writes (plus a few sidebar aliases). A handful of labels
+// are ambiguous on their own ("Balance", "Cost Basis") and are only matched
+// inside the "Inherited (BCO)" section, so section context is tracked.
+
+const normImportLabel = (s) =>
+  String(s)
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+// value parsers shared by the field specs
+const parseImportMoney = (v) => {
+  const n = Number(String(v).replace(/[$,%\s]/g, ""));
+  return Number.isFinite(n) ? n : null;
+};
+const parseImportPct = (v) => {
+  const raw = String(v).trim();
+  const n = Number(raw.replace(/[$,%\s]/g, ""));
+  if (!Number.isFinite(n)) return null;
+  // Export always writes an explicit "%", so treat that as authoritative;
+  // a bare number > 1 is assumed to be a percentage too (e.g. "9" → 0.09).
+  if (raw.includes("%")) return n / 100;
+  return n > 1 ? n / 100 : n;
+};
+const parseImportInt = (v) => {
+  const n = Number(String(v).replace(/[$,%\s]/g, ""));
+  return Number.isFinite(n) ? Math.round(n) : null;
+};
+const parseImportBool = (v) => {
+  const s = String(v).toLowerCase().trim();
+  if (["yes", "true", "1", "on", "y"].includes(s)) return true;
+  if (["no", "false", "0", "off", "n"].includes(s)) return false;
+  return null;
+};
+
+// Each spec: internal field, value kind, accepted labels (normalized at match
+// time), optional `requireSection` substring, optional `parseEnum`.
+const SETTINGS_IMPORT_SPECS = [
+  // --- Timing
+  {
+    field: "filingStatus",
+    labels: ["filing status"],
+    parseEnum: (v) => {
+      const s = v.toLowerCase();
+      if (s.includes("married") || s.includes("mfj") || s.includes("joint"))
+        return "mfj";
+      if (s.includes("single")) return "single";
+      return null;
+    },
+  },
+  { field: "currentAge", kind: "int", labels: ["current age"] },
+  { field: "retirementAge", kind: "int", labels: ["retirement age"] },
+  { field: "planThroughAge", kind: "int", labels: ["plan through age"] },
+  // --- Current Balances
+  {
+    field: "balanceCash",
+    kind: "money",
+    labels: ["cash / hysa", "cash/hysa", "cash / hysa balance"],
+  },
+  {
+    field: "balanceTaxable",
+    kind: "money",
+    labels: ["taxable brokerage", "taxable"],
+  },
+  {
+    field: "taxableBasisPct",
+    kind: "pct",
+    labels: ["taxable cost basis %", "taxable cost basis"],
+  },
+  {
+    field: "balance401k",
+    kind: "money",
+    labels: ["401k / 403b", "401k/403b", "401k", "403b"],
+  },
+  {
+    field: "balanceTradIra",
+    kind: "money",
+    labels: ["traditional ira", "trad ira"],
+  },
+  { field: "balanceRoth", kind: "money", labels: ["roth ira"] },
+  {
+    field: "rothBasis",
+    kind: "money",
+    labels: ["roth contributions to date"],
+  },
+  { field: "balanceHsa", kind: "money", labels: ["hsa"] },
+  {
+    field: "creditCardDebt",
+    kind: "money",
+    labels: ["credit card debt"],
+  },
+  // --- Inherited (BCO) — section-scoped so bare "Balance"/"Cost Basis" only
+  // apply here, never colliding with taxable/other balances.
+  {
+    field: "balanceInherited",
+    kind: "money",
+    requireSection: "inherited",
+    labels: ["balance", "inherited account balance", "inherited balance"],
+  },
+  {
+    field: "inheritedTaxType",
+    requireSection: "inherited",
+    labels: ["account type"],
+    parseEnum: (v) => {
+      const s = v.toLowerCase();
+      if (s.includes("non-qualified") || s.includes("nonqualified") || s.includes("annuity"))
+        return "nonqualified";
+      if (s.includes("qualified")) return "qualified";
+      return null;
+    },
+  },
+  {
+    field: "inheritedBasis",
+    kind: "money",
+    requireSection: "inherited",
+    labels: ["cost basis", "inherited cost basis"],
+  },
+  {
+    field: "inheritedPayoutRule",
+    requireSection: "inherited",
+    labels: ["payout rule"],
+    parseEnum: (v) => {
+      const s = v.toLowerCase();
+      if (s.includes("10-year") || s.includes("10 year") || s.includes("ten"))
+        return "tenYear";
+      if (s.includes("life")) return "lifeExpectancy";
+      return null;
+    },
+  },
+  {
+    field: "inheritedRelationship",
+    requireSection: "inherited",
+    labels: ["relationship to owner", "your relationship to the owner"],
+    parseEnum: (v) => {
+      const s = v.toLowerCase();
+      if (s.includes("other") || s.includes("non-spouse") || s.includes("nonspouse"))
+        return "nonSpouse";
+      if (s.includes("spouse")) return "spouse";
+      return null;
+    },
+  },
+  {
+    field: "inheritedDeathYear",
+    kind: "int",
+    requireSection: "inherited",
+    labels: ["year of owner's death", "year of owners death"],
+  },
+  {
+    field: "inheritedDeceasedBirthYear",
+    kind: "int",
+    requireSection: "inherited",
+    labels: ["owner's birth year", "owners birth year"],
+  },
+  // --- Cash Strategy
+  {
+    field: "cashStrategy",
+    labels: ["cash withdrawal strategy", "cash strategy"],
+    parseEnum: (v) => {
+      const s = v.toLowerCase().trim();
+      const byLabel = CASH_STRATEGY_OPTIONS.find(
+        (o) => o.label.toLowerCase() === s,
+      );
+      if (byLabel) return byLabel.value;
+      const byValue = CASH_STRATEGY_OPTIONS.find(
+        (o) => o.value.toLowerCase() === s,
+      );
+      if (byValue) return byValue.value;
+      if (s.includes("proportion")) return "proportional";
+      if (s.includes("only if") || s.includes("last")) return "cashLast";
+      if (s.includes("preserve") || s.includes("reserve"))
+        return "preserveReserve";
+      if (s.includes("first")) return "cashFirst";
+      return null;
+    },
+  },
+  {
+    field: "cashReserveFloor",
+    kind: "money",
+    labels: ["minimum cash reserve"],
+  },
+  {
+    field: "allowReserveAsLastResort",
+    kind: "bool",
+    labels: ["allow reserve as last resort"],
+  },
+  // --- Returns & Inflation
+  { field: "preReturn", kind: "pct", labels: ["pre-retirement return"] },
+  { field: "postReturn", kind: "pct", labels: ["post-retirement return"] },
+  {
+    field: "cashReturn",
+    kind: "pct",
+    labels: ["cash return", "cash / hysa return", "cash/hysa return"],
+  },
+  { field: "inflation", kind: "pct", labels: ["inflation", "inflation rate"] },
+  // --- Risk Assumptions
+  {
+    field: "portfolioVolatility",
+    kind: "pct",
+    labels: ["portfolio volatility"],
+  },
+  {
+    field: "taxableAnnualTaxDrag",
+    kind: "pct",
+    labels: ["taxable annual tax drag"],
+  },
+  { field: "flexibleSpending", kind: "bool", labels: ["flexible spending"] },
+  // --- Contributions
+  { field: "contrib401k", kind: "money", labels: ["401k employee"] },
+  { field: "contribMatch", kind: "money", labels: ["employer match"] },
+  { field: "contribHsa", kind: "money", labels: ["hsa contribution"] },
+  // --- Spending
+  {
+    field: "baseExpenses",
+    kind: "money",
+    labels: ["base expenses", "base lifestyle expenses"],
+  },
+  {
+    field: "healthcarePre65",
+    kind: "money",
+    labels: ["healthcare pre-65", "healthcare before 65", "healthcare pre 65"],
+  },
+  {
+    field: "healthcarePost65",
+    kind: "money",
+    labels: ["healthcare post-65", "healthcare 65+", "healthcare post 65"],
+  },
+  // --- Income
+  {
+    field: "partTimeIncome",
+    kind: "money",
+    labels: ["part-time income / year", "part-time income/year"],
+  },
+  {
+    field: "partTimeYears",
+    kind: "int",
+    labels: ["years of part-time work"],
+  },
+  {
+    field: "ssIncome",
+    kind: "money",
+    labels: ["social security at fra / year", "social security at fra/year"],
+  },
+  { field: "ssAge", kind: "int", labels: ["age to claim ss"] },
+  // --- Pension
+  { field: "pensionIncome", kind: "money", labels: ["annual pension"] },
+  { field: "pensionStartAge", kind: "int", labels: ["pension start age"] },
+  { field: "pensionCola", kind: "pct", labels: ["pension cola"] },
+  {
+    field: "pensionNyExempt",
+    kind: "bool",
+    labels: ["ny state tax exempt", "ny state tax exempt pension"],
+  },
+  // --- Roth Conversions
+  {
+    field: "conversionBridge",
+    kind: "money",
+    labels: ["retirement through 59 / year", "retirement through 59/year"],
+  },
+  {
+    field: "conversionMid",
+    kind: "money",
+    labels: ["ages 60-64 / year", "ages 60-64/year"],
+  },
+  {
+    field: "conversionFinal",
+    kind: "money",
+    labels: ["age 65 until ss / year", "age 65 until ss/year"],
+  },
+  // --- Advanced Tax Model
+  { field: "rmdStartAge", kind: "int", labels: ["rmd start age"] },
+  {
+    field: "useAcaSubsidyEstimate",
+    kind: "bool",
+    labels: ["aca subsidy estimate"],
+  },
+  { field: "householdSize", kind: "int", labels: ["household size"] },
+];
+
+function parseValueForImportSpec(spec, value) {
+  if (spec.parseEnum) return spec.parseEnum(value);
+  switch (spec.kind) {
+    case "money":
+      return parseImportMoney(value);
+    case "pct":
+      return parseImportPct(value);
+    case "int":
+      return parseImportInt(value);
+    case "bool":
+      return parseImportBool(value);
+    default:
+      return value;
+  }
+}
+
+function findImportSpec(label, section) {
+  for (const spec of SETTINGS_IMPORT_SPECS) {
+    if (spec.requireSection && !section.includes(spec.requireSection)) continue;
+    if (spec.labels.some((l) => normImportLabel(l) === label)) return spec;
+  }
+  return null;
+}
+
+// Parse pasted settings text into an `updates` object plus applied/skipped
+// summaries. Couple-mode text (Household / Primary / Spouse sections) is
+// detected but not applied — flat individual fields would map incorrectly.
+function parseSettingsText(text) {
+  const isCouple =
+    /mode\s*:\s*married couple/i.test(text) ||
+    /^\s*#+\s*(primary|spouse|household)\b/im.test(text);
+  const updates = {};
+  const applied = [];
+  const skipped = [];
+  let section = "";
+  for (const rawLine of String(text).split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (line.startsWith("#")) {
+      section = normImportLabel(line.replace(/^#+\s*/, ""));
+      continue;
+    }
+    const sep = line.indexOf(":");
+    if (sep < 0) continue;
+    const rawLabel = line.slice(0, sep).trim();
+    const rawValue = line.slice(sep + 1).trim();
+    if (!rawValue) continue;
+    const label = normImportLabel(rawLabel);
+    const spec = findImportSpec(label, section);
+    if (!spec) {
+      skipped.push({ label: rawLabel, reason: "not recognized" });
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(updates, spec.field)) continue;
+    const parsed = parseValueForImportSpec(spec, rawValue);
+    if (parsed === null || parsed === undefined) {
+      skipped.push({ label: rawLabel, reason: "could not read value" });
+      continue;
+    }
+    updates[spec.field] = parsed;
+    applied.push({ field: spec.field, label: rawLabel, value: parsed });
+  }
+  // A recognized individual-mode plan should govern display, so switch out of
+  // couple mode when flat fields were parsed.
+  if (!isCouple && applied.length > 0) updates.mode = "single";
+  return { isCouple, updates, applied, skipped };
+}
+
 function buildChatProfile(inputs, results) {
   return {
     inputs,
@@ -6756,6 +8105,7 @@ function buildChatProfile(inputs, results) {
         ira: row.fromIra,
         roth: row.fromRoth,
         hsa: row.hsaWithdrawal || 0,
+        inherited: row.fromInherited || 0,
       },
       conversion: row.conversion,
       balances: {
@@ -6765,9 +8115,12 @@ function buildChatProfile(inputs, results) {
         tradIra: row.tradIra,
         roth: row.roth,
         hsa: row.hsa,
+        inherited: row.inherited || 0,
         total: row.total,
       },
       rmdAmount: row.rmdAmount || 0,
+      inheritedRmdAmount: row.inheritedRmdAmount || 0,
+      surplusToCash: row.surplusToCash || 0,
       magi: row.magi || 0,
       taxableSs: row.taxableSs || 0,
       realizedGain: row.realizedGain || 0,
@@ -6778,6 +8131,8 @@ function buildChatProfile(inputs, results) {
     modelNotes: [
       "Projection values are nominal unless the UI toggle displays today's dollars.",
       "Monte Carlo reuses the same deterministic tax/RMD/conversion engine with randomized returns.",
+      "Inherited (BCO) accounts: withdrawals are penalty-free at any age (death exception); the taxable portion is ordinary income; beneficiary required distributions are enforced per the selected payout rule.",
+      "Cash can GROW during retirement: when forced withdrawals (RMDs, SEPP, inherited payouts) exceed spending + tax, the after-tax excess is deposited into Cash/HYSA (surplusToCash per row). Cash also earns the Cash/HYSA return. This is the standard answer to 'why is my cash balance increasing?'",
       "This is planning analysis, not tax, legal, investment, or fiduciary advice.",
     ],
   };
@@ -8145,6 +9500,8 @@ export default function RetirementPlanner() {
   const mcInputsRef = useRef(null);
   const [saveStatus, setSaveStatus] = useState("idle"); // idle | saving | saved | cleared
   const [diagnostics, setDiagnostics] = useState(null);
+  // Controls the "Load Settings from Text" modal (opened from the toolbar).
+  const [showImport, setShowImport] = useState(false);
   // Named scenarios persisted in this browser only.
   const [savedScenarios, setSavedScenarios] = useState([]);
   const [activeScenarioId, setActiveScenarioId] = useState(null);
@@ -8301,6 +9658,16 @@ export default function RetirementPlanner() {
     setTimeout(() => setSaveStatus("idle"), 2500);
   };
 
+  // Apply a parsed settings block (from SettingsImport). Treated like editing
+  // the inputs by hand: it becomes an unsaved working plan, and cached derived
+  // results (Monte Carlo, diagnostics) are invalidated so they recompute.
+  const handleImportSettings = (updates) => {
+    setInputs((prev) => normalizeInputs({ ...prev, ...updates }));
+    setActiveScenarioId(null);
+    setMcResults(null);
+    setDiagnostics(null);
+  };
+
   const hasSavedScenarios = savedScenarios.length > 0;
 
   // Compute scenario comparison — ages always derive from the user's own
@@ -8409,6 +9776,7 @@ export default function RetirementPlanner() {
       from401k: row.from401k * factor,
       fromIra: row.fromIra * factor,
       fromRoth: row.fromRoth * factor,
+      fromInherited: (row.fromInherited || 0) * factor,
       hsaWithdrawal: (row.hsaWithdrawal || 0) * factor,
       conversion: row.conversion * factor,
       tax: row.tax * factor,
@@ -8419,8 +9787,12 @@ export default function RetirementPlanner() {
       tradIra: row.tradIra * factor,
       roth: row.roth * factor,
       hsa: row.hsa * factor,
+      inherited: (row.inherited || 0) * factor,
       total: row.total * factor,
       rmdAmount: (row.rmdAmount || 0) * factor,
+      inheritedRmdAmount: (row.inheritedRmdAmount || 0) * factor,
+      inheritedTaxable: (row.inheritedTaxable || 0) * factor,
+      surplusToCash: (row.surplusToCash || 0) * factor,
       realizedGain: (row.realizedGain || 0) * factor,
       taxableSs: (row.taxableSs || 0) * factor,
       magi: (row.magi || 0) * factor,
@@ -8445,6 +9817,7 @@ export default function RetirementPlanner() {
     "Trad IRA": d.tradIra,
     Roth: d.roth,
     HSA: d.hsa,
+    Inherited: d.inherited || 0,
     "Annual Spending": d.phase === "accumulation" ? null : d.spending,
   }));
 
@@ -8459,6 +9832,7 @@ export default function RetirementPlanner() {
       Pension: d.pension || 0,
       Cash: d.fromCash,
       Taxable: d.fromTaxable,
+      Inherited: d.fromInherited || 0,
       [employerPlanChartKey]: d.from401k,
       IRA: d.fromIra,
       Roth: d.fromRoth,
@@ -8499,7 +9873,9 @@ export default function RetirementPlanner() {
     displayInputs.inflation,
     displayInputs.householdSize,
   );
-  const yearDetailColSpan = displayInputs.pensionIncome > 0 ? 16 : 15;
+  const showInheritedCol = (displayInputs.balanceInherited || 0) > 0;
+  const yearDetailColSpan =
+    (displayInputs.pensionIncome > 0 ? 16 : 15) + (showInheritedCol ? 1 : 0);
   // For an already-retired user the "portfolio at retirement" metric describes
   // the end of the first projected year, which happens at the current age.
   const retirementDisplayAge = Math.max(
@@ -8707,6 +10083,13 @@ export default function RetirementPlanner() {
             >
               Save as new…
             </button>
+            <button
+              onClick={() => setShowImport(true)}
+              className="text-xs bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded border border-white/20 transition"
+              title="Paste an exported settings block to fill in every field at once"
+            >
+              Load from text…
+            </button>
             {activeScenario && (
               <button
                 onClick={handleRenameScenario}
@@ -8747,6 +10130,13 @@ export default function RetirementPlanner() {
           </div>
         </div>
       </header>
+
+      {/* Load-from-text modal — reachable from the toolbar on any tab */}
+      <SettingsImport
+        open={showImport}
+        onClose={() => setShowImport(false)}
+        onApply={handleImportSettings}
+      />
 
       {/* Metrics strip */}
       <div className="bg-white border-b border-slate-200 px-6 py-4 print:px-0 print:py-2 print-avoid-break">
@@ -9080,6 +10470,102 @@ export default function RetirementPlanner() {
                 step={100}
                 hint="Paid off immediately at the start of the plan, from cash first and then taxable savings"
               />
+            </Section>
+
+            <Section title="Inherited (BCO)" badge="Beneficiary" icon="🎗️">
+              <NumberInput
+                label="Inherited Account Balance"
+                value={inputs.balanceInherited || 0}
+                onChange={update("balanceInherited")}
+                prefix="$"
+                step={1000}
+                hint="An inherited retirement account or annuity kept in beneficiary form under a Beneficiary Continuation Option. Leave $0 if none."
+                info={TERM_HELP.bco}
+              />
+              {(inputs.balanceInherited || 0) > 0 && (
+                <>
+                  <SelectInput
+                    label="Account Type"
+                    value={inputs.inheritedTaxType || "qualified"}
+                    onChange={update("inheritedTaxType")}
+                    options={[
+                      {
+                        value: "qualified",
+                        label: "Qualified (inherited IRA / 403b / 401k)",
+                      },
+                      { value: "nonqualified", label: "Non-qualified annuity" },
+                    ]}
+                    hint={
+                      (inputs.inheritedTaxType || "qualified") === "nonqualified"
+                        ? "Taxed earnings-first: withdrawals are fully taxable ordinary income until only your cost basis remains, then tax-free."
+                        : "Every withdrawal is ordinary income (pre-tax money) — but never the 10% early penalty."
+                    }
+                  />
+                  {(inputs.inheritedTaxType || "qualified") === "nonqualified" && (
+                    <NumberInput
+                      label="Cost Basis (Investment in Contract)"
+                      value={inputs.inheritedBasis || 0}
+                      onChange={update("inheritedBasis")}
+                      prefix="$"
+                      step={1000}
+                      hint="After-tax dollars originally paid into the annuity (on the contract statement). This portion comes back tax-free after gains distribute."
+                    />
+                  )}
+                  <SelectInput
+                    label="Payout Rule"
+                    value={inputs.inheritedPayoutRule || "lifeExpectancy"}
+                    onChange={update("inheritedPayoutRule")}
+                    options={[
+                      {
+                        value: "lifeExpectancy",
+                        label: "Life expectancy (stretch)",
+                      },
+                      { value: "tenYear", label: "10-year rule" },
+                    ]}
+                    hint={
+                      (inputs.inheritedPayoutRule || "lifeExpectancy") ===
+                      "tenYear"
+                        ? `Everything must be withdrawn by Dec 31, ${
+                            (inputs.inheritedDeathYear || PROJECTION_START_YEAR) +
+                            10
+                          }; the plan forces out any remaining balance that year.`
+                        : "Annual required payouts over your single-life expectancy — available to a surviving spouse and other eligible designated beneficiaries."
+                    }
+                  />
+                  <SelectInput
+                    label="Your Relationship to the Owner"
+                    value={inputs.inheritedRelationship || "spouse"}
+                    onChange={update("inheritedRelationship")}
+                    options={[
+                      { value: "spouse", label: "Surviving spouse" },
+                      { value: "nonSpouse", label: "Other beneficiary" },
+                    ]}
+                    hint="A surviving spouse recalculates life expectancy each year and may delay required payouts until the year the owner would have reached RMD age."
+                  />
+                  <NumberInput
+                    label="Year of Owner's Death"
+                    value={inputs.inheritedDeathYear || PROJECTION_START_YEAR}
+                    onChange={update("inheritedDeathYear")}
+                    hint="Required payouts are measured from this year."
+                  />
+                  <NumberInput
+                    label="Owner's Birth Year"
+                    value={inputs.inheritedDeceasedBirthYear || 1965}
+                    onChange={update("inheritedDeceasedBirthYear")}
+                    hint="Sets the owner's RMD age — which determines when a spouse's required payouts must begin, and whether annual RMDs apply inside the 10-year rule."
+                  />
+                  <p className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5">
+                    ✓ Withdrawals from this account are modeled with{" "}
+                    <span className="font-semibold">
+                      no 10% early-withdrawal penalty at any age
+                    </span>{" "}
+                    (IRS death exception). The taxable portion is still ordinary
+                    income. Keeping the account in beneficiary (BCO) form
+                    preserves the exemption — electing spousal continuation
+                    (treating it as your own) would not.
+                  </p>
+                </>
+              )}
             </Section>
 
             <Section title="Cash Strategy" badge="Drawdown" icon="🏦">
@@ -9591,6 +11077,11 @@ export default function RetirementPlanner() {
                   Watch how each account evolves through accumulation and
                   drawdown. In married-couple mode, spouse-owned retirement
                   accounts are combined here and split in the year-by-year detail.
+                  If Cash grows in later years, that's not a mistake: required
+                  withdrawals (RMDs) often force out more than you spend, and
+                  the after-tax excess is re-saved into Cash/HYSA — look for the{" "}
+                  <span className="text-[10px] font-medium bg-sky-100 text-sky-800 px-1 py-0.5 rounded">→CASH</span>{" "}
+                  badge in the year-by-year table.
                 </p>
               </div>
             </div>
@@ -9670,6 +11161,15 @@ export default function RetirementPlanner() {
                   stroke="#0284c7"
                   fill="#7dd3fc"
                 />
+                {(displayInputs.balanceInherited || 0) > 0 && (
+                  <Area
+                    type="monotone"
+                    dataKey="Inherited"
+                    stackId="1"
+                    stroke="#4d7c0f"
+                    fill="#bef264"
+                  />
+                )}
                 <Area
                   type="monotone"
                   dataKey={employerPlanChartKey}
@@ -9756,6 +11256,9 @@ export default function RetirementPlanner() {
                 )}
                 <Bar dataKey="Cash" stackId="sources" fill="#64748b" />
                 <Bar dataKey="Taxable" stackId="sources" fill="#06b6d4" />
+                {(displayInputs.balanceInherited || 0) > 0 && (
+                  <Bar dataKey="Inherited" stackId="sources" fill="#84cc16" />
+                )}
                 <Bar dataKey={employerPlanChartKey} stackId="sources" fill="#7c3aed" />
                 <Bar dataKey="IRA" stackId="sources" fill="#db2777" />
                 <Bar dataKey="Roth" stackId="sources" fill="#10b981" />
@@ -9956,6 +11459,11 @@ export default function RetirementPlanner() {
                   </span>
                   <TermInfo text={TERM_HELP.aca} />{" "}
                   = ACA subsidy active,{" "}
+                  <span className="text-[10px] font-medium bg-sky-100 text-sky-800 px-1.5 py-0.5 rounded">
+                    →CASH
+                  </span>{" "}
+                  = forced withdrawals exceeded spending; the excess was saved
+                  to Cash/HYSA (why cash grows in RMD years),{" "}
                   <span className="text-[10px] font-bold bg-orange-600 text-white px-1.5 py-0.5 rounded">
                     PENALTY
                   </span>{" "}
@@ -10031,7 +11539,7 @@ export default function RetirementPlanner() {
                     </th>
                     <th
                       className="px-2 py-2 text-center font-semibold text-sky-700 bg-sky-50 border-r border-slate-200"
-                      colSpan={6}
+                      colSpan={showInheritedCol ? 7 : 6}
                     >
                       Withdrawn From
                     </th>
@@ -10079,6 +11587,11 @@ export default function RetirementPlanner() {
                     <th className="px-3 py-2 text-right font-semibold text-sky-700 bg-sky-50">
                       Taxable
                     </th>
+                    {showInheritedCol && (
+                      <th className="px-3 py-2 text-right font-semibold text-sky-700 bg-sky-50">
+                        Inherited
+                      </th>
+                    )}
                     <th className="px-3 py-2 text-right font-semibold text-sky-700 bg-sky-50">
                       {isCouple ? "Plans" : "401k"}
                     </th>
@@ -10143,6 +11656,14 @@ export default function RetirementPlanner() {
                                   title={`RMD required: ${fmtMoney(d.rmdAmount)}`}
                                 >
                                   RMD
+                                </span>
+                              )}
+                              {d.surplusToCash > 500 && (
+                                <span
+                                  className="text-[10px] font-medium bg-sky-100 text-sky-800 px-1.5 py-0.5 rounded"
+                                  title={`Required withdrawals exceeded spending + tax by ${fmtMoney(d.surplusToCash)}. That after-tax excess was deposited into Cash/HYSA — it is not extra spending, and it is why the cash balance grows in RMD years.`}
+                                >
+                                  →CASH
                                 </span>
                               )}
                               {d.irmaaTriggered && (
@@ -10218,6 +11739,26 @@ export default function RetirementPlanner() {
                           >
                             {d.fromTaxable > 0 ? fmtMoney(d.fromTaxable) : "—"}
                           </td>
+                          {showInheritedCol && (
+                            <td
+                              className={`px-3 py-1.5 text-right ${
+                                d.fromInherited > 0
+                                  ? "text-sky-700 font-medium"
+                                  : "text-slate-300"
+                              }`}
+                              title={
+                                d.fromInherited > 0
+                                  ? `Inherited (BCO) draw — no 10% early penalty at any age (death exception).${
+                                      d.inheritedRmdAmount > 0
+                                        ? ` Required this year: ${fmtMoney(d.inheritedRmdAmount)}.`
+                                        : ""
+                                    }`
+                                  : undefined
+                              }
+                            >
+                              {d.fromInherited > 0 ? fmtMoney(d.fromInherited) : "—"}
+                            </td>
+                          )}
                           <td
                             className={`px-3 py-1.5 text-right ${
                               d.from401k > 0 || d.conversion > 0

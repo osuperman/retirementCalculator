@@ -1,0 +1,74 @@
+# Retirement Planner Settings
+
+## Timing
+Filing Status: Single
+Current Age: 45
+Retirement Age: 60
+Plan Through Age: 95
+
+## Current Balances
+Cash / HYSA: $50,000
+Taxable Brokerage: $200,000
+Taxable Cost Basis %: 70.00%
+401k / 403b: $500,000
+Traditional IRA: $50,000
+Roth IRA: $75,000
+Roth Contributions to Date: $0
+HSA: $25,000
+Credit Card Debt: $0
+
+## Inherited (BCO)
+Balance: $300,000
+Account Type: Qualified (inherited IRA / 403b / 401k)
+Payout Rule: Life expectancy (stretch)
+Relationship to Owner: Surviving spouse
+Year of Owner's Death: 2026
+Owner's Birth Year: 1965
+
+## Cash Strategy
+Cash Withdrawal Strategy: Preserve cash reserve
+Minimum Cash Reserve: $150,000
+Allow Reserve As Last Resort: Yes
+
+## Returns & Inflation
+Pre-Retirement Return: 6.00%
+Post-Retirement Return: 5.50%
+Cash Return: 4.00%
+Inflation: 3.00%
+
+## Risk Assumptions (Monte Carlo)
+Portfolio Volatility: 9.00%
+Taxable Annual Tax Drag: 0.50%
+Flexible Spending: Yes
+
+## Contributions (Pre-Retirement)
+401k Employee: $23,500
+Employer Match: $5,000
+HSA Contribution: $4,300
+
+## Spending (Today's $)
+Base Expenses: $60,000
+Healthcare Pre-65: $18,000
+Healthcare Post-65: $8,000
+
+## Income
+Part-Time Income / Year: $0
+Years of Part-Time Work: 0
+Social Security at FRA / Year: $24,000
+Age to Claim SS: 67
+
+## Pension
+Annual Pension: $0
+Pension Start Age: 60
+Pension COLA: 2.00%
+NY State Tax Exempt: Yes
+
+## Roth Conversions
+Retirement through 59 / Year: $0
+Ages 60-64 / Year: $0
+Age 65 until SS / Year: $0
+
+## Advanced Tax Model
+RMD Start Age: 75
+ACA Subsidy Estimate: No
+Household Size: 1

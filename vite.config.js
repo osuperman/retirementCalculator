@@ -7,7 +7,11 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
 
   return {
-    base: '/retirementCalculator/',
+    // Root ('/') by default, which is correct for Cloudflare Pages (site served
+    // at the domain root, so the browser's `${BASE_URL}api/chat` resolves to the
+    // same-origin /api/chat Pages Function). The GitHub Pages workflow sets
+    // VITE_BASE=/retirementCalculator/ to keep that project-path deploy working.
+    base: env.VITE_BASE || '/',
     plugins: [
       react(),
       tailwindcss(),
