@@ -276,13 +276,14 @@ function fedLtcgTax(
   return tax;
 }
 
-// NY brackets and standard deductions are projected from their ~2024
-// statutory values by the input inflation rate, mirroring how federal brackets
-// are projected in getFederalTaxParams. Without this, only the federal side
-// indexed and NY suffered unbounded bracket creep over a multi-decade horizon,
-// overstating NY tax and understating ending balances in later years.
-const NY_TAX_BASE_YEAR = 2024;
-// NY 2024 statutory schedules per filing status. The five lowest rates
+// NY brackets and standard deductions are STATUTORY FIXED-DOLLAR amounts:
+// New York's automatic inflation indexing ended after tax year 2017, so —
+// unlike the federal side — these values stay constant until the legislature
+// acts. Bracket creep against inflating incomes is real NY law and is
+// intentionally modeled. (An earlier revision projected these values by the
+// inflation input, which systematically understated NY tax over multi-decade
+// horizons; that indexing was removed on audit.)
+// NY 2024+ statutory schedules per filing status. The five lowest rates
 // (4% through 6%) receive the FY2026 middle-class cut in both schedules.
 const NY_TAX_PARAMS = {
   mfj: {
@@ -314,24 +315,64 @@ const NY_TAX_PARAMS = {
     ],
   },
 };
+// Tax Law §601(d-1) "tax benefit recapture" (the IT-201 supplemental tax):
+// once NY AGI exceeds $107,650, the benefit of rates below the taxpayer's
+// marginal rate is clawed back. Each rate step's benefit — (rate_k −
+// rate_{k−1}) × that bracket's floor — phases in over $50,000 of NYAGI above
+// the greater of $107,650 or the bracket floor, so at high income NY tax is
+// effectively FLAT at the marginal rate. Thresholds are statutory dollars,
+// not indexed. Omitting this understated NY tax for every year with NYAGI
+// above $107,650.
+const NY_RECAPTURE_AGI_FLOOR = 107650;
+const NY_RECAPTURE_PHASE_IN = 50000;
+function nyTaxBenefitRecapture(nyagi, nyTaxable, brackets) {
+  if (nyagi <= NY_RECAPTURE_AGI_FLOOR) return 0;
+  let recapture = 0;
+  for (let k = 1; k < brackets.length; k++) {
+    const [floorK, , rateK] = brackets[k];
+    if (nyTaxable <= floorK) break; // marginal rate is below this step
+    const prevRate = brackets[k - 1][2];
+    const phaseStart = Math.max(NY_RECAPTURE_AGI_FLOOR, floorK);
+    const frac = Math.min(
+      1,
+      Math.max(0, (nyagi - phaseStart) / NY_RECAPTURE_PHASE_IN),
+    );
+    recapture += (rateK - prevRate) * floorK * frac;
+  }
+  return recapture;
+}
+
+// `taxableIncome` here is NY income after NY subtractions (exempt pension,
+// SS exemption, pension/annuity exclusion) but BEFORE the NY standard
+// deduction — i.e. it serves as the NYAGI proxy for the recapture phase-in.
+// The third positional slot used to be the inflation rate back when NY
+// values were (incorrectly) indexed; it is retained so call sites keep
+// working, but NY statutory dollars no longer move with it.
 function nyStateTax(
   taxableIncome,
-  year = NY_TAX_BASE_YEAR,
-  inflation = 0.03,
+  year = 2024,
+  _inflation = 0.03,
   filingStatus = "mfj",
 ) {
   if (taxableIncome <= 0) return 0;
   const params = NY_TAX_PARAMS[filingStatus] || NY_TAX_PARAMS.mfj;
-  const factor = Math.pow(1 + inflation, Math.max(0, year - NY_TAX_BASE_YEAR));
-  const stdDed = params.standardDeduction * factor;
+  const stdDed = params.standardDeduction;
   const nyTaxable = Math.max(0, taxableIncome - stdDed);
   // FY2026 NY budget (Ch. 59, Laws of 2025) cuts the bottom five rates by
   // 0.1pp in tax year 2026 and 0.2pp total from 2027 onward (permanent).
   const midClassCut = year >= 2027 ? 0.002 : year >= 2026 ? 0.001 : 0;
+  // The temporary 9.65% / 10.3% / 10.9% top rates (2021 budget) run through
+  // tax year 2032 (FY2026 budget extension). From 2033 the statute reverts
+  // income above the 6.85% bracket to the prior 8.82% top rate. These rates
+  // have been extended repeatedly — revisit if Albany moves again.
   const brackets = params.brackets.map(([low, high, rate], index) => [
-    low * factor,
-    high === Infinity ? Infinity : high * factor,
-    index < 5 ? rate - midClassCut : rate,
+    low,
+    high,
+    index < 5
+      ? rate - midClassCut
+      : year >= 2033 && rate > 0.0882
+        ? 0.0882
+        : rate,
   ]);
   let tax = 0;
   for (const [low, high, rate] of brackets) {
@@ -340,7 +381,7 @@ function nyStateTax(
     }
     if (nyTaxable <= high) break;
   }
-  return tax;
+  return tax + nyTaxBenefitRecapture(taxableIncome, nyTaxable, brackets);
 }
 
 // Taxable Social Security benefits (provisional income rules).
@@ -758,6 +799,9 @@ function computeRealizedGain(wTaxable, bTaxable, bTaxableBasis) {
 
 // Iterative tax gross-up solver.
 // Starts from netNeed, solves for withdrawals that cover spending + taxes.
+// netNeed may be NEGATIVE (recurring income exceeds spending): the surplus
+// then offsets the year's tax inside grossNeed = max(0, netNeed + tax), and
+// the caller sweeps the after-tax remainder into cash.
 // Max 10 iterations; stops when tax change < $1.
 function solveGrossedUpWithdrawals({
   netNeed,
@@ -3151,6 +3195,339 @@ function runSelfTests() {
     },
   );
 
+  // --- Income surplus conservation: recurring income above spending must
+  // pay the year's tax and land in cash, never require portfolio withdrawals
+  // (regression: netNeed used to be floored at 0, which discarded the
+  // surplus AND paid the tax on that income out of savings).
+  testScenario(
+    "Income surplus: pension above spending sweeps to cash after tax",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        currentAge: 65,
+        retirementAge: 60,
+        planThroughAge: 67,
+        balanceCash: 100000,
+        balanceTaxable: 0,
+        balance401k: 0,
+        balanceTradIra: 0,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        baseExpenses: 40000,
+        healthcarePre65: 0,
+        healthcarePost65: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        ssIncome: 0,
+        pensionIncome: 100000,
+        pensionStartAge: 60,
+        pensionCola: 0,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+      });
+      const row = r.yearlyData[0];
+      // $100K pension vs $40K spending: nothing should be withdrawn; the
+      // $60K surplus pays the year's tax and the remainder is swept to cash.
+      const ok =
+        row.grossWithdrawal <= 1 &&
+        row.unmetCashFlow === 0 &&
+        row.tax > 4000 &&
+        row.surplusToCash > 35000 &&
+        row.surplusToCash < 60000 &&
+        Math.abs(row.surplusToCash - (60000 - row.tax)) <= 2;
+      return {
+        passed: ok,
+        details: `gross=${row.grossWithdrawal}, tax=${row.tax}, surplus=${row.surplusToCash}, unmet=${row.unmetCashFlow}`,
+      };
+    },
+  );
+  testScenario(
+    "Couple staggered retirement: working spouse's salary funds spending",
+    () => {
+      const person = {
+        contrib401k: 0,
+        contribMatch: 0,
+        contribHsa: 0,
+        salaryIncome: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        ssIncome: 20000,
+        ssAge: 67,
+        pensionIncome: 0,
+        balanceRoth: 0,
+        rothBasis: 0,
+        balanceHsa: 0,
+        balanceTradIra: 0,
+        healthcarePre65: 0,
+        healthcarePost65: 6000,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+      };
+      const couple = {
+        primary: {
+          ...DEFAULT_COUPLE_INPUTS.primary,
+          ...person,
+          currentAge: 60,
+          retirementAge: 60,
+          planThroughAge: 85,
+          balance401k: 600000,
+        },
+        spouse: {
+          ...DEFAULT_COUPLE_INPUTS.spouse,
+          ...person,
+          currentAge: 55,
+          retirementAge: 60,
+          planThroughAge: 85,
+          balance401k: 300000,
+          salaryIncome: 120000,
+          contrib401k: 20000,
+        },
+        shared: {
+          ...DEFAULT_COUPLE_INPUTS.shared,
+          balanceCash: 50000,
+          balanceTaxable: 500000,
+          baseExpenses: 80000,
+        },
+      };
+      const withSalary = simulateCouple(normalizeCoupleInputs(couple));
+      const row = withSalary.yearlyData[0];
+      // Year 1 is a distribution year (primary retired) with the spouse
+      // still working: $120K gross - $20K pre-tax 401k = $100K wages, which
+      // exceeds $80K spending — no portfolio withdrawal should be needed.
+      const noSalary = simulateCouple(
+        normalizeCoupleInputs({
+          ...couple,
+          spouse: { ...couple.spouse, salaryIncome: 0 },
+        }),
+      );
+      const rowNoSalary = noSalary.yearlyData[0];
+      const ok =
+        row.phase !== "accumulation" &&
+        row.wages >= 99000 &&
+        row.wages <= 101000 &&
+        row.grossWithdrawal <= 1 &&
+        row.unmetCashFlow === 0 &&
+        rowNoSalary.grossWithdrawal > 50000;
+      return {
+        passed: ok,
+        details: `wages=${row.wages}, gross=${row.grossWithdrawal}, tax=${row.tax}; without salary gross=${rowNoSalary.grossWithdrawal}`,
+      };
+    },
+  );
+
+  // --- NY tax benefit recapture (IT-201 supplemental tax, §601(d-1)).
+  // MFJ 2024, $216,050 NY income → $200K taxable (6.0% marginal bracket).
+  // NYAGI is past every phase-in, so the recapture flattens the schedule to
+  // exactly 6.0% × $200,000 = $12,000 (schedule $10,859.75 + $1,140.25).
+  test(
+    "nyStateTax: recapture flattens $200K taxable (MFJ) to 6.0% = $12,000",
+    nyStateTax(216050, 2024, 0),
+    12000,
+    (a, e) => Math.abs(a - e) <= 2,
+  );
+  // Below the $107,650 NYAGI floor the recapture must not fire at all.
+  test(
+    "nyStateTax: no recapture below $107,650 NYAGI",
+    nyStateTax(100000, 2024, 0),
+    4284.75,
+    pctEq,
+  );
+  // NY brackets are statutory and NOT indexed (indexing ended 2017): a 2050
+  // computation with 3% inflation must match 2027 exactly (same rates apply
+  // from 2027 on at this income; only the year changes).
+  test(
+    "nyStateTax: brackets not inflation-indexed (2050 == 2027 at $100K)",
+    nyStateTax(100000, 2050, 0.03),
+    nyStateTax(100000, 2027, 0.03),
+    (a, e) => Math.abs(a - e) <= 0.01,
+  );
+  // Top-rate sunset: the temporary 9.65/10.3/10.9% rates run through 2032;
+  // from 2033 income above the 6.85% bracket reverts to 8.82%. With full
+  // recapture, $10M taxable MFJ is flat 10.3% in 2032 and flat 8.82% in 2033.
+  test(
+    "nyStateTax: 2032 keeps 10.3% top rate ($10M taxable → $1.03M)",
+    nyStateTax(10016050, 2032, 0),
+    1030000,
+    (a, e) => Math.abs(a - e) <= 5,
+  );
+  test(
+    "nyStateTax: 2033 sunset reverts to 8.82% ($10M taxable → $882K)",
+    nyStateTax(10016050, 2033, 0),
+    882000,
+    (a, e) => Math.abs(a - e) <= 5,
+  );
+
+  // --- Accumulation-year taxable cash flows (regression: tax was hardcoded
+  // to zero and pre-retirement SS/pension was ignored while working).
+  testScenario(
+    "Accumulation: working 75-year-old pays tax on RMD + SS",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        filingStatus: "single",
+        householdSize: 1,
+        currentAge: 75,
+        retirementAge: 78,
+        planThroughAge: 85,
+        balanceCash: 50000,
+        balanceTaxable: 0,
+        balance401k: 500000,
+        balanceTradIra: 1000000,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        contrib401k: 10000,
+        contribMatch: 0,
+        contribHsa: 0,
+        baseExpenses: 60000,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        ssIncome: 30000,
+        ssAge: 67,
+        pensionIncome: 0,
+        rmdStartAge: 73,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+      });
+      const row = r.yearlyData[0];
+      // Age 75: IRA RMD = $1M / 24.6 = $40,650 forced from the IRA (401k is
+      // still-working exempt), SS is flowing, and the year must carry real
+      // tax. The after-tax remainder is reinvested in taxable.
+      const ok =
+        row.phase === "accumulation" &&
+        Math.abs(row.rmdAmount - 40650) <= 2 &&
+        row.fromIra >= row.rmdAmount - 1 &&
+        row.from401k === 0 &&
+        row.ss === 30000 && // claimed at FRA 67; year-0 inflation factor is 1
+        row.tax > 5000 &&
+        Math.abs(
+          row.surplusToTaxable -
+            (row.grossWithdrawal + row.ss + row.pension - row.tax),
+        ) <= 2;
+      return {
+        passed: ok,
+        details: `rmd=${row.rmdAmount}, fromIra=${row.fromIra}, ss=${row.ss}, tax=${row.tax}, reinvested=${row.surplusToTaxable}`,
+      };
+    },
+  );
+  testScenario(
+    "Couple accumulation: working spouses pay tax on forced IRA RMDs",
+    () => {
+      const person = {
+        contrib401k: 0,
+        contribMatch: 0,
+        contribHsa: 0,
+        salaryIncome: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        ssIncome: 0,
+        ssAge: 70,
+        pensionIncome: 0,
+        balanceRoth: 0,
+        rothBasis: 0,
+        balanceHsa: 0,
+        balance401k: 200000,
+        healthcarePre65: 0,
+        healthcarePost65: 6000,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+        rmdStartAge: 73,
+      };
+      const r = simulateCouple(
+        normalizeCoupleInputs({
+          primary: {
+            ...DEFAULT_COUPLE_INPUTS.primary,
+            ...person,
+            currentAge: 74,
+            retirementAge: 78,
+            planThroughAge: 85,
+            balanceTradIra: 2000000,
+          },
+          spouse: {
+            ...DEFAULT_COUPLE_INPUTS.spouse,
+            ...person,
+            currentAge: 74,
+            retirementAge: 78,
+            planThroughAge: 85,
+            balanceTradIra: 0,
+          },
+          shared: {
+            ...DEFAULT_COUPLE_INPUTS.shared,
+            balanceCash: 100000,
+            balanceTaxable: 0,
+            baseExpenses: 70000,
+          },
+        }),
+      );
+      const row = r.yearlyData[0];
+      // Age 74: primary IRA RMD = $2M / 25.5 = $78,431, forced and taxed
+      // while both spouses still work; after-tax remainder reinvested.
+      const ok =
+        row.phase === "accumulation" &&
+        Math.abs(row.rmdAmount - 78431) <= 2 &&
+        row.fromIra >= row.rmdAmount - 1 &&
+        row.tax > 1500 &&
+        row.surplusToTaxable > 0 &&
+        row.surplusToTaxable < row.rmdAmount;
+      return {
+        passed: ok,
+        details: `rmd=${row.rmdAmount}, fromIra=${row.fromIra}, tax=${row.tax}, reinvested=${row.surplusToTaxable}`,
+      };
+    },
+  );
+
+  // --- Shortfall materiality bars (regression: a $3 solver residue used to
+  // paint a $3.5M year as SHORTFALL; every flagging surface now shares
+  // these thresholds).
+  test(
+    "materialYearUnmetThreshold: floor is $100 (a $3 residue never flags)",
+    materialYearUnmetThreshold(60000),
+    100,
+    (a, e) => a === e,
+  );
+  test(
+    "materialUnmetThreshold: cumulative floor is $1,000",
+    materialUnmetThreshold(60000),
+    1000,
+    (a, e) => a === e,
+  );
+  // --- Solver-residue top-up: a comfortably funded plan must show ZERO
+  // unmet cash flow in every year — tax/IRMAA loop tolerances used to leave
+  // a few phantom dollars.
+  testScenario(
+    "Funded plan carries no phantom unmet cash flow (individual)",
+    () => {
+      const r = simulate({ ...DEFAULT_INPUTS });
+      const worst = r.yearlyData.reduce(
+        (m, d) => Math.max(m, d.unmetCashFlow || 0),
+        0,
+      );
+      return {
+        passed:
+          r.summary.totalUnmetCashFlow === 0 && worst === 0 && !r.summary.depleted,
+        details: `totalUnmet=${r.summary.totalUnmetCashFlow}, worstYear=${worst}, depleted=${r.summary.depleted}`,
+      };
+    },
+  );
+  testScenario(
+    "Funded plan carries no phantom unmet cash flow (couple)",
+    () => {
+      const r = simulateCouple(normalizeCoupleInputs(DEFAULT_COUPLE_INPUTS));
+      const worst = r.yearlyData.reduce(
+        (m, d) => Math.max(m, d.unmetCashFlow || 0),
+        0,
+      );
+      return {
+        passed:
+          r.summary.totalUnmetCashFlow === 0 && worst === 0 && !r.summary.depleted,
+        details: `totalUnmet=${r.summary.totalUnmetCashFlow}, worstYear=${worst}, depleted=${r.summary.depleted}`,
+      };
+    },
+  );
+
   const passed = results.filter((r) => r.passed).length;
   const failed = results.filter((r) => !r.passed).length;
   return { passed, failed, total: results.length, results };
@@ -3359,56 +3736,141 @@ function simulate(inputs, options = {}) {
         Math.max(0, limits.k401Total - applied401k),
       );
       const appliedHsa = Math.min(Math.max(0, contribHsa), limits.hsa);
-      // Traditional IRA RMDs are required even while still working — the
-      // still-working exception covers only the current employer's 401k.
-      // Income tax on the forced distribution is not modeled in accumulation
-      // years (salary and its taxes are out of scope); the gross amount is
-      // reinvested in the taxable account, raising its cost basis.
-      let accumIraRmd = 0;
-      if (age >= effectiveRmdStartAge && bTradIra > 0) {
-        const divisor = rmdDivisor(age);
-        if (divisor) {
-          accumIraRmd = bTradIra / divisor;
-          bTradIra -= accumIraRmd;
-        }
-      }
-      // Inherited (BCO) required distributions run even while working — the
-      // still-working exception never applies to beneficiary accounts. As
-      // with the IRA RMD above, income tax on the forced draw is out of
-      // scope in accumulation years; the gross amount is reinvested in the
-      // taxable account at full basis.
-      let accumInheritedRmd = 0;
-      if (bInherited > 0) {
-        accumInheritedRmd = Math.min(
-          bInherited,
-          inheritedRmdRequirement({
-            year,
-            age,
-            balance: bInherited,
-            ...inheritedConfig,
-          }),
-        );
-        if (accumInheritedRmd > 0) {
-          const gainPart =
-            inheritedTaxType === "nonqualified"
-              ? Math.min(
-                  accumInheritedRmd,
-                  Math.max(0, bInherited - bInheritedBasis),
-                )
-              : accumInheritedRmd;
-          bInheritedBasis = Math.max(
-            0,
-            bInheritedBasis - (accumInheritedRmd - gainPart),
-          );
-          bInherited -= accumInheritedRmd;
-        }
-      }
+      // Taxable cash flows exist BEFORE retirement too, and run through the
+      // same tax engine as retirement years:
+      //  - Traditional IRA RMDs are required even while still working (the
+      //    still-working exception covers only the current employer's 401k,
+      //    which is therefore hidden from the solver's balance view).
+      //  - Inherited (BCO) required distributions never get a still-working
+      //    exception.
+      //  - Social Security claimed before retirement and a pension that has
+      //    already commenced are real, taxable income.
+      //  - Cash/HYSA interest is ordinary income.
+      // Salary and its taxes remain out of scope, so the tax computed here
+      // is a FLOOR: in reality forced distributions stack on wages and are
+      // taxed at a higher marginal rate. The after-tax remainder of these
+      // flows is reinvested in the taxable account at full basis (no
+      // spending happens pre-retirement in this model); any tax the flows
+      // can't cover is drawn through the normal withdrawal waterfall.
+      // Previously the gross amounts were reinvested with tax hard-coded to
+      // zero and pre-retirement SS/pension was ignored entirely.
+      const accumIraRmd =
+        age >= effectiveRmdStartAge && bTradIra > 0
+          ? bTradIra / (rmdDivisor(age) || Infinity)
+          : 0;
+      const accumInheritedRmd =
+        bInherited > 0
+          ? Math.min(
+              bInherited,
+              inheritedRmdRequirement({
+                year,
+                age,
+                balance: bInherited,
+                ...inheritedConfig,
+              }),
+            )
+          : 0;
+      const accumInheritedNyExcludable =
+        bInherited > 0 && year - inheritedDeceasedBirthYear >= 60;
+      const ssGrossAccum =
+        age >= ssClaimAge
+          ? Math.round(
+              adjustedSocialSecurityBenefit(ssIncome, ssClaimAge) *
+                Math.pow(1 + inflation, year - currentYear),
+            )
+          : 0;
+      const pensionGrossAccum =
+        age >= pensionStartAge && pensionIncome > 0
+          ? Math.round(
+              pensionIncome * Math.pow(1 + pensionCola, year - currentYear),
+            )
+          : 0;
+      const accumSeniors65 =
+        age >= 65
+          ? filingStatus === "single"
+            ? 1
+            : Math.max(1, Math.min(2, householdSize))
+          : 0;
+      const solve = solveGrossedUpWithdrawals({
+        // Negative net need: SS/pension income with no modeled spending.
+        netNeed: -(ssGrossAccum + pensionGrossAccum),
+        state: {
+          bCash,
+          bTaxable: Math.max(0, bTaxable),
+          bTaxableBasis,
+          // Still-working: the current employer's 401k is RMD-exempt and
+          // not withdrawable, so the solver never sees it.
+          b401k: 0,
+          bTradIra,
+          bRoth,
+          bInherited: Math.max(0, bInherited),
+          bInheritedBasis,
+        },
+        preSs: age < ssClaimAge,
+        conversion: 0,
+        ptIncome: 0,
+        ssGross: ssGrossAccum,
+        pensionGross: pensionGrossAccum,
+        pensionNyExempt,
+        year,
+        age,
+        inflation,
+        minimumRmd: accumIraRmd,
+        penaltyFree401k: false,
+        cashPolicy: {
+          strategy: cashStrategy,
+          reserveNominal:
+            cashStrategy === "cashFirst"
+              ? 0
+              : Math.round(Math.max(0, cashReserveFloor) * inflMult),
+          allowReserve: allowReserveAsLastResort,
+        },
+        interestIncome: Math.max(0, bCash * cashReturn),
+        seniors65: accumSeniors65,
+        filingStatus,
+        rothLayers,
+        inheritedRmd: accumInheritedRmd,
+        inheritedTaxType,
+        inheritedNyExcludable: accumInheritedNyExcludable,
+      });
+      const { wCash, wTaxable, wInherited = 0, wIra, wRoth } =
+        solve.withdrawals;
+      const tax = solve.tax;
+      // Execute withdrawals exactly like a retirement year.
+      const basisReduction = Math.max(0, wTaxable - solve.realizedGain);
+      bCash = Math.max(0, bCash - wCash);
+      bTaxable = Math.max(0, bTaxable - wTaxable);
+      bTaxableBasis = Math.max(0, bTaxableBasis - basisReduction);
+      bTradIra = Math.max(0, bTradIra - wIra);
+      consumeRothLayers(wRoth, rothLayers);
+      bRoth = Math.max(0, bRoth - wRoth);
+      bInherited = Math.max(0, bInherited - wInherited);
+      bInheritedBasis = Math.max(
+        0,
+        bInheritedBasis -
+          Math.max(0, wInherited - (solve.inheritedTaxable || 0)),
+      );
+      // After-tax remainder of forced distributions + SS/pension income is
+      // reinvested in the taxable account at full basis.
+      const grossWithdrawal = wCash + wTaxable + wInherited + wIra + wRoth;
+      const accumSurplus = Math.max(
+        0,
+        grossWithdrawal + ssGrossAccum + pensionGrossAccum - tax,
+      );
+      const accumUnmet = Math.max(
+        0,
+        tax - ssGrossAccum - pensionGrossAccum - grossWithdrawal,
+      );
+      totalUnmetCashFlow += accumUnmet;
+      bTaxable += accumSurplus;
+      bTaxableBasis += accumSurplus;
+      totalTaxesPaid += tax;
+      // magiByYear deliberately NOT recorded for accumulation years: this
+      // MAGI excludes salary, so letting IRMAA's 2-year lookback see it
+      // would understate surcharges worse than the same-year fallback does.
+
       b401k = b401k * (1 + marketReturn) + applied401k + appliedMatch;
-      bTaxable =
-        bTaxable * (1 + taxableReturn(marketReturn)) +
-        accumIraRmd +
-        accumInheritedRmd;
-      bTaxableBasis += accumIraRmd + accumInheritedRmd;
+      bTaxable = bTaxable * (1 + taxableReturn(marketReturn));
       bTradIra = bTradIra * (1 + marketReturn);
       bRoth = bRoth * (1 + marketReturn);
       bHsa = bHsa * (1 + marketReturn) + appliedHsa;
@@ -3425,18 +3887,18 @@ function simulate(inputs, options = {}) {
         phase: "accumulation",
         spending: 0,
         partTime: 0,
-        ss: 0,
-        pension: 0,
+        ss: ssGrossAccum,
+        pension: pensionGrossAccum,
         netNeed: 0,
-        grossWithdrawal: 0,
-        fromCash: 0,
-        fromTaxable: 0,
+        grossWithdrawal: Math.round(grossWithdrawal),
+        fromCash: Math.round(wCash),
+        fromTaxable: Math.round(wTaxable),
         from401k: 0,
-        fromIra: 0,
-        fromRoth: 0,
-        fromInherited: Math.round(accumInheritedRmd),
+        fromIra: Math.round(wIra),
+        fromRoth: Math.round(wRoth),
+        fromInherited: Math.round(wInherited),
         conversion: 0,
-        tax: 0,
+        tax,
         strategy: "Accumulating",
         cash: Math.round(bCash),
         taxable: Math.round(bTaxable),
@@ -3448,18 +3910,20 @@ function simulate(inputs, options = {}) {
         total: Math.round(total),
         rmdAmount: Math.round(accumIraRmd),
         inheritedRmdAmount: Math.round(accumInheritedRmd),
-        realizedGain: 0,
-        taxableSs: 0,
-        magi: 0,
+        realizedGain: Math.round(solve.realizedGain),
+        taxableSs: Math.round(solve.taxableSs),
+        magi: Math.round(solve.ordIncome + solve.realizedGain),
         taxableBasisEnd: Math.round(bTaxableBasis),
         irmaaSurcharge: 0,
         irmaaTriggered: false,
         acaSubsidy: 0,
         hsaWithdrawal: 0,
-        earlyPenalty: 0,
+        earlyPenalty: solve.earlyPenalty,
         cashFloor: 0,
-        reserveUsed: 0,
-        unmetCashFlow: Math.round(unpaidDebt),
+        reserveUsed: Math.round(solve.withdrawals.reserveUsed || 0),
+        unmetCashFlow: Math.round(unpaidDebt + accumUnmet),
+        // After-tax forced-flow remainder reinvested into Taxable (not Cash).
+        surplusToTaxable: Math.round(accumSurplus),
         contribution401kApplied: Math.round(applied401k),
         contributionMatchApplied: Math.round(appliedMatch),
         contributionHsaApplied: Math.round(appliedHsa),
@@ -3632,10 +4096,14 @@ function simulate(inputs, options = {}) {
       const healthcarePortion = Math.max(0, effectiveSpending - lifestyleSpending);
       const hsaOffset = Math.min(bHsa, healthcarePortion);
 
-      const netNeed = Math.max(
-        0,
-        effectiveSpending - hsaOffset - ptIncome - ssGross - pensionGross,
-      );
+      // Signed net cash flow: negative when recurring income (pension, SS,
+      // part-time) exceeds spending. The solver floors the actual withdrawal
+      // at zero, so a surplus first absorbs the year's tax and the after-tax
+      // remainder is swept to cash below. Flooring HERE (the old behavior)
+      // discarded the surplus entirely and paid the tax on that income out of
+      // savings — an income-rich retiree's cash balance shrank every year.
+      const netNeed =
+        effectiveSpending - hsaOffset - ptIncome - ssGross - pensionGross;
 
       solve = solveGrossedUpWithdrawals({
         netNeed,
@@ -3725,10 +4193,10 @@ function simulate(inputs, options = {}) {
         bHsa,
         Math.max(0, finalSpending - lifestyleSpending),
       );
-      const netNeedAca = Math.max(
-        0,
-        finalSpending - hsaWithdrawal - ptIncome - ssGross - pensionGross,
-      );
+      // Signed, matching the main solve above: surplus income may exceed the
+      // subsidized spending level too.
+      const netNeedAca =
+        finalSpending - hsaWithdrawal - ptIncome - ssGross - pensionGross;
       solve = solveGrossedUpWithdrawals({
         netNeed: netNeedAca,
         state,
@@ -3761,12 +4229,49 @@ function simulate(inputs, options = {}) {
     // Update displayed spending to include IRMAA (shows true economic cost)
     spending = finalSpending;
 
-    const { wCash, wTaxable, wInherited = 0, w401k, wIra, wRoth } =
+    let { wCash, wTaxable, wInherited = 0, w401k, wIra, wRoth } =
       solve.withdrawals;
     const tax = solve.tax;
     const realizedGain = solve.realizedGain;
     const taxableSs = solve.taxableSs;
     const inheritedTaxable = solve.inheritedTaxable || 0;
+
+    // Solver-residue top-up: the tax loop (±$1 tolerance), the IRMAA outer
+    // loop (±$10 tolerance), and integer rounding can leave a few dollars of
+    // "unfunded" need even when balances are ample — which used to flag a
+    // multi-million-dollar year as a SHORTFALL over $3. Fund residues up to
+    // $50 with one extra waterfall pass against the remaining balances (the
+    // un-grossed tax and basis drift on amounts this small are pennies).
+    // Larger gaps are genuine shortfalls and stay visible.
+    const netNeedFinal =
+      finalSpending - hsaWithdrawal - ptIncome - ssGross - pensionGross;
+    const solverResidue =
+      netNeedFinal +
+      tax -
+      (wCash + wTaxable + wInherited + w401k + wIra + wRoth);
+    if (solverResidue > 0 && solverResidue <= 50) {
+      const topUp = doWithdrawalWaterfall(
+        solverResidue,
+        {
+          bCash: Math.max(0, state.bCash - wCash),
+          bTaxable: Math.max(0, state.bTaxable - wTaxable),
+          bTaxableBasis,
+          b401k: Math.max(0, state.b401k - w401k),
+          bTradIra: Math.max(0, state.bTradIra - wIra),
+          bRoth: Math.max(0, state.bRoth - wRoth),
+          bInherited: Math.max(0, (state.bInherited || 0) - wInherited),
+          bInheritedBasis,
+        },
+        preSs,
+        cashPolicy,
+      );
+      wCash += topUp.wCash;
+      wTaxable += topUp.wTaxable;
+      wInherited += topUp.wInherited;
+      w401k += topUp.w401k;
+      wIra += topUp.wIra;
+      wRoth += topUp.wRoth;
+    }
 
     // Apply realized gain to basis tracking BEFORE executing withdrawal
     const basisReduction = Math.max(0, wTaxable - realizedGain);
@@ -3790,11 +4295,10 @@ function simulate(inputs, options = {}) {
       bInheritedBasis - Math.max(0, wInherited - inheritedTaxable),
     );
 
-    // Any RMD surplus beyond net need + tax goes to cash (reinvested in HYSA-equivalent)
-    const netNeedFinal = Math.max(
-      0,
-      finalSpending - hsaWithdrawal - ptIncome - ssGross - pensionGross,
-    );
+    // Anything received or withdrawn beyond spending + tax goes to cash
+    // (reinvested in HYSA-equivalent): forced RMD/SEPP/inherited draws above
+    // the need, AND after-tax recurring-income surplus (netNeedFinal < 0;
+    // netNeedFinal is signed and computed above the residue top-up).
     const surplusFromRmd = Math.max(
       0,
       (wCash + wTaxable + wInherited + w401k + wIra + wRoth) -
@@ -3934,12 +4438,10 @@ function simulate(inputs, options = {}) {
           : 1; // Avoid divide-by-zero
 
   // Cumulative unmet cash flow marks the plan depleted only when it clears
-  // the same materiality bar the banner uses (hasMaterialUnmetCashFlow):
-  // max($1,000, 0.5% of year-1 spending). Includes any unpayable time-zero debt.
+  // the same materiality bar the banner uses (materialUnmetThreshold).
+  // Includes any unpayable time-zero debt.
   const year1SpendingForThreshold = year1Data ? year1Data.spending : 0;
-  if (
-    totalUnmetCashFlow > Math.max(1000, year1SpendingForThreshold * 0.005)
-  ) {
+  if (totalUnmetCashFlow > materialUnmetThreshold(year1SpendingForThreshold)) {
     depleted = true;
   }
 
@@ -4189,8 +4691,14 @@ function solveCoupleGrossedUpWithdrawals({
     const totalConversions = conversions.primary + conversions.spouse;
     const pensionGross = incomes.primaryPension + incomes.spousePension;
     const partTimeGross = incomes.primaryPartTime + incomes.spousePartTime;
+    // Working-spouse wages during staggered retirement, already net of that
+    // spouse's pre-tax 401k/HSA contributions. Taxed as ordinary income and
+    // counted in provisional income and MAGI, like part-time income.
+    const wageGross =
+      (incomes.primaryWage || 0) + (incomes.spouseWage || 0);
     const ssGross = incomes.primarySs + incomes.spouseSs;
     const incomeBeforeSs =
+      wageGross +
       partTimeGross +
       pensionGross +
       interestIncome +
@@ -4199,6 +4707,7 @@ function solveCoupleGrossedUpWithdrawals({
       taxableRealizedGain;
     taxableSs = taxableSocialSecurity(ssGross, incomeBeforeSs);
     ordIncome =
+      wageGross +
       partTimeGross +
       taxableSs +
       pensionGross +
@@ -4458,21 +4967,132 @@ function simulateCouple(coupleInputs, options = {}) {
       : Math.min(Math.max(0, spouse.contribHsa), remainingHsaLimit);
 
     if (!householdRetired) {
-      // Traditional IRA RMDs are required even while still working — the
-      // still-working exception covers only the current employer's 401k.
-      // Tax on the forced distribution is not modeled in accumulation years
-      // (salary taxes are out of scope); gross amount moves to taxable.
-      let accumIraRmd = 0;
-      const takeAccumRmd = (state, age, rmdStartAge) => {
-        if (age < rmdStartAge || state.bTradIra <= 0) return 0;
-        const divisor = rmdDivisor(age);
-        if (!divisor) return 0;
-        const rmd = state.bTradIra / divisor;
-        state.bTradIra -= rmd;
-        return rmd;
-      };
-      accumIraRmd += takeAccumRmd(primaryState, primaryAge, primary.rmdStartAge);
-      accumIraRmd += takeAccumRmd(spouseState, spouseAge, spouse.rmdStartAge);
+      // Same treatment as the individual engine: forced IRA RMDs, SS already
+      // claimed, and commenced pensions are run through the real tax engine
+      // even while both spouses work; the after-tax remainder is reinvested
+      // in taxable. Salaries stay out of scope during joint working years,
+      // so this tax is a floor. Each spouse's current-employer 401k is
+      // hidden from the solver (still-working RMD exception; also not
+      // withdrawable while employed).
+      const primaryAccumRmd =
+        primaryAge >= primary.rmdStartAge && primaryState.bTradIra > 0
+          ? primaryState.bTradIra / (rmdDivisor(primaryAge) || Infinity)
+          : 0;
+      const spouseAccumRmd =
+        spouseAge >= spouse.rmdStartAge && spouseState.bTradIra > 0
+          ? spouseState.bTradIra / (rmdDivisor(spouseAge) || Infinity)
+          : 0;
+      const ssPrimaryAccum =
+        primaryAge >= effectiveSsClaimAge(primary.ssAge)
+          ? Math.round(
+              adjustedSocialSecurityBenefit(primary.ssIncome, primary.ssAge) *
+                Math.pow(1 + shared.inflation, year - currentYear),
+            )
+          : 0;
+      const ssSpouseAccum =
+        spouseAge >= effectiveSsClaimAge(spouse.ssAge)
+          ? Math.round(
+              adjustedSocialSecurityBenefit(spouse.ssIncome, spouse.ssAge) *
+                Math.pow(1 + shared.inflation, year - currentYear),
+            )
+          : 0;
+      const pensionPrimaryAccum =
+        primaryAge >= primary.pensionStartAge && primary.pensionIncome > 0
+          ? Math.round(
+              primary.pensionIncome *
+                Math.pow(1 + primary.pensionCola, year - currentYear),
+            )
+          : 0;
+      const pensionSpouseAccum =
+        spouseAge >= spouse.pensionStartAge && spouse.pensionIncome > 0
+          ? Math.round(
+              spouse.pensionIncome *
+                Math.pow(1 + spouse.pensionCola, year - currentYear),
+            )
+          : 0;
+      const accumIncome =
+        ssPrimaryAccum + ssSpouseAccum + pensionPrimaryAccum + pensionSpouseAccum;
+      const solve = solveCoupleGrossedUpWithdrawals({
+        // Negative net need: passive income with no modeled spending.
+        netNeed: -accumIncome,
+        state: {
+          cash,
+          taxable,
+          taxableBasis,
+          primary401k: 0,
+          spouse401k: 0,
+          primaryTradIra: primaryState.bTradIra,
+          spouseTradIra: spouseState.bTradIra,
+          primaryRoth: primaryState.bRoth,
+          spouseRoth: spouseState.bRoth,
+        },
+        preHouseholdSs: ssPrimaryAccum + ssSpouseAccum <= 0,
+        conversions: { primary: 0, spouse: 0 },
+        rmds: { primary: primaryAccumRmd, spouse: spouseAccumRmd },
+        incomes: {
+          primaryWage: 0,
+          spouseWage: 0,
+          primaryPartTime: 0,
+          spousePartTime: 0,
+          primarySs: ssPrimaryAccum,
+          spouseSs: ssSpouseAccum,
+          primaryPension: pensionPrimaryAccum,
+          spousePension: pensionSpouseAccum,
+          primaryPensionNyExempt: primary.pensionNyExempt,
+          spousePensionNyExempt: spouse.pensionNyExempt,
+        },
+        year,
+        ages: { primary: primaryAge, spouse: spouseAge },
+        inflation: shared.inflation,
+        penaltyFree401k: {
+          primary: primary.retirementAge >= 55,
+          spouse: spouse.retirementAge >= 55,
+        },
+        cashPolicy: {
+          strategy: shared.cashStrategy || "cashFirst",
+          reserveNominal:
+            (shared.cashStrategy || "cashFirst") === "cashFirst"
+              ? 0
+              : Math.round(
+                  Math.max(0, shared.cashReserveFloor || 0) * inflMult,
+                ),
+          allowReserve: !!shared.allowReserveAsLastResort,
+        },
+        rothLayers: coupleRothLayers,
+        interestIncome: Math.max(0, cash * shared.cashReturn),
+      });
+      const w = solve.withdrawals;
+      const tax = solve.tax;
+      const basisReduction = Math.max(0, w.taxable - solve.realizedGain);
+      cash = Math.max(0, cash - w.cash);
+      taxable = Math.max(0, taxable - w.taxable);
+      taxableBasis = Math.max(0, taxableBasis - basisReduction);
+      primaryState.bTradIra = Math.max(0, primaryState.bTradIra - w.primaryIra);
+      spouseState.bTradIra = Math.max(0, spouseState.bTradIra - w.spouseIra);
+      consumeRothLayers(w.primaryRoth, coupleRothLayers.primary);
+      consumeRothLayers(w.spouseRoth, coupleRothLayers.spouse);
+      primaryState.bRoth = Math.max(0, primaryState.bRoth - w.primaryRoth);
+      spouseState.bRoth = Math.max(0, spouseState.bRoth - w.spouseRoth);
+      const grossWithdrawal =
+        w.cash +
+        w.taxable +
+        w.primary401k +
+        w.spouse401k +
+        w.primaryIra +
+        w.spouseIra +
+        w.primaryRoth +
+        w.spouseRoth;
+      // After-tax remainder of forced distributions + SS/pension income is
+      // reinvested in the taxable account at full basis.
+      const accumSurplus = Math.max(0, grossWithdrawal + accumIncome - tax);
+      const accumUnmet = Math.max(0, tax - accumIncome - grossWithdrawal);
+      totalUnmetCashFlow += accumUnmet;
+      taxable += accumSurplus;
+      taxableBasis += accumSurplus;
+      totalTaxesPaid += tax;
+      // coupleMagiByYear deliberately not recorded: this MAGI excludes
+      // salary, so IRMAA's lookback would understate surcharges (see the
+      // individual engine note).
 
       primaryState.b401k =
         primaryState.b401k * (1 + marketReturn) +
@@ -4489,8 +5109,7 @@ function simulateCouple(coupleInputs, options = {}) {
       primaryState.bHsa = primaryState.bHsa * (1 + marketReturn) + primaryHsaApplied;
       spouseState.bHsa = spouseState.bHsa * (1 + marketReturn) + spouseHsaApplied;
       cash *= 1 + shared.cashReturn;
-      taxable = taxable * (1 + taxableReturn(marketReturn)) + accumIraRmd;
-      taxableBasis += accumIraRmd;
+      taxable = taxable * (1 + taxableReturn(marketReturn));
 
       const total = totalAssets();
       priorPriorYearEndTotal = priorYearEndTotal;
@@ -4502,19 +5121,20 @@ function simulateCouple(coupleInputs, options = {}) {
         spouseAge,
         phase: "accumulation",
         spending: 0,
+        wages: 0,
         partTime: 0,
-        ss: 0,
-        pension: 0,
+        ss: ssPrimaryAccum + ssSpouseAccum,
+        pension: pensionPrimaryAccum + pensionSpouseAccum,
         netNeed: 0,
-        grossWithdrawal: 0,
-        fromCash: 0,
-        fromTaxable: 0,
+        grossWithdrawal: Math.round(grossWithdrawal),
+        fromCash: Math.round(w.cash),
+        fromTaxable: Math.round(w.taxable),
         from401k: 0,
-        fromIra: 0,
-        fromRoth: 0,
+        fromIra: Math.round(w.primaryIra + w.spouseIra),
+        fromRoth: Math.round(w.primaryRoth + w.spouseRoth),
         hsaWithdrawal: 0,
         conversion: 0,
-        tax: 0,
+        tax,
         strategy: "Accumulating",
         cash: Math.round(cash),
         taxable: Math.round(taxable),
@@ -4523,30 +5143,38 @@ function simulateCouple(coupleInputs, options = {}) {
         roth: Math.round(primaryState.bRoth + spouseState.bRoth),
         hsa: Math.round(primaryState.bHsa + spouseState.bHsa),
         total: Math.round(total),
-        rmdAmount: Math.round(accumIraRmd),
-        realizedGain: 0,
-        taxableSs: 0,
-        magi: 0,
+        rmdAmount: Math.round(primaryAccumRmd + spouseAccumRmd),
+        realizedGain: Math.round(solve.realizedGain),
+        taxableSs: Math.round(solve.taxableSs),
+        magi: Math.round(solve.ordIncome + solve.realizedGain),
         taxableBasisEnd: Math.round(taxableBasis),
         irmaaSurcharge: 0,
         irmaaTriggered: false,
         acaSubsidy: 0,
-        earlyPenalty: 0,
+        earlyPenalty: solve.earlyPenalty,
         cashFloor: 0,
-        reserveUsed: 0,
-        unmetCashFlow: Math.round(unpaidDebt),
+        reserveUsed: Math.round(w.reserveUsed || 0),
+        unmetCashFlow: Math.round(unpaidDebt + accumUnmet),
+        // After-tax forced-flow remainder reinvested into Taxable (not Cash).
+        surplusToTaxable: Math.round(accumSurplus),
         ownerDetails: {
           primary: {
             name: primary.name,
             employerPlanLabel: primary.employerPlanLabel || "401k",
             contribution401kApplied: Math.round(primary401kApplied),
             contributionHsaApplied: Math.round(primaryHsaApplied),
+            rmdAmount: Math.round(primaryAccumRmd),
+            ss: ssPrimaryAccum,
+            pension: pensionPrimaryAccum,
           },
           spouse: {
             name: spouse.name,
             employerPlanLabel: spouse.employerPlanLabel || "403b",
             contribution401kApplied: Math.round(spouse401kApplied),
             contributionHsaApplied: Math.round(spouseHsaApplied),
+            rmdAmount: Math.round(spouseAccumRmd),
+            ss: ssSpouseAccum,
+            pension: pensionSpouseAccum,
           },
         },
       });
@@ -4603,6 +5231,31 @@ function simulateCouple(coupleInputs, options = {}) {
               Math.pow(1 + spouse.pensionCola, year - currentYear),
           )
         : 0;
+    // Staggered retirement: a spouse who has not yet retired keeps earning
+    // while the household is already in distribution mode. Gross salary is
+    // entered in today's dollars and inflates with household inflation;
+    // pre-tax 401k/HSA contributions (credited to balances below) reduce both
+    // take-home cash and taxable wages, so a single net figure serves as
+    // spendable income AND ordinary income in the solver. FICA payroll tax is
+    // not modeled. Without this income the engine used to fund full household
+    // spending from the portfolio while still crediting the working spouse's
+    // contributions — money conservation was violated in both directions.
+    const primaryWage = !primaryRetired
+      ? Math.max(
+          0,
+          Math.round((primary.salaryIncome || 0) * inflMult) -
+            primary401kApplied -
+            primaryHsaApplied,
+        )
+      : 0;
+    const spouseWage = !spouseRetired
+      ? Math.max(
+          0,
+          Math.round((spouse.salaryIncome || 0) * inflMult) -
+            spouse401kApplied -
+            spouseHsaApplied,
+        )
+      : 0;
 
     // RMDs use start-of-year balances, which equal the prior December 31
     // balances now that growth is applied once at the end of each year.
@@ -4649,6 +5302,8 @@ function simulateCouple(coupleInputs, options = {}) {
     let hsaWithdrawal = hsaAllocation.total;
 
     const incomeTotal =
+      primaryWage +
+      spouseWage +
       primaryPartTime +
       spousePartTime +
       primarySs +
@@ -4677,7 +5332,10 @@ function simulateCouple(coupleInputs, options = {}) {
     // then cleared so it applies only once.
     const debtPayoffGainThisYear = pendingDebtPayoffGain;
     pendingDebtPayoffGain = 0;
-    let netNeed = Math.max(0, spending - hsaWithdrawal - incomeTotal);
+    // Signed net cash flow (see the individual engine): negative when
+    // recurring household income exceeds spending. The solver floors the
+    // withdrawal at zero; the after-tax surplus is swept to shared cash below.
+    let netNeed = spending - hsaWithdrawal - incomeTotal;
     let solve = solveCoupleGrossedUpWithdrawals({
       netNeed,
       state: {
@@ -4695,6 +5353,8 @@ function simulateCouple(coupleInputs, options = {}) {
       conversions: { primary: primaryConversion, spouse: spouseConversion },
       rmds: { primary: primaryRmd, spouse: spouseRmd },
       incomes: {
+        primaryWage,
+        spouseWage,
         primaryPartTime,
         spousePartTime,
         primarySs,
@@ -4736,7 +5396,7 @@ function simulateCouple(coupleInputs, options = {}) {
       totalPrimaryHsaWithdrawal = hsaAllocation.primary;
       totalSpouseHsaWithdrawal = hsaAllocation.spouse;
       hsaWithdrawal = hsaAllocation.total;
-      netNeed = Math.max(0, spending - hsaWithdrawal - incomeTotal);
+      netNeed = spending - hsaWithdrawal - incomeTotal;
       solve = solveCoupleGrossedUpWithdrawals({
         netNeed,
         state: {
@@ -4754,6 +5414,8 @@ function simulateCouple(coupleInputs, options = {}) {
         conversions: { primary: primaryConversion, spouse: spouseConversion },
         rmds: { primary: primaryRmd, spouse: spouseRmd },
         incomes: {
+          primaryWage,
+          spouseWage,
           primaryPartTime,
           spousePartTime,
           primarySs,
@@ -4806,7 +5468,7 @@ function simulateCouple(coupleInputs, options = {}) {
         totalPrimaryHsaWithdrawal = hsaAllocation.primary;
         totalSpouseHsaWithdrawal = hsaAllocation.spouse;
         hsaWithdrawal = hsaAllocation.total;
-        netNeed = Math.max(0, spending - hsaWithdrawal - incomeTotal);
+        netNeed = spending - hsaWithdrawal - incomeTotal;
         solve = solveCoupleGrossedUpWithdrawals({
           netNeed,
           state: {
@@ -4824,6 +5486,8 @@ function simulateCouple(coupleInputs, options = {}) {
           conversions: { primary: primaryConversion, spouse: spouseConversion },
           rmds: { primary: primaryRmd, spouse: spouseRmd },
           incomes: {
+            primaryWage,
+            spouseWage,
             primaryPartTime,
             spousePartTime,
             primarySs,
@@ -4849,6 +5513,63 @@ function simulateCouple(coupleInputs, options = {}) {
     const { withdrawals } = solve;
     const tax = solve.tax;
     const realizedGain = solve.realizedGain;
+    // Solver-residue top-up (see the individual engine): the tax/IRMAA loop
+    // tolerances and rounding can leave a few dollars unfunded in years with
+    // ample balances. Fund residues up to $50 through one extra waterfall
+    // pass so funded years never read as shortfalls; larger gaps are real.
+    const solverResidue =
+      netNeed +
+      tax -
+      (withdrawals.cash +
+        withdrawals.taxable +
+        withdrawals.primary401k +
+        withdrawals.spouse401k +
+        withdrawals.primaryIra +
+        withdrawals.spouseIra +
+        withdrawals.primaryRoth +
+        withdrawals.spouseRoth);
+    if (solverResidue > 0 && solverResidue <= 50) {
+      const topUp = doCoupleWithdrawalWaterfall(
+        solverResidue,
+        {
+          cash: Math.max(0, cash - withdrawals.cash),
+          taxable: Math.max(0, taxable - withdrawals.taxable),
+          taxableBasis,
+          primary401k: Math.max(
+            0,
+            primaryState.b401k - primaryConversion - withdrawals.primary401k,
+          ),
+          spouse401k: Math.max(
+            0,
+            spouseState.b401k - spouseConversion - withdrawals.spouse401k,
+          ),
+          primaryTradIra: Math.max(
+            0,
+            primaryState.bTradIra - withdrawals.primaryIra,
+          ),
+          spouseTradIra: Math.max(
+            0,
+            spouseState.bTradIra - withdrawals.spouseIra,
+          ),
+          primaryRoth: Math.max(
+            0,
+            primaryState.bRoth - withdrawals.primaryRoth,
+          ),
+          spouseRoth: Math.max(0, spouseState.bRoth - withdrawals.spouseRoth),
+        },
+        primarySs + spouseSs <= 0,
+        { primary: 0, spouse: 0 },
+        coupleCashPolicy,
+      );
+      withdrawals.cash += topUp.cash;
+      withdrawals.taxable += topUp.taxable;
+      withdrawals.primary401k += topUp.primary401k;
+      withdrawals.spouse401k += topUp.spouse401k;
+      withdrawals.primaryIra += topUp.primaryIra;
+      withdrawals.spouseIra += topUp.spouseIra;
+      withdrawals.primaryRoth += topUp.primaryRoth;
+      withdrawals.spouseRoth += topUp.spouseRoth;
+    }
     const basisReduction = Math.max(0, withdrawals.taxable - realizedGain);
 
     cash = Math.max(0, cash - withdrawals.cash);
@@ -4890,6 +5611,8 @@ function simulateCouple(coupleInputs, options = {}) {
       withdrawals.spouseIra +
       withdrawals.primaryRoth +
       withdrawals.spouseRoth;
+    // Forced draws above the need AND after-tax recurring-income surplus
+    // (netNeed < 0) both land in shared cash — matches the individual engine.
     const surplusFromRmd = Math.max(0, grossWithdrawal - (netNeed + tax));
     if (surplusFromRmd > 0) cash += surplusFromRmd;
     const unmetCashFlow = Math.max(0, netNeed + tax - grossWithdrawal);
@@ -4934,6 +5657,7 @@ function simulateCouple(coupleInputs, options = {}) {
       spouseAge,
       phase,
       spending,
+      wages: primaryWage + spouseWage,
       partTime: primaryPartTime + spousePartTime,
       ss: primarySs + spouseSs,
       pension: primaryPension + spousePension,
@@ -4983,6 +5707,7 @@ function simulateCouple(coupleInputs, options = {}) {
           ss: primarySs,
           pension: primaryPension,
           partTime: primaryPartTime,
+          wages: primaryWage,
         },
         spouse: {
           name: spouse.name,
@@ -4996,6 +5721,7 @@ function simulateCouple(coupleInputs, options = {}) {
           ss: spouseSs,
           pension: spousePension,
           partTime: spousePartTime,
+          wages: spouseWage,
         },
       },
     });
@@ -5017,10 +5743,10 @@ function simulateCouple(coupleInputs, options = {}) {
         ? retirementData.total
         : 1;
 
-  // Cumulative unmet cash flow marks the plan depleted only when it clears the
-  // banner's materiality bar: max($1,000, 0.5% of year-1 spending).
+  // Cumulative unmet cash flow marks the plan depleted only when it clears
+  // the banner's materiality bar (materialUnmetThreshold).
   const coupleYear1Spending = retirementData ? retirementData.spending : 0;
-  if (totalUnmetCashFlow > Math.max(1000, coupleYear1Spending * 0.005)) {
+  if (totalUnmetCashFlow > materialUnmetThreshold(coupleYear1Spending)) {
     depleted = true;
   }
 
@@ -5791,6 +6517,7 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
       {
         title: `${title} Income`,
         rows: [
+          ["Annual Salary (Gross)", fmtMoney(person.salaryIncome || 0)],
           ["Part-Time Income / Year", fmtMoney(person.partTimeIncome)],
           ["Years of Part-Time Work", fmtNum(person.partTimeYears)],
           ["Social Security at FRA / Year", fmtMoney(person.ssIncome)],
@@ -7299,6 +8026,11 @@ const DEFAULT_COUPLE_INPUTS = {
     contrib401k: DEFAULT_INPUTS.contrib401k,
     contribMatch: DEFAULT_INPUTS.contribMatch,
     contribHsa: DEFAULT_INPUTS.contribHsa,
+    // Gross annual salary (today's dollars) while this spouse still works.
+    // Only used in projection years AFTER the other spouse has retired
+    // (staggered retirement): it funds household spending and is taxed as
+    // ordinary income. Joint working years remain out of scope.
+    salaryIncome: 0,
     partTimeIncome: DEFAULT_INPUTS.partTimeIncome,
     partTimeYears: DEFAULT_INPUTS.partTimeYears,
     ssIncome: DEFAULT_INPUTS.ssIncome,
@@ -7328,6 +8060,7 @@ const DEFAULT_COUPLE_INPUTS = {
     contrib401k: 0,
     contribMatch: 0,
     contribHsa: 0,
+    salaryIncome: 0,
     partTimeIncome: 0,
     partTimeYears: 0,
     ssIncome: 0,
@@ -8093,6 +8826,7 @@ function buildChatProfile(inputs, results) {
       phase: row.phase,
       spending: row.spending,
       tax: row.tax,
+      wages: row.wages || 0,
       partTime: row.partTime,
       socialSecurity: row.ss,
       pension: row.pension || 0,
@@ -8160,9 +8894,8 @@ function simulateWithReturns(inputs, yearlyReturns) {
   // summary.depleted alone is too sensitive: sub-dollar rounding friction in
   // the iterative solver can set it on plans that end with millions intact,
   // which silently tanked couple-mode success rates.
-  const materialThreshold = Math.max(
-    100,
-    (result.summary.year1Spending || 0) * 0.001,
+  const materialThreshold = materialYearUnmetThreshold(
+    result.summary.year1Spending,
   );
   // Any distribution-phase year counts; keying off the primary's age missed
   // early household-retirement years in couple mode when the spouse retired first.
@@ -8549,9 +9282,26 @@ function safeWithdrawalGuideline(retirementYears) {
   return 0.04;
 }
 
+// Materiality bars for unmet cash flow, shared by EVERY surface that flags
+// shortfalls (plan banner, depleted flag, Monte Carlo failure counting, the
+// year-table SHORTFALL badge) so they can never disagree. The iterative
+// tax/IRMAA solvers can leave a few dollars of rounding residue even in
+// fully funded years (also smoothed by the engines' residue top-up); only
+// treat unmet need as real once it clears these bars.
+function materialUnmetThreshold(year1Spending) {
+  // Cumulative whole-plan bar: max($1,000, 0.5% of year-1 spending).
+  return Math.max(1000, (year1Spending || 0) * 0.005);
+}
+function materialYearUnmetThreshold(year1Spending) {
+  // Single-year bar, tighter: max($100, 0.1% of year-1 spending) — one
+  // genuinely unfunded year matters even when the cumulative total is small.
+  return Math.max(100, (year1Spending || 0) * 0.001);
+}
+
 function hasMaterialUnmetCashFlow(summary) {
-  const threshold = Math.max(1000, summary.year1Spending * 0.005);
-  return summary.totalUnmetCashFlow > threshold;
+  return (
+    summary.totalUnmetCashFlow > materialUnmetThreshold(summary.year1Spending)
+  );
 }
 
 // Scan the projection for the first year the plan cannot fund itself and
@@ -8560,8 +9310,11 @@ function hasMaterialUnmetCashFlow(summary) {
 function computeShortfallInfo(results) {
   const s = results.summary;
   const rows = results.yearlyData.filter((d) => d.phase !== "accumulation");
+  // Per-year materiality: sub-$100 solver residue must not become "the first
+  // year your plan can't fund itself" in the banner.
+  const yearBar = materialYearUnmetThreshold(s.year1Spending);
   const shortfallRows = rows.filter(
-    (d) => (d.unmetCashFlow || 0) > 1 || d.total <= 0,
+    (d) => (d.unmetCashFlow || 0) > yearBar || d.total <= 0,
   );
   const first = shortfallRows[0] || null;
   const lastRow = rows[rows.length - 1] || null;
@@ -8732,6 +9485,7 @@ function scaleOwnerDetails(ownerDetails, factor) {
     "ss",
     "pension",
     "partTime",
+    "wages",
     "contribution401kApplied",
     "contributionHsaApplied",
   ];
@@ -8843,6 +9597,14 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
         onChange={onChange("contribHsa")}
         prefix="$"
         step={500}
+      />
+      <NumberInput
+        label="Annual Salary (Gross)"
+        value={person.salaryIncome || 0}
+        onChange={onChange("salaryIncome")}
+        prefix="$"
+        step={1000}
+        hint="Only matters with staggered retirements: after the other spouse retires, this salary (net of pre-tax contributions) funds household spending and is taxed. Joint working years stay out of scope."
       />
       <NumberInput
         label="Part-Time Income / Year"
@@ -9332,12 +10094,13 @@ function CoupleInputs({ couple, updateCouple, penaltyImpact = null }) {
           and separate spouse timelines, accounts, Social Security, RMDs, and
           Roth conversions. Survivor modeling is not included in v1.
           <span className="mt-1 block">
-            <span className="font-semibold">Heads up:</span> while one spouse
-            still works, their paycheck is assumed to cover{" "}
-            <em>their own contributions only</em> — all household spending is
-            drawn from savings once the first spouse retires. If the working
-            spouse's income actually covers the bills, this plan is more
-            pessimistic than reality.
+            <span className="font-semibold">Heads up:</span> with staggered
+            retirements, enter the still-working spouse's{" "}
+            <em>Annual Salary (Gross)</em> in their section. After the first
+            spouse retires, that salary (net of pre-tax contributions) funds
+            household spending and is taxed; any after-tax surplus is saved to
+            cash. If it's left at $0, all household spending is drawn from
+            savings — more pessimistic than reality.
           </span>
         </div>
         <NumberInput
@@ -9464,6 +10227,32 @@ function CoupleInputs({ couple, updateCouple, penaltyImpact = null }) {
           </label>
         </div>
       </Section>
+      {(() => {
+        // Staggered retirement: the household starts drawing down when the
+        // FIRST spouse retires. If the other spouse keeps working but has no
+        // salary entered, the projection funds full household spending from
+        // the portfolio while still crediting that spouse's contributions.
+        const primaryYears = primary.retirementAge - primary.currentAge;
+        const spouseYears = spouse.retirementAge - spouse.currentAge;
+        if (primaryYears === spouseYears) return null;
+        const later = primaryYears > spouseYears ? primary : spouse;
+        const laterLabel =
+          (later === primary ? primary.name : spouse.name) ||
+          (later === primary ? "Primary" : "Spouse");
+        if ((later.salaryIncome || 0) > 0) return null;
+        const gap = Math.abs(primaryYears - spouseYears);
+        return (
+          <div className="mb-3 p-2 bg-amber-50 border border-amber-300 rounded text-xs text-amber-900">
+            <strong>⚠ Staggered retirement:</strong> {laterLabel} keeps
+            working for {gap} more year{gap === 1 ? "" : "s"} after the
+            household starts drawing down, but their Annual Salary (Gross) is
+            $0. Those years will pull full household spending from the
+            portfolio as if that paycheck didn't exist. Enter {laterLabel}
+            's gross salary in their section below so it funds spending and is
+            taxed while they still work.
+          </div>
+        );
+      })()}
       <CouplePersonInputs
         title="Primary"
         person={primary}
@@ -9766,6 +10555,7 @@ export default function RetirementPlanner() {
     return {
       ...row,
       spending: row.spending * factor,
+      wages: (row.wages || 0) * factor,
       partTime: row.partTime * factor,
       ss: row.ss * factor,
       pension: (row.pension || 0) * factor,
@@ -9793,6 +10583,7 @@ export default function RetirementPlanner() {
       inheritedRmdAmount: (row.inheritedRmdAmount || 0) * factor,
       inheritedTaxable: (row.inheritedTaxable || 0) * factor,
       surplusToCash: (row.surplusToCash || 0) * factor,
+      surplusToTaxable: (row.surplusToTaxable || 0) * factor,
       realizedGain: (row.realizedGain || 0) * factor,
       taxableSs: (row.taxableSs || 0) * factor,
       magi: (row.magi || 0) * factor,
@@ -11633,8 +12424,14 @@ export default function RetirementPlanner() {
                       const spouseOwner = d.ownerDetails?.spouse || {};
                       const primaryPlanLabel = primaryOwner.employerPlanLabel || "401k";
                       const spousePlanLabel = spouseOwner.employerPlanLabel || "403b";
+                      // Same per-year materiality bar as the banner and Monte
+                      // Carlo: a few dollars of solver rounding residue must
+                      // not paint a funded year as a SHORTFALL.
                       const isShortfallYear =
-                        (rawRow.unmetCashFlow || 0) > 1 || rawRow.total <= 0;
+                        (rawRow.unmetCashFlow || 0) >
+                          materialYearUnmetThreshold(
+                            results.summary.year1Spending,
+                          ) || rawRow.total <= 0;
                       return (
                         <Fragment key={d.year}>
                         <tr
