@@ -211,6 +211,36 @@ function effectiveSsClaimAge(ssAge) {
   return Math.min(SS_MAX_CREDIT_AGE, Math.max(SS_MIN_CLAIM_AGE, ssAge));
 }
 
+// Employee-side FICA on covered wages (IRS Pub 15). OASDI is 6.2% up to the
+// wage base ($184,500 for 2026, announced Oct 2025); Medicare is 1.45% on
+// all covered wages. The wage base is indexed to national wage growth,
+// approximated here by the plan's inflation input. Pre-tax 401(k) deferrals
+// remain FICA-taxable; §125 payroll HSA contributions are FICA-exempt, so
+// callers pass wages net of payroll HSA. The 0.9% Additional Medicare Tax
+// ($250K MFJ threshold, not indexed) is layered on by the couple engine
+// across combined household wages, not here.
+const SS_WAGE_BASE_2026 = 184500;
+function employeeFica(coveredWages, year, inflation = 0.03) {
+  if (coveredWages <= 0) return 0;
+  const wageBase =
+    SS_WAGE_BASE_2026 * Math.pow(1 + inflation, Math.max(0, year - 2026));
+  return 0.062 * Math.min(coveredWages, wageBase) + 0.0145 * coveredWages;
+}
+
+// SSA Full Retirement Age by birth year: 66 for 1943-1954, then +2 months
+// per year through 1959, and 67 for 1960+. Cohorts before 1943 (FRA 65-65+
+// months) are all past 70 in any current projection, so 66 is a safe floor.
+function fullRetirementAgeForBirthYear(birthYear) {
+  if (birthYear >= 1960) return 67;
+  if (birthYear >= 1955) return 66 + (birthYear - 1954) * (2 / 12);
+  return 66;
+}
+
+// Claim-age adjustment per SSA rules. Delayed retirement credits accrue at
+// 2/3 of 1% per month (8%/yr for 1943+ cohorts) for EVERY month between FRA
+// and 70 — there is no 36-month cap (that limit belongs only to the early-
+// claim reduction formula below). FRA-66 claiming at 70 gets 48 months =
+// +32%, not +24% as the old capped formula produced.
 function adjustedSocialSecurityBenefit(fraBenefit, claimAge, fullRetirementAge = 67) {
   const effectiveClaimAge = Math.min(
     SS_MAX_CREDIT_AGE,
@@ -219,7 +249,7 @@ function adjustedSocialSecurityBenefit(fraBenefit, claimAge, fullRetirementAge =
   const months = Math.round((effectiveClaimAge - fullRetirementAge) * 12);
   if (months === 0) return fraBenefit;
   if (months > 0) {
-    return fraBenefit * (1 + Math.min(months, 36) * (0.08 / 12));
+    return fraBenefit * (1 + months * (0.08 / 12));
   }
   const earlyMonths = Math.abs(months);
   const first36Reduction = Math.min(earlyMonths, 36) * (5 / 9 / 100);
@@ -461,6 +491,9 @@ function seppAmortizedPayment(balance, rate, startAge) {
 
 // IRS Uniform Lifetime Table divisor for RMD calculation (2022+ revised table)
 // RMD = prior year-end balance / divisor
+// Ages are rounded to the statutory whole-year lookup (matching
+// singleLifeDivisor): a fractional input like 74.5 used to miss the table
+// and fall through to the 120+ divisor of 2.0 — a 50% forced RMD.
 function rmdDivisor(age) {
   const table = {
     72: 27.4, 73: 26.5, 74: 25.5, 75: 24.6, 76: 23.7, 77: 22.9,
@@ -473,8 +506,9 @@ function rmdDivisor(age) {
     113: 3.1, 114: 3.0, 115: 2.9, 116: 2.8, 117: 2.7, 118: 2.5,
     119: 2.3, 120: 2.0,
   };
-  if (table[age] != null) return table[age];
-  if (age < 72) return null;
+  const a = Math.round(age);
+  if (table[a] != null) return table[a];
+  if (a < 72) return null;
   return 2.0;
 }
 
@@ -537,13 +571,31 @@ function inheritedRmdRequirement({
   return divisor > 1 ? balance / divisor : balance;
 }
 
-// 2025 Federal Poverty Level (lower 48), projected by inflation.
-// $15,650 for the first person + $5,500 for each additional person
-// (HHS/ASPE guidelines, Jan 2025 — the guideline set that governs 2026 ACA
-// eligibility). Future years approximate the annual HHS update by inflation.
-function federalPovertyLevel(householdSize, year, inflation = 0.03) {
-  const base2025 = 15650 + 5500 * Math.max(0, Math.max(1, householdSize) - 1);
-  return base2025 * Math.pow(1 + inflation, year - 2025);
+// Federal Poverty Guidelines (lower 48) by PUBLICATION year (HHS/ASPE,
+// published each January). ACA premium-tax-credit eligibility for coverage
+// year Y is keyed to the guidelines published in year Y-1 — e.g. 2026
+// coverage uses the Jan-2025 set ($15,650), 2027 coverage uses the Jan-2026
+// set ($15,960). The old formula projected the base into the COVERAGE year,
+// running one year ahead and overstating every FPL denominator.
+const FPL_GUIDELINES = {
+  2024: { first: 15060, additional: 5380 },
+  2025: { first: 15650, additional: 5500 },
+  2026: { first: 15960, additional: 5680 },
+};
+const FPL_LAST_KNOWN_YEAR = 2026;
+const FPL_FIRST_KNOWN_YEAR = 2024;
+function federalPovertyLevel(householdSize, coverageYear, inflation = 0.03) {
+  const guidelineYear = coverageYear - 1;
+  const clampedYear = Math.min(
+    FPL_LAST_KNOWN_YEAR,
+    Math.max(FPL_FIRST_KNOWN_YEAR, guidelineYear),
+  );
+  const g = FPL_GUIDELINES[clampedYear];
+  const base =
+    g.first + g.additional * Math.max(0, Math.max(1, householdSize) - 1);
+  // Outside the known table, approximate the annual HHS update by inflation
+  // (guidelines are actually CPI-U-based; the input rate is a fair proxy).
+  return base * Math.pow(1 + inflation, guidelineYear - clampedYear);
 }
 
 // Simplified ACA premium subsidy estimation (post-IRA 2022 rules, extended through 2025)
@@ -554,6 +606,11 @@ function estimateAcaHealthcareCost(baseHealthcareCost, magi, householdSize, year
   if (baseHealthcareCost <= 0) return 0;
   const fpl = federalPovertyLevel(householdSize, year, inflation);
   const fplRatio = magi / fpl;
+  // §36B statutory floor: household income below 100% FPL is not
+  // PTC-eligible (limited immigrant exceptions aside — those would be
+  // Medicaid-gap situations this model can't price). The old code granted
+  // near-full subsidies at any income above zero.
+  if (fplRatio < 1.0) return baseHealthcareCost;
   let expectedPct;
   if (year <= 2025) {
     // Enhanced credits suspended the 400% FPL cliff through 2025.
@@ -598,6 +655,10 @@ function totalTax(
   nyPensionAnnuityExclusion = 0,
   seniors65 = 0,
   filingStatus = "mfj",
+  // Taxable interest (already inside ordinaryIncome/MAGI) that also belongs
+  // in the §1411 net-investment-income base. NIIT applies to interest,
+  // dividends, and gains — not just the LTCG the old code counted.
+  investmentInterest = 0,
 ) {
   const statusParams =
     FILING_STATUS_PARAMS[filingStatus] || FILING_STATUS_PARAMS.mfj;
@@ -633,12 +694,14 @@ function totalTax(
     inflation,
     filingStatus,
   );
-  // NIIT: 3.8% on investment income above $250K MFJ / $200K single MAGI
-  // (thresholds not indexed by statute)
+  // NIIT (§1411): 3.8% on the lesser of net investment income (LTCG + cash
+  // interest here) or MAGI above $250K MFJ / $200K single (thresholds not
+  // indexed by statute).
   const niitThreshold = statusParams.niitThreshold;
+  const netInvestmentIncome = Math.max(0, ltcg) + Math.max(0, investmentInterest);
   const niit =
     magi > niitThreshold
-      ? Math.min(ltcg, magi - niitThreshold) * 0.038
+      ? Math.min(netInvestmentIncome, magi - niitThreshold) * 0.038
       : 0;
   const nyOrdinary = Math.max(
     0,
@@ -659,8 +722,23 @@ function totalTax(
 // principal FIFO (each conversion penalty-free once 5 tax years old), then
 // earnings. The engine tracks user-entered contribution basis plus every
 // conversion vintage it creates, so Roth conversion ladders price correctly.
-// Simplification: early *earnings* withdrawals are penalized but their income
-// tax is not modeled (they occur only when a plan is already collapsing).
+// Early *earnings* withdrawals are penalized AND taxed as ordinary income
+// (rothTaxableEarnings); they occur only when a plan is already collapsing,
+// since Roth sits last in every withdrawal order.
+// Earnings slice of a Roth withdrawal under the §408A(d)(4) ordering rules:
+// whatever remains after contribution basis and every conversion vintage is
+// exhausted. Before 59½ this slice is ordinary income in addition to the
+// 10% penalty (the annual model treats 59½+ as qualified, ignoring the
+// 5-year clock on earnings for late-opened accounts). Callers without layer
+// data get 0 — the legacy no-income-tax treatment.
+function rothTaxableEarnings(wRoth, layers) {
+  if (!layers || wRoth <= 0) return 0;
+  const nonEarnings =
+    Math.max(0, layers.contribBasis) +
+    layers.vintages.reduce((sum, v) => sum + Math.max(0, v.amount), 0);
+  return Math.max(0, wRoth - nonEarnings);
+}
+
 function rothEarlyPenaltyBase(wRoth, layers, currentYear) {
   if (!layers) return wRoth;
   let remaining = wRoth;
@@ -912,10 +990,14 @@ function solveGrossedUpWithdrawals({
     // Gain taxed this year = withdrawal gain + any caller-supplied extra gain
     // (debt-payoff sale). Basis for the extra gain is already handled upstream.
     const taxableRealizedGain = realizedGain + Math.max(0, additionalRealizedGain);
+    // Pre-59½ Roth earnings draws are ordinary income (and penalized below).
+    const earlyRothEarnings =
+      age < 59.5 ? rothTaxableEarnings(withdrawals.wRoth, rothLayers) : 0;
     const incomeBeforeSs =
       ptIncome +
       pensionGross +
       interestIncome +
+      earlyRothEarnings +
       withdrawals.w401k +
       withdrawals.wIra +
       inheritedTaxable +
@@ -927,6 +1009,7 @@ function solveGrossedUpWithdrawals({
       taxableSs +
       pensionGross +
       interestIncome +
+      earlyRothEarnings +
       withdrawals.w401k +
       withdrawals.wIra +
       inheritedTaxable +
@@ -990,6 +1073,7 @@ function solveGrossedUpWithdrawals({
         nyPensionAnnuityExclusion,
         seniors65,
         filingStatus,
+        interestIncome,
       ) + earlyPenalty;
     if (Math.abs(newTax - tax) < 1) {
       tax = newTax;
@@ -1251,25 +1335,33 @@ function runSelfTests() {
     1,
   );
 
-  // --- FPL projection (2025 HHS guidelines base: $15,650 + $5,500/person)
+  // --- FPL coverage-year clock: PTC eligibility for coverage year Y uses
+  // the guidelines PUBLISHED in Y-1 (regression: the old formula projected
+  // into the coverage year, running one year ahead — 2027 used $16,603
+  // instead of the published $15,960).
   test(
-    "federalPovertyLevel: household of 2 in 2025 = $21,150",
-    federalPovertyLevel(2, 2025, 0.03),
-    21150,
-    pctEq,
-  );
-  test(
-    "federalPovertyLevel: household of 2 in 2035 with 3% inflation",
-    federalPovertyLevel(2, 2035, 0.03),
-    21150 * Math.pow(1.03, 10),
-    pctEq,
-  );
-  // Household of 1 must use the 1-person FPL ($15,650 in 2025), not the
-  // 2-person figure — regression test for the ACA over-subsidy bug.
-  test(
-    "federalPovertyLevel: household of 1 in 2025 = $15,650",
-    federalPovertyLevel(1, 2025, 0.03),
+    "federalPovertyLevel: 2026 coverage uses Jan-2025 guidelines ($15,650)",
+    federalPovertyLevel(1, 2026, 0.03),
     15650,
+    (a, e) => Math.abs(a - e) <= 1,
+  );
+  test(
+    "federalPovertyLevel: 2027 coverage uses Jan-2026 guidelines ($15,960)",
+    federalPovertyLevel(1, 2027, 0.03),
+    15960,
+    (a, e) => Math.abs(a - e) <= 1,
+  );
+  test(
+    "federalPovertyLevel: household of 2, 2025 coverage = $20,440 (Jan-2024)",
+    federalPovertyLevel(2, 2025, 0.03),
+    20440,
+    (a, e) => Math.abs(a - e) <= 1,
+  );
+  // Beyond the known tables, guidelines project by inflation from Jan-2026.
+  test(
+    "federalPovertyLevel: household of 2 in 2035 projects Jan-2026 base",
+    federalPovertyLevel(2, 2035, 0.03),
+    (15960 + 5680) * Math.pow(1.03, 8),
     pctEq,
   );
 
@@ -1849,7 +1941,13 @@ function runSelfTests() {
       const applied =
         (row.ownerDetails.primary.contributionHsaApplied || 0) +
         (row.ownerDetails.spouse.contributionHsaApplied || 0);
-      const limit = getCoupleHsaLimit(56, 55, year, couple.shared.inflation, couple.shared.householdSize);
+      const limit = getCoupleHsaLimit(
+        56,
+        55,
+        year,
+        couple.shared.inflation,
+        couple.shared.householdSize,
+      ).total;
       return {
         passed: applied <= limit,
         details: `applied=${Math.round(applied)}, limit=${Math.round(limit)}`,
@@ -3294,8 +3392,10 @@ function runSelfTests() {
       const withSalary = simulateCouple(normalizeCoupleInputs(couple));
       const row = withSalary.yearlyData[0];
       // Year 1 is a distribution year (primary retired) with the spouse
-      // still working: $120K gross - $20K pre-tax 401k = $100K wages, which
-      // exceeds $80K spending — no portfolio withdrawal should be needed.
+      // still working: $120K gross - $20K pre-tax 401k = $100K taxable
+      // wages, minus employee FICA (6.2% + 1.45% on $120K = $9,180) =
+      // $90,820 spendable — comfortably above $80K spending, so only a
+      // small withdrawal (income tax gross-up) is needed.
       const noSalary = simulateCouple(
         normalizeCoupleInputs({
           ...couple,
@@ -3305,14 +3405,15 @@ function runSelfTests() {
       const rowNoSalary = noSalary.yearlyData[0];
       const ok =
         row.phase !== "accumulation" &&
-        row.wages >= 99000 &&
-        row.wages <= 101000 &&
-        row.grossWithdrawal <= 1 &&
+        row.wages >= 90500 &&
+        row.wages <= 91200 &&
+        Math.abs(row.ficaTax - 9180) <= 5 &&
+        row.grossWithdrawal < 6000 &&
         row.unmetCashFlow === 0 &&
         rowNoSalary.grossWithdrawal > 50000;
       return {
         passed: ok,
-        details: `wages=${row.wages}, gross=${row.grossWithdrawal}, tax=${row.tax}; without salary gross=${rowNoSalary.grossWithdrawal}`,
+        details: `wages=${row.wages}, fica=${row.ficaTax}, gross=${row.grossWithdrawal}, tax=${row.tax}; without salary gross=${rowNoSalary.grossWithdrawal}`,
       };
     },
   );
@@ -3400,7 +3501,9 @@ function runSelfTests() {
         Math.abs(row.rmdAmount - 40650) <= 2 &&
         row.fromIra >= row.rmdAmount - 1 &&
         row.from401k === 0 &&
-        row.ss === 30000 && // claimed at FRA 67; year-0 inflation factor is 1
+        // Born 1951 → FRA 66; claiming at 67 = 12 months of delayed
+        // credits (+8%): 30,000 × 1.08 = 32,400 (year-0 inflation = 1).
+        row.ss === 32400 &&
         row.tax > 5000 &&
         Math.abs(
           row.surplusToTaxable -
@@ -3528,6 +3631,568 @@ function runSelfTests() {
     },
   );
 
+  // --- Employee FICA (Pub 15): 6.2% OASDI to the wage base + 1.45% Medicare.
+  test(
+    "employeeFica: $120K wages in 2026 = $9,180",
+    employeeFica(120000, 2026, 0.03),
+    9180,
+    (a, e) => Math.abs(a - e) <= 1,
+  );
+  // Above the 2026 wage base ($184,500): OASDI caps at $11,439.
+  test(
+    "employeeFica: $300K wages in 2026 = $15,789 (OASDI capped)",
+    employeeFica(300000, 2026, 0.03),
+    15789,
+    (a, e) => Math.abs(a - e) <= 1,
+  );
+
+  // --- Staggered-retirement funding caps (regression: contributions with no
+  // salary used to be credited from nowhere — $20K appeared per probe year).
+  const staggeredBase = {
+    contrib401k: 0,
+    contribMatch: 0,
+    contribHsa: 0,
+    salaryIncome: 0,
+    partTimeIncome: 0,
+    partTimeYears: 0,
+    ssIncome: 0,
+    ssAge: 70,
+    pensionIncome: 0,
+    balanceRoth: 0,
+    rothBasis: 0,
+    balanceHsa: 0,
+    balance401k: 0,
+    balanceTradIra: 0,
+    healthcarePre65: 0,
+    healthcarePost65: 0,
+    conversionBridge: 0,
+    conversionMid: 0,
+    conversionFinal: 0,
+    rmdStartAge: 73,
+  };
+  const makeStaggeredCouple = (spouseOverrides, sharedOverrides = {}) =>
+    normalizeCoupleInputs({
+      primary: {
+        ...DEFAULT_COUPLE_INPUTS.primary,
+        ...staggeredBase,
+        currentAge: 60,
+        retirementAge: 60,
+        planThroughAge: 85,
+      },
+      spouse: {
+        ...DEFAULT_COUPLE_INPUTS.spouse,
+        ...staggeredBase,
+        currentAge: 55,
+        retirementAge: 60,
+        planThroughAge: 85,
+        ...spouseOverrides,
+      },
+      shared: {
+        ...DEFAULT_COUPLE_INPUTS.shared,
+        balanceCash: 100000,
+        balanceTaxable: 600000,
+        baseExpenses: 60000,
+        ...sharedOverrides,
+      },
+    });
+  testScenario(
+    "Staggered $0 salary: working spouse's contributions stop (no free money)",
+    () => {
+      const r = simulateCouple(
+        makeStaggeredCouple({ contrib401k: 20000, contribHsa: 4000 }),
+      );
+      const row = r.yearlyData[0];
+      const so = row.ownerDetails?.spouse || {};
+      const ok =
+        row.phase !== "accumulation" &&
+        so.contribution401kApplied === 0 &&
+        so.contributionHsaApplied === 0 &&
+        row.wages === 0;
+      return {
+        passed: ok,
+        details: `401kApplied=${so.contribution401kApplied}, hsaApplied=${so.contributionHsaApplied}, wages=${row.wages}`,
+      };
+    },
+  );
+  testScenario(
+    "Staggered $10K salary caps $38K of contributions at compensation",
+    () => {
+      // $10K salary, $30K 401k + $8K HSA requested: HSA funds first ($8K,
+      // FICA-exempt), FICA on the $2K remainder (~$153), then the deferral
+      // gets what's left (~$1,847). Total credited stays within pay.
+      const r = simulateCouple(
+        makeStaggeredCouple({
+          salaryIncome: 10000,
+          contrib401k: 30000,
+          contribHsa: 8000,
+        }),
+      );
+      const row = r.yearlyData[0];
+      const so = row.ownerDetails?.spouse || {};
+      const funded =
+        (so.contribution401kApplied || 0) + (so.contributionHsaApplied || 0);
+      const ok =
+        so.contributionHsaApplied === 8000 &&
+        funded >= 9800 &&
+        funded <= 10000 &&
+        row.wages === 0;
+      return {
+        passed: ok,
+        details: `401kApplied=${so.contribution401kApplied}, hsaApplied=${so.contributionHsaApplied}, funded=${funded}, wages=${row.wages}, fica=${row.ficaTax}`,
+      };
+    },
+  );
+  testScenario(
+    "Still-working spouse's 401k is shielded from RMDs and withdrawals",
+    () => {
+      // Spouse is 75 and still working with a $1M current-employer 401k and
+      // a $246K IRA: only the IRA is RMD-subject ($246,000 / 24.6 = $10,000)
+      // and the 401k must never be drawn while they work.
+      const r = simulateCouple(
+        makeStaggeredCouple(
+          {
+            currentAge: 75,
+            retirementAge: 78,
+            planThroughAge: 85,
+            balance401k: 1000000,
+            balanceTradIra: 246000,
+            salaryIncome: 150000,
+            contrib401k: 10000,
+          },
+          { baseExpenses: 90000 },
+        ),
+      );
+      const row = r.yearlyData[0];
+      const so = row.ownerDetails?.spouse || {};
+      const ok =
+        row.phase !== "accumulation" &&
+        Math.abs(row.rmdAmount - 10000) <= 2 &&
+        (so.from401k || 0) === 0 &&
+        row.from401k === 0 &&
+        Math.abs(row.ficaTax - 11475) <= 5 &&
+        row.unmetCashFlow === 0;
+      return {
+        passed: ok,
+        details: `rmd=${row.rmdAmount}, spouseFrom401k=${so.from401k}, from401k=${row.from401k}, fica=${row.ficaTax}, unmet=${row.unmetCashFlow}`,
+      };
+    },
+  );
+
+  // --- Salary stacking in accumulation years (regression: forced flows
+  // were taxed from the bottom brackets even when the user earns a salary,
+  // understating the incremental tax by ~$12K/yr in the audit probe).
+  testScenario(
+    "Accumulation salary stacking: RMD+SS taxed on top of $100K wages",
+    () => {
+      const base = {
+        ...baseInputs,
+        filingStatus: "single",
+        householdSize: 1,
+        currentAge: 75,
+        retirementAge: 78,
+        planThroughAge: 85,
+        balanceCash: 50000,
+        balanceTaxable: 0,
+        balance401k: 500000,
+        balanceTradIra: 1000000,
+        balanceRoth: 0,
+        balanceHsa: 0,
+        contrib401k: 10000,
+        contribMatch: 0,
+        contribHsa: 0,
+        baseExpenses: 60000,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        ssIncome: 30000,
+        ssAge: 67,
+        pensionIncome: 0,
+        rmdStartAge: 73,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+      };
+      const noSalary = simulate({ ...base, salaryIncome: 0 });
+      const withSalary = simulate({ ...base, salaryIncome: 100000 });
+      const row0 = noSalary.yearlyData[0];
+      const row1 = withSalary.yearlyData[0];
+      // Salary-only baseline is subtracted, so the year's charged tax is the
+      // INCREMENT attributable to the RMD + SS + interest stacking on
+      // $90K taxable wages ($100K - $10K 401k) — roughly $18K vs ~$5.5K
+      // from the bottom brackets. Reinvestment identity must still hold.
+      const identityGap = Math.abs(
+        row1.surplusToTaxable -
+          (row1.grossWithdrawal + row1.ss + row1.pension - row1.tax),
+      );
+      const ok =
+        row1.phase === "accumulation" &&
+        row1.tax > row0.tax + 9000 &&
+        row1.tax >= 15000 &&
+        row1.tax <= 21000 &&
+        row1.magi > 150000 &&
+        row1.taxableSs >= 25000 &&
+        identityGap <= 2 &&
+        row1.surplusToTaxable < row0.surplusToTaxable;
+      return {
+        passed: ok,
+        details: `tax noSalary=${row0.tax}, withSalary=${row1.tax}, magi=${row1.magi}, taxableSs=${row1.taxableSs}, reinvested ${row0.surplusToTaxable}→${row1.surplusToTaxable}`,
+      };
+    },
+  );
+  testScenario(
+    "Couple accumulation salary stacking raises the RMD's incremental tax",
+    () => {
+      const person = {
+        contrib401k: 0,
+        contribMatch: 0,
+        contribHsa: 0,
+        salaryIncome: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        ssIncome: 0,
+        ssAge: 70,
+        pensionIncome: 0,
+        balanceRoth: 0,
+        rothBasis: 0,
+        balanceHsa: 0,
+        balance401k: 200000,
+        healthcarePre65: 0,
+        healthcarePost65: 6000,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+        rmdStartAge: 73,
+      };
+      const couple = (primarySalary) =>
+        normalizeCoupleInputs({
+          primary: {
+            ...DEFAULT_COUPLE_INPUTS.primary,
+            ...person,
+            currentAge: 74,
+            retirementAge: 78,
+            planThroughAge: 85,
+            balanceTradIra: 2000000,
+            salaryIncome: primarySalary,
+          },
+          spouse: {
+            ...DEFAULT_COUPLE_INPUTS.spouse,
+            ...person,
+            currentAge: 74,
+            retirementAge: 78,
+            planThroughAge: 85,
+            balanceTradIra: 0,
+          },
+          shared: {
+            ...DEFAULT_COUPLE_INPUTS.shared,
+            balanceCash: 100000,
+            balanceTaxable: 0,
+            baseExpenses: 70000,
+          },
+        });
+      const row0 = simulateCouple(couple(0)).yearlyData[0];
+      const row1 = simulateCouple(couple(150000)).yearlyData[0];
+      // Same $78,431 RMD, but stacked on $150K MFJ wages it lands in the
+      // 22% federal bracket with NY recapture territory instead of being
+      // absorbed by deductions and the bottom brackets.
+      const ok =
+        row1.phase === "accumulation" &&
+        Math.abs(row1.rmdAmount - 78431) <= 2 &&
+        row1.tax > row0.tax + 8000 &&
+        row1.magi > 220000 &&
+        row1.surplusToTaxable < row0.surplusToTaxable;
+      return {
+        passed: ok,
+        details: `tax noSalary=${row0.tax}, withSalary=${row1.tax}, magi=${row1.magi}, reinvested ${row0.surplusToTaxable}→${row1.surplusToTaxable}`,
+      };
+    },
+  );
+
+  // ============================================================
+  // ROUND-3 / MODERATE-FIX REGRESSION TESTS
+  // ============================================================
+
+  // --- NIIT includes taxable interest in the §1411 base (not just LTCG).
+  // MFJ, $260K ordinary (incl. $40K interest), no gains: excess MAGI $10K →
+  // NIIT = 3.8% × min($40K NII, $10K) = $380 more than with $0 interest in
+  // the NII base at identical MAGI.
+  test(
+    "NIIT: cash interest enters the investment-income base (+$380)",
+    totalTax(260000, 0, 2026, 0, 0.03, 0, 0, 0, "mfj", 40000) -
+      totalTax(260000, 0, 2026, 0, 0.03, 0, 0, 0, "mfj", 0),
+    380,
+    (a, e) => Math.abs(a - e) <= 1,
+  );
+  // --- FRA from birth year; delayed credits uncapped (8%/yr FRA→70).
+  test(
+    "fullRetirementAgeForBirthYear: 1957 cohort = 66.5",
+    fullRetirementAgeForBirthYear(1957),
+    66.5,
+    (a, e) => Math.abs(a - e) < 0.001,
+  );
+  test(
+    "SS delayed credits: FRA 66 claiming at 70 = +32% (48 months, no cap)",
+    adjustedSocialSecurityBenefit(30000, 70, 66),
+    39600,
+    (a, e) => Math.abs(a - e) <= 1,
+  );
+  // --- Fractional ages round to the statutory whole-year lookup.
+  test(
+    "rmdDivisor(74.5) rounds to the age-75 divisor (24.6), not the 2.0 trap",
+    rmdDivisor(74.5),
+    24.6,
+    (a, e) => Math.abs(a - e) < 0.01,
+  );
+  // --- ACA: statutory 100%-FPL eligibility floor (no PTC below it).
+  test(
+    "ACA: below 100% FPL = no subsidy (full sticker)",
+    estimateAcaHealthcareCost(30000, 12000, 1, 2027, 0.03),
+    30000,
+    (a, e) => Math.abs(a - e) <= 1,
+  );
+  // --- Pension commencement timing: today's dollars inflate at GENERAL
+  // inflation to the start year, then the pension COLA takes over.
+  testScenario(
+    "Pension deferred 10 years prices at inflation-to-start, COLA after",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        currentAge: 50,
+        retirementAge: 60,
+        planThroughAge: 70,
+        pensionIncome: 30000,
+        pensionStartAge: 60,
+        pensionCola: 0.02,
+        ssIncome: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+      });
+      const atStart = r.yearlyData.find((d) => d.age === 60);
+      const nextYear = r.yearlyData.find((d) => d.age === 61);
+      // 30,000 × 1.03^10 = 40,317 at commencement; ×1.02 the next year.
+      const ok =
+        Math.abs(atStart.pension - 40317) <= 5 &&
+        Math.abs(nextYear.pension - Math.round(40317 * 1.02)) <= 10;
+      return {
+        passed: ok,
+        details: `age60=${atStart.pension} (want ~40,317), age61=${nextYear.pension}`,
+      };
+    },
+  );
+  // --- Flexible spending cuts lifestyle only; the HSA-covered healthcare
+  // block is untouched, so the portfolio draw actually falls.
+  testScenario(
+    "Flex cut reduces portfolio need; HSA healthcare offset is preserved",
+    () => {
+      const r = simulate(
+        {
+          ...baseInputs,
+          currentAge: 66,
+          retirementAge: 60,
+          planThroughAge: 75,
+          balanceCash: 0,
+          balanceTaxable: 2000000,
+          balance401k: 0,
+          balanceTradIra: 0,
+          balanceRoth: 0,
+          balanceHsa: 300000,
+          baseExpenses: 50000,
+          healthcarePost65: 20000,
+          healthcarePre65: 0,
+          partTimeIncome: 0,
+          partTimeYears: 0,
+          ssIncome: 0,
+          conversionBridge: 0,
+          conversionMid: 0,
+          conversionFinal: 0,
+        },
+        // Already retired 6 years: the returns array is indexed from the
+        // retirement year, so year 0 of this projection reads index 6.
+        {
+          yearlyReturns: [0, 0, 0, 0, 0, 0, -0.3, 0, 0, 0],
+          useFlexibleSpending: true,
+        },
+      );
+      const row0 = r.yearlyData[0];
+      const row1 = r.yearlyData[1];
+      // Year 2 (after the -30% year): lifestyle cut 10%, healthcare intact.
+      const lifestyle1 = Math.round(50000 * 1.03);
+      const hc1 = Math.round(20000 * 1.03);
+      const ok =
+        Math.abs(row1.spending - (lifestyle1 - Math.round(lifestyle1 * 0.1) + hc1)) <= 3 &&
+        Math.abs(row1.hsaWithdrawal - hc1) <= 3 &&
+        row1.netNeed < row0.netNeed;
+      return {
+        passed: ok,
+        details: `spending=${row1.spending}, hsa=${row1.hsaWithdrawal} (want ~${hc1}), netNeed ${row0.netNeed}→${row1.netNeed}`,
+      };
+    },
+  );
+  // --- Input sanitation: catastrophic domains are clamped at the engine.
+  testScenario(
+    "Sanitation: return below -100% and basis% above 100% are clamped",
+    () => {
+      const r = simulate({
+        ...baseInputs,
+        currentAge: 65,
+        retirementAge: 60,
+        planThroughAge: 75,
+        postReturn: -1.5,
+        taxableBasisPct: 1.7,
+        ssIncome: 0,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+      });
+      const row0 = r.yearlyData[0];
+      // Basis% 1.7 clamps to 100%: starting basis can never exceed the
+      // $200K starting balance (it MAY exceed market value after the -99%
+      // year — that's a legitimate unrealized loss, not a bug).
+      const ok =
+        Number.isFinite(r.summary.portfolioAtEnd) &&
+        r.summary.portfolioAtEnd >= 0 &&
+        row0.taxableBasisEnd <= 200000 + 1;
+      return {
+        passed: ok,
+        details: `end=${r.summary.portfolioAtEnd}, basisEnd=${row0.taxableBasisEnd} (start balance 200K)`,
+      };
+    },
+  );
+  // --- HSA catch-ups are per-owner: one spouse cannot absorb the other's.
+  testScenario(
+    "Couple HSA: primary capped at family pool + OWN catch-up only",
+    () => {
+      const r = simulateCouple(
+        normalizeCoupleInputs({
+          primary: {
+            ...DEFAULT_COUPLE_INPUTS.primary,
+            currentAge: 60,
+            retirementAge: 65,
+            contribHsa: 12000,
+          },
+          spouse: {
+            ...DEFAULT_COUPLE_INPUTS.spouse,
+            currentAge: 55,
+            retirementAge: 65,
+            contribHsa: 10000,
+          },
+        }),
+      );
+      const row = r.yearlyData[0];
+      const p = row.ownerDetails.primary.contributionHsaApplied;
+      const s = row.ownerDetails.spouse.contributionHsaApplied;
+      // 2026: family $8,750 + own $1,000 catch-up = $9,750 max for primary;
+      // spouse then gets any family remainder + their own $1,000.
+      const ok = p === 9750 && s === 1000;
+      return {
+        passed: ok,
+        details: `primary=${p} (want 9750), spouse=${s} (want 1000)`,
+      };
+    },
+  );
+  // --- Early Roth earnings draws are ordinary income, not just penalized.
+  testScenario(
+    "Early Roth earnings are income-taxed (basis-only draws are not)",
+    () => {
+      const base = {
+        ...baseInputs,
+        currentAge: 50,
+        retirementAge: 45,
+        planThroughAge: 53,
+        balanceCash: 0,
+        balanceTaxable: 0,
+        balance401k: 0,
+        balanceTradIra: 0,
+        balanceRoth: 300000,
+        balanceHsa: 0,
+        baseExpenses: 40000,
+        healthcarePre65: 0,
+        healthcarePost65: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        ssIncome: 0,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+        useSepp: false,
+      };
+      const allEarnings = simulate({ ...base, rothBasis: 0 });
+      const allBasis = simulate({ ...base, rothBasis: 300000 });
+      const rowE = allEarnings.yearlyData[0];
+      const rowB = allBasis.yearlyData[0];
+      // Basis draws: no tax, no penalty. Earnings draws: 10% penalty AND
+      // ordinary income tax on the withdrawal.
+      const ok =
+        rowB.tax <= 1 &&
+        rowE.earlyPenalty > 3000 &&
+        rowE.tax > rowE.earlyPenalty + 1500;
+      return {
+        passed: ok,
+        details: `earnings tax=${rowE.tax} (penalty=${rowE.earlyPenalty}), basis tax=${rowB.tax}`,
+      };
+    },
+  );
+  // --- Already-retired couple withdrawal rate uses TODAY'S assets.
+  testScenario(
+    "Couple already retired: withdrawal rate denominator is current assets",
+    () => {
+      const person = {
+        contrib401k: 0,
+        contribMatch: 0,
+        contribHsa: 0,
+        salaryIncome: 0,
+        partTimeIncome: 0,
+        partTimeYears: 0,
+        ssIncome: 0,
+        ssAge: 70,
+        pensionIncome: 0,
+        balanceRoth: 0,
+        rothBasis: 0,
+        balanceHsa: 0,
+        balance401k: 0,
+        balanceTradIra: 0,
+        healthcarePre65: 0,
+        healthcarePost65: 0,
+        conversionBridge: 0,
+        conversionMid: 0,
+        conversionFinal: 0,
+      };
+      const r = simulateCouple(
+        normalizeCoupleInputs({
+          primary: {
+            ...DEFAULT_COUPLE_INPUTS.primary,
+            ...person,
+            currentAge: 66,
+            retirementAge: 60,
+            planThroughAge: 90,
+          },
+          spouse: {
+            ...DEFAULT_COUPLE_INPUTS.spouse,
+            ...person,
+            currentAge: 66,
+            retirementAge: 60,
+            planThroughAge: 90,
+          },
+          shared: {
+            ...DEFAULT_COUPLE_INPUTS.shared,
+            balanceCash: 200000,
+            balanceTaxable: 800000,
+            baseExpenses: 90000,
+          },
+        }),
+      );
+      const gross = r.yearlyData[0].grossWithdrawal;
+      const expectedRate = gross / 1000000;
+      const ok =
+        Math.abs(r.summary.year1WithdrawalRate - expectedRate) < 0.0005;
+      return {
+        passed: ok,
+        details: `rate=${(r.summary.year1WithdrawalRate * 100).toFixed(2)}% vs gross/currentTotal=${(expectedRate * 100).toFixed(2)}%`,
+      };
+    },
+  );
+
   const passed = results.filter((r) => r.passed).length;
   const failed = results.filter((r) => !r.passed).length;
   return { passed, failed, total: results.length, results };
@@ -3537,7 +4202,50 @@ function runSelfTests() {
 // SIMULATION
 // ============================================================
 
+// Engine-boundary input sanitation (audit finding: no domain enforcement
+// existed — returns below -100% sign-flipped balances every year, basis
+// percentages outside 0-100% fabricated cost basis, and fractional ages
+// broke statutory table lookups). Values are clamped rather than rejected:
+// the number inputs accept any finite value and stored scenarios may carry
+// anything. Applied by both engines and to each couple-mode section.
+function sanitizeEngineInputs(inputs) {
+  if (!inputs) return inputs;
+  const out = { ...inputs };
+  for (const key of [
+    "preReturn",
+    "postReturn",
+    "cashReturn",
+    "inflation",
+    "seppRate",
+    "pensionCola",
+  ]) {
+    if (typeof out[key] === "number") out[key] = Math.max(-0.99, out[key]);
+  }
+  if (typeof out.taxableBasisPct === "number")
+    out.taxableBasisPct = Math.min(1, Math.max(0, out.taxableBasisPct));
+  if (typeof out.taxableAnnualTaxDrag === "number")
+    out.taxableAnnualTaxDrag = Math.max(0, out.taxableAnnualTaxDrag);
+  if (typeof out.portfolioVolatility === "number")
+    out.portfolioVolatility = Math.max(0, out.portfolioVolatility);
+  // Whole-year ages: statutory lookups (RMD tables, catch-up eligibility,
+  // FRA months) are defined on integer ages attained in the year.
+  for (const key of [
+    "currentAge",
+    "retirementAge",
+    "planThroughAge",
+    "ssAge",
+    "pensionStartAge",
+    "rmdStartAge",
+    "partTimeYears",
+  ]) {
+    if (typeof out[key] === "number" && Number.isFinite(out[key]))
+      out[key] = Math.round(out[key]);
+  }
+  return out;
+}
+
 function simulate(inputs, options = {}) {
+  inputs = sanitizeEngineInputs(inputs);
   const {
     yearlyReturns = null,
     useFlexibleSpending = false,
@@ -3563,6 +4271,7 @@ function simulate(inputs, options = {}) {
     baseExpenses,
     healthcarePre65,
     healthcarePost65,
+    salaryIncome = 0,
     partTimeIncome,
     partTimeYears,
     ssIncome,
@@ -3634,6 +4343,18 @@ function simulate(inputs, options = {}) {
     rmdStartAge ?? defaultRmdStartAge(currentAge, currentYear);
   // Benefits start within the legal 62–70 window (clamped both ways).
   const ssClaimAge = effectiveSsClaimAge(ssAge);
+  // FRA derived from birth year (66 for 1943-54 cohorts rising to 67 for
+  // 1960+) — the old hardcoded 67 shortchanged older claimants' delayed
+  // credits and overstated their early-claim reductions.
+  const ssFra = fullRetirementAgeForBirthYear(currentYear - currentAge);
+  // Pension timing: the input is today's dollars AT BENEFIT START, so a
+  // not-yet-started pension inflates at GENERAL inflation until
+  // commencement and the pension COLA applies only once payments begin.
+  // (The old code grew it at the COLA from today: a $30K pension starting
+  // in 10 years at 2% COLA / 3% inflation priced at $36,570 instead of
+  // $40,317.) A pension already in pay COLAs from today, unchanged.
+  const pensionStartYear =
+    currentYear + Math.max(0, pensionStartAge - currentAge);
   // Rule of 55: separating from service in/after the year you turn 55 makes
   // withdrawals from THAT employer's 401k penalty-free (never IRAs). Retiring
   // before 55 forfeits it permanently for this model.
@@ -3746,10 +4467,14 @@ function simulate(inputs, options = {}) {
       //  - Social Security claimed before retirement and a pension that has
       //    already commenced are real, taxable income.
       //  - Cash/HYSA interest is ordinary income.
-      // Salary and its taxes remain out of scope, so the tax computed here
-      // is a FLOOR: in reality forced distributions stack on wages and are
-      // taxed at a higher marginal rate. The after-tax remainder of these
-      // flows is reinvested in the taxable account at full basis (no
+      // Salary stacking: when a gross salary is entered, the forced flows
+      // above are taxed ON TOP of taxable wages (salary minus pre-tax
+      // contributions) — the projection is charged only the INCREMENTAL tax
+      // over a salary-only baseline. The salary's own income tax, FICA, and
+      // spending stay out of scope, and no salary cash ever enters the
+      // balances. With salary at $0 the tax is a documented FLOOR (forced
+      // flows taxed from the bottom brackets). The after-tax remainder of
+      // these flows is reinvested in the taxable account at full basis (no
       // spending happens pre-retirement in this model); any tax the flows
       // can't cover is drawn through the normal withdrawal waterfall.
       // Previously the gross amounts were reinvested with tax hard-coded to
@@ -3775,14 +4500,16 @@ function simulate(inputs, options = {}) {
       const ssGrossAccum =
         age >= ssClaimAge
           ? Math.round(
-              adjustedSocialSecurityBenefit(ssIncome, ssClaimAge) *
+              adjustedSocialSecurityBenefit(ssIncome, ssClaimAge, ssFra) *
                 Math.pow(1 + inflation, year - currentYear),
             )
           : 0;
       const pensionGrossAccum =
         age >= pensionStartAge && pensionIncome > 0
           ? Math.round(
-              pensionIncome * Math.pow(1 + pensionCola, year - currentYear),
+              pensionIncome *
+                Math.pow(1 + inflation, pensionStartYear - currentYear) *
+                Math.pow(1 + pensionCola, Math.max(0, year - pensionStartYear)),
             )
           : 0;
       const accumSeniors65 =
@@ -3791,9 +4518,37 @@ function simulate(inputs, options = {}) {
             ? 1
             : Math.max(1, Math.min(2, householdSize))
           : 0;
+      // Taxable wages while working: gross salary minus this year's pre-tax
+      // contributions. Enters the solver as ordinary income so the forced
+      // flows stack on top of it; the salary-only baseline tax below is
+      // credited back through netNeed so the projection is charged only the
+      // incremental tax (the baseline is the salary's own liability, paid
+      // outside the model).
+      const salaryTaxableAccum = Math.max(
+        0,
+        Math.round(Math.max(0, salaryIncome || 0) * inflMult) -
+          applied401k -
+          appliedHsa,
+      );
+      const baselineSalaryTax =
+        salaryTaxableAccum > 0
+          ? totalTax(
+              salaryTaxableAccum,
+              0,
+              year,
+              0,
+              inflation,
+              0,
+              0,
+              accumSeniors65,
+              filingStatus,
+            )
+          : 0;
       const solve = solveGrossedUpWithdrawals({
-        // Negative net need: SS/pension income with no modeled spending.
-        netNeed: -(ssGrossAccum + pensionGrossAccum),
+        // Negative net need: SS/pension income with no modeled spending,
+        // plus the salary-only baseline tax (paid by the out-of-scope
+        // salary, so it must never be drawn from the portfolio).
+        netNeed: -(ssGrossAccum + pensionGrossAccum + baselineSalaryTax),
         state: {
           bCash,
           bTaxable: Math.max(0, bTaxable),
@@ -3808,7 +4563,9 @@ function simulate(inputs, options = {}) {
         },
         preSs: age < ssClaimAge,
         conversion: 0,
-        ptIncome: 0,
+        // Taxable wages ride the part-time channel: pure ordinary income
+        // (federal + NY, provisional income, MAGI), no penalties.
+        ptIncome: salaryTaxableAccum,
         ssGross: ssGrossAccum,
         pensionGross: pensionGrossAccum,
         pensionNyExempt,
@@ -3850,24 +4607,30 @@ function simulate(inputs, options = {}) {
         bInheritedBasis -
           Math.max(0, wInherited - (solve.inheritedTaxable || 0)),
       );
-      // After-tax remainder of forced distributions + SS/pension income is
-      // reinvested in the taxable account at full basis.
+      // The projection's tax for the year is the INCREMENT over the
+      // salary-only baseline (equal to the full tax when no salary is
+      // entered). Reinvest the forced flows net of that increment.
+      const incrementalTax = Math.max(0, Math.round(tax - baselineSalaryTax));
       const grossWithdrawal = wCash + wTaxable + wInherited + wIra + wRoth;
       const accumSurplus = Math.max(
         0,
-        grossWithdrawal + ssGrossAccum + pensionGrossAccum - tax,
+        grossWithdrawal + ssGrossAccum + pensionGrossAccum - incrementalTax,
       );
       const accumUnmet = Math.max(
         0,
-        tax - ssGrossAccum - pensionGrossAccum - grossWithdrawal,
+        incrementalTax - ssGrossAccum - pensionGrossAccum - grossWithdrawal,
       );
       totalUnmetCashFlow += accumUnmet;
       bTaxable += accumSurplus;
       bTaxableBasis += accumSurplus;
-      totalTaxesPaid += tax;
-      // magiByYear deliberately NOT recorded for accumulation years: this
-      // MAGI excludes salary, so letting IRMAA's 2-year lookback see it
-      // would understate surcharges worse than the same-year fallback does.
+      totalTaxesPaid += incrementalTax;
+      // IRMAA's 2-year lookback: with a salary entered, this year's MAGI
+      // (wages + forced flows) is complete enough to record. Without one,
+      // keep the lookback's same-year fallback — recording a salary-less
+      // MAGI would understate surcharges even worse.
+      if (salaryTaxableAccum > 0) {
+        magiByYear[year] = solve.ordIncome + solve.realizedGain;
+      }
 
       b401k = b401k * (1 + marketReturn) + applied401k + appliedMatch;
       bTaxable = bTaxable * (1 + taxableReturn(marketReturn));
@@ -3898,7 +4661,9 @@ function simulate(inputs, options = {}) {
         fromRoth: Math.round(wRoth),
         fromInherited: Math.round(wInherited),
         conversion: 0,
-        tax,
+        // Incremental over the salary-only baseline; full-year MAGI (incl.
+        // taxable wages) is in `magi`.
+        tax: incrementalTax,
         strategy: "Accumulating",
         cash: Math.round(bCash),
         taxable: Math.round(bTaxable),
@@ -3935,29 +4700,44 @@ function simulate(inputs, options = {}) {
     const healthcareSticker = age < 65 ? healthcarePre65 : healthcarePost65;
     const lifestyleSpending = Math.round(baseExpenses * inflMult);
     const spendingBase = Math.round((baseExpenses + healthcareSticker) * inflMult);
-    let spending = spendingBase;
+    // Flexible spending cuts DISCRETIONARY lifestyle only (10%), never the
+    // healthcare block. The old whole-spending cut was absorbed by the HSA
+    // offset (the healthcare portion shrank by the entire cut), so the
+    // portfolio draw didn't fall in exactly the bad-market years the
+    // guardrail exists for — Monte Carlo overstated its benefit.
+    let flexCut = 0;
     if (useFlexibleSpending && priorPriorYearEndTotal > 0 && yearsFromRetirement > 0) {
       const yoyChange =
         (priorYearEndTotal - priorPriorYearEndTotal) / priorPriorYearEndTotal;
       if (yoyChange < -0.15) {
-        spending = Math.round(spending * 0.9);
+        flexCut = Math.round(lifestyleSpending * 0.1);
       }
     }
+    const lifestyleAfterFlex = lifestyleSpending - flexCut;
+    let spending = spendingBase - flexCut;
 
     const ptIncome =
       age < retirementAge + partTimeYears
         ? Math.round(partTimeIncome * inflMult)
         : 0;
-    const ssClaimBenefit = adjustedSocialSecurityBenefit(ssIncome, ssClaimAge);
+    const ssClaimBenefit = adjustedSocialSecurityBenefit(
+      ssIncome,
+      ssClaimAge,
+      ssFra,
+    );
     const ssGross =
       age >= ssClaimAge
         ? Math.round(ssClaimBenefit * Math.pow(1 + inflation, year - currentYear))
         : 0;
-    // Pension: grows at pensionCola from today (represents benefit formula growth + COLA)
-    const pensionMult = Math.pow(1 + pensionCola, year - currentYear);
+    // Pension: general inflation to commencement, COLA only after (see the
+    // pensionStartYear note above).
     const pensionGross =
       age >= pensionStartAge && pensionIncome > 0
-        ? Math.round(pensionIncome * pensionMult)
+        ? Math.round(
+            pensionIncome *
+              Math.pow(1 + inflation, pensionStartYear - currentYear) *
+              Math.pow(1 + pensionCola, Math.max(0, year - pensionStartYear)),
+          )
         : 0;
 
     // 72(t) SEPP stream: fix the payment in the first retirement year.
@@ -4093,7 +4873,12 @@ function simulate(inputs, options = {}) {
       // ACA (pre-65) is handled below as a separate branch
       const effectiveSpending =
         age >= 65 ? spending + irmaaSurcharge : spending;
-      const healthcarePortion = Math.max(0, effectiveSpending - lifestyleSpending);
+      // Healthcare (+IRMAA) portion, measured against the flex-cut lifestyle
+      // so a flexible-spending cut never shrinks the HSA-eligible block.
+      const healthcarePortion = Math.max(
+        0,
+        effectiveSpending - lifestyleAfterFlex,
+      );
       const hsaOffset = Math.min(bHsa, healthcarePortion);
 
       // Signed net cash flow: negative when recurring income (pension, SS,
@@ -4175,24 +4960,38 @@ function simulate(inputs, options = {}) {
     }
     irmaaTriggered = irmaaSurcharge > 0;
 
-    // ACA subsidy (pre-65 only, opt-in) — re-solve once with subsidized healthcare
+    // ACA subsidy (pre-65 only, opt-in) — iterate subsidy ↔ MAGI to a fixed
+    // point (max 4 passes): the subsidy changes withdrawals, which change
+    // MAGI, which changes the subsidy; a single re-solve could leave a
+    // subsidy granted at a MAGI that had already crossed the 400%-FPL
+    // cliff. ACA MAGI is §36B household income: AGI plus the NONTAXABLE
+    // part of Social Security, which plain AGI misses.
     if (useAcaSubsidyEstimate && age < 65 && age >= retirementAge) {
-      const estimatedMagi =
-        solve.ordIncome + solve.realizedGain + debtPayoffGainThisYear;
       const healthcareNominal = healthcareSticker * inflMult;
+      for (let acaIter = 0; acaIter < 4; acaIter++) {
+      const acaMagi =
+        solve.ordIncome +
+        solve.realizedGain +
+        debtPayoffGainThisYear +
+        Math.max(0, ssGross - solve.taxableSs);
       const subsidizedNominal = estimateAcaHealthcareCost(
         healthcareNominal,
-        estimatedMagi,
+        acaMagi,
         householdSize,
         year,
         inflation,
       );
-      acaSubsidy = Math.max(0, healthcareNominal - subsidizedNominal);
-      finalSpending = Math.round(baseExpenses * inflMult + subsidizedNominal);
+      const newAcaSubsidy = Math.max(0, healthcareNominal - subsidizedNominal);
+      const acaStable = Math.abs(newAcaSubsidy - acaSubsidy) < 10;
+      acaSubsidy = newAcaSubsidy;
+      // Rebuild spending from the flex-adjusted lifestyle so a flexible-
+      // spending cut survives the ACA re-solve (it used to be discarded).
+      finalSpending = Math.round(lifestyleAfterFlex + subsidizedNominal);
       hsaWithdrawal = Math.min(
         bHsa,
-        Math.max(0, finalSpending - lifestyleSpending),
+        Math.max(0, finalSpending - lifestyleAfterFlex),
       );
+      if (acaStable) break;
       // Signed, matching the main solve above: surplus income may exceed the
       // subsidized spending level too.
       const netNeedAca =
@@ -4224,6 +5023,7 @@ function simulate(inputs, options = {}) {
         inheritedTaxType,
         inheritedNyExcludable,
       });
+      }
     }
 
     // Update displayed spending to include IRMAA (shows true economic cost)
@@ -4465,16 +5265,85 @@ function simulate(inputs, options = {}) {
   };
 }
 
+// Household HSA limits. The family limit is a shared pool the spouses may
+// split however they like, but each 55+ catch-up ($1,000) may only go into
+// that spouse's OWN HSA — catch-ups are per-owner and never poolable (the
+// old scalar return let one spouse absorb the other's catch-up).
 function getCoupleHsaLimit(primaryAge, spouseAge, year, inflation, householdSize) {
   const { base, factor } = projectedFromKnownTable(LIMIT_TABLES, year, inflation);
   const roundTo = (value, increment) =>
     Math.round((value * factor) / increment) * increment;
-  const familyLimit =
+  const familyBase =
     householdSize > 1 ? roundTo(base.hsaFamily, 50) : roundTo(base.hsaSelf, 50);
-  const catchUps =
-    (primaryAge >= 55 ? base.hsaCatchUp55 : 0) +
-    (spouseAge >= 55 && householdSize > 1 ? base.hsaCatchUp55 : 0);
-  return familyLimit + catchUps;
+  const primaryCatchUp = primaryAge >= 55 ? base.hsaCatchUp55 : 0;
+  const spouseCatchUp =
+    spouseAge >= 55 && householdSize > 1 ? base.hsaCatchUp55 : 0;
+  return {
+    familyBase,
+    primaryCatchUp,
+    spouseCatchUp,
+    total: familyBase + primaryCatchUp + spouseCatchUp,
+  };
+}
+
+// Per-spouse contribution funding for one projection year of couple mode.
+// Joint accumulation years (salaryFunded=false) keep the legacy convention:
+// salaries are out of scope, so contributions are capped only at statutory
+// limits. Once the household is in distribution mode (salaryFunded=true) the
+// working spouse's entered salary is authoritative and contributions must be
+// funded from it, in this order: §125 payroll HSA first (FICA-exempt), then
+// employee FICA (mandatory), then the elective 401k deferral, then employer
+// match within the §415(c) compensation room. §402(g)/§415(c) cap deferrals
+// and annual additions at 100% of compensation, so with no salary entered a
+// working spouse's contributions stop instead of crediting money that has no
+// funding source (this used to create dollars from nowhere in staggered
+// plans). Returns the applied amounts plus the spouse's basic employee FICA
+// and its base (for the household Additional Medicare Tax).
+function fundPersonContributions({
+  retired,
+  salaryFunded,
+  salaryNominal,
+  contrib401k,
+  contribMatch,
+  contribHsa,
+  limits,
+  hsaLimitRemaining,
+  year,
+  inflation,
+}) {
+  const none = { applied401k: 0, appliedMatch: 0, appliedHsa: 0, fica: 0, ficaBase: 0 };
+  if (retired) return none;
+  const want401k = Math.max(0, contrib401k);
+  const wantMatch = Math.max(0, contribMatch);
+  const wantHsa = Math.max(0, contribHsa);
+  const hsaRoom = Math.max(0, hsaLimitRemaining);
+  if (!salaryFunded) {
+    const applied401k = Math.min(want401k, limits.k401Employee);
+    return {
+      applied401k,
+      appliedMatch: Math.min(
+        wantMatch,
+        Math.max(0, limits.k401Total - applied401k),
+      ),
+      appliedHsa: Math.min(wantHsa, hsaRoom),
+      fica: 0,
+      ficaBase: 0,
+    };
+  }
+  const appliedHsa = Math.min(wantHsa, hsaRoom, Math.max(0, salaryNominal));
+  const ficaBase = Math.max(0, salaryNominal - appliedHsa);
+  const fica = employeeFica(ficaBase, year, inflation);
+  const applied401k = Math.min(
+    want401k,
+    limits.k401Employee,
+    Math.max(0, salaryNominal - appliedHsa - fica),
+  );
+  const appliedMatch = Math.min(
+    wantMatch,
+    Math.max(0, limits.k401Total - applied401k),
+    Math.max(0, salaryNominal - applied401k),
+  );
+  return { applied401k, appliedMatch, appliedHsa, fica, ficaBase };
 }
 
 function personConversionTarget(person, age, inflMult, b401k, bTradIra, rmdAmount) {
@@ -4697,11 +5566,20 @@ function solveCoupleGrossedUpWithdrawals({
     const wageGross =
       (incomes.primaryWage || 0) + (incomes.spouseWage || 0);
     const ssGross = incomes.primarySs + incomes.spouseSs;
+    // Pre-59½ Roth earnings draws are ordinary income (and penalized below).
+    const earlyRothEarnings =
+      (ages.primary < 59.5
+        ? rothTaxableEarnings(withdrawals.primaryRoth, rothLayers.primary)
+        : 0) +
+      (ages.spouse < 59.5
+        ? rothTaxableEarnings(withdrawals.spouseRoth, rothLayers.spouse)
+        : 0);
     const incomeBeforeSs =
       wageGross +
       partTimeGross +
       pensionGross +
       interestIncome +
+      earlyRothEarnings +
       taxDeferredWithdrawals +
       totalConversions +
       taxableRealizedGain;
@@ -4712,6 +5590,7 @@ function solveCoupleGrossedUpWithdrawals({
       taxableSs +
       pensionGross +
       interestIncome +
+      earlyRothEarnings +
       taxDeferredWithdrawals +
       totalConversions;
 
@@ -4771,6 +5650,8 @@ function solveCoupleGrossedUpWithdrawals({
         taxableSs,
         nyPensionAnnuityExclusion,
         seniors65,
+        "mfj",
+        interestIncome,
       ) + earlyPenalty;
     if (Math.abs(newTax - tax) < 1) {
       tax = newTax;
@@ -4805,6 +5686,19 @@ function simulateCouple(coupleInputs, options = {}) {
   const { yearlyReturns = null, useFlexibleSpending = false } = options;
   const { primary, spouse, shared } = normalizeCoupleInputs(coupleInputs);
   const currentYear = PROJECTION_START_YEAR;
+  // Per-spouse FRA from birth year, and pension commencement years (input is
+  // today's dollars at benefit start: general inflation to start, COLA
+  // after) — see the individual-engine notes.
+  const primaryFra = fullRetirementAgeForBirthYear(
+    currentYear - primary.currentAge,
+  );
+  const spouseFra = fullRetirementAgeForBirthYear(
+    currentYear - spouse.currentAge,
+  );
+  const primaryPensionStartYear =
+    currentYear + Math.max(0, primary.pensionStartAge - primary.currentAge);
+  const spousePensionStartYear =
+    currentYear + Math.max(0, spouse.pensionStartAge - spouse.currentAge);
   const endYear = Math.max(
     currentYear + (primary.planThroughAge - primary.currentAge),
     currentYear + (spouse.planThroughAge - spouse.currentAge),
@@ -4932,47 +5826,71 @@ function simulateCouple(coupleInputs, options = {}) {
       shared.inflation,
       shared.householdSize,
     );
-    const primary401kApplied = primaryRetired
-      ? 0
-      : Math.min(Math.max(0, primary.contrib401k), primary401kLimit.k401Employee);
-    const primaryMatchApplied = primaryRetired
-      ? 0
-      : Math.min(
-          Math.max(0, primary.contribMatch),
-          Math.max(0, primary401kLimit.k401Total - primary401kApplied),
-        );
-    const spouse401kApplied = spouseRetired
-      ? 0
-      : Math.min(Math.max(0, spouse.contrib401k), spouse401kLimit.k401Employee);
-    const spouseMatchApplied = spouseRetired
-      ? 0
-      : Math.min(
-          Math.max(0, spouse.contribMatch),
-          Math.max(0, spouse401kLimit.k401Total - spouse401kApplied),
-        );
-    const hsaLimit = getCoupleHsaLimit(
+    const hsaLimits = getCoupleHsaLimit(
       primaryAge,
       spouseAge,
       year,
       shared.inflation,
       shared.householdSize,
     );
-    let remainingHsaLimit = hsaLimit;
-    const primaryHsaApplied = primaryRetired
-      ? 0
-      : Math.min(Math.max(0, primary.contribHsa), remainingHsaLimit);
-    remainingHsaLimit -= primaryHsaApplied;
-    const spouseHsaApplied = spouseRetired
-      ? 0
-      : Math.min(Math.max(0, spouse.contribHsa), remainingHsaLimit);
+    // Contribution funding (see fundPersonContributions): statutory caps only
+    // during joint accumulation; salary-funded caps (HSA → FICA → deferral →
+    // match, all within compensation) once the household is drawing down.
+    const primarySalaryNominal = Math.round(
+      Math.max(0, primary.salaryIncome || 0) * inflMult,
+    );
+    const spouseSalaryNominal = Math.round(
+      Math.max(0, spouse.salaryIncome || 0) * inflMult,
+    );
+    const primaryFunding = fundPersonContributions({
+      retired: primaryRetired,
+      salaryFunded: householdRetired,
+      salaryNominal: primarySalaryNominal,
+      contrib401k: primary.contrib401k,
+      contribMatch: primary.contribMatch,
+      contribHsa: primary.contribHsa,
+      limits: primary401kLimit,
+      // Family pool + own catch-up only (catch-ups are never poolable).
+      hsaLimitRemaining: hsaLimits.familyBase + hsaLimits.primaryCatchUp,
+      year,
+      inflation: shared.inflation,
+    });
+    const spouseFunding = fundPersonContributions({
+      retired: spouseRetired,
+      salaryFunded: householdRetired,
+      salaryNominal: spouseSalaryNominal,
+      contrib401k: spouse.contrib401k,
+      contribMatch: spouse.contribMatch,
+      contribHsa: spouse.contribHsa,
+      limits: spouse401kLimit,
+      // Remaining family pool (primary's draw beyond their own catch-up
+      // consumed it) + the spouse's own catch-up.
+      hsaLimitRemaining:
+        Math.max(
+          0,
+          hsaLimits.familyBase -
+            Math.max(0, primaryFunding.appliedHsa - hsaLimits.primaryCatchUp),
+        ) + hsaLimits.spouseCatchUp,
+      year,
+      inflation: shared.inflation,
+    });
+    const primary401kApplied = primaryFunding.applied401k;
+    const primaryMatchApplied = primaryFunding.appliedMatch;
+    const primaryHsaApplied = primaryFunding.appliedHsa;
+    const spouse401kApplied = spouseFunding.applied401k;
+    const spouseMatchApplied = spouseFunding.appliedMatch;
+    const spouseHsaApplied = spouseFunding.appliedHsa;
 
     if (!householdRetired) {
       // Same treatment as the individual engine: forced IRA RMDs, SS already
       // claimed, and commenced pensions are run through the real tax engine
       // even while both spouses work; the after-tax remainder is reinvested
-      // in taxable. Salaries stay out of scope during joint working years,
-      // so this tax is a floor. Each spouse's current-employer 401k is
-      // hidden from the solver (still-working RMD exception; also not
+      // in taxable. When salaries are entered they stack UNDER these flows
+      // for tax purposes and the projection is charged only the incremental
+      // tax over a salary-only baseline (salary cash, its own income tax,
+      // and FICA stay out of scope in joint working years). With no salary
+      // the tax is a documented floor. Each spouse's current-employer 401k
+      // is hidden from the solver (still-working RMD exception; also not
       // withdrawable while employed).
       const primaryAccumRmd =
         primaryAge >= primary.rmdStartAge && primaryState.bTradIra > 0
@@ -4985,36 +5903,84 @@ function simulateCouple(coupleInputs, options = {}) {
       const ssPrimaryAccum =
         primaryAge >= effectiveSsClaimAge(primary.ssAge)
           ? Math.round(
-              adjustedSocialSecurityBenefit(primary.ssIncome, primary.ssAge) *
-                Math.pow(1 + shared.inflation, year - currentYear),
+              adjustedSocialSecurityBenefit(
+                primary.ssIncome,
+                primary.ssAge,
+                primaryFra,
+              ) * Math.pow(1 + shared.inflation, year - currentYear),
             )
           : 0;
       const ssSpouseAccum =
         spouseAge >= effectiveSsClaimAge(spouse.ssAge)
           ? Math.round(
-              adjustedSocialSecurityBenefit(spouse.ssIncome, spouse.ssAge) *
-                Math.pow(1 + shared.inflation, year - currentYear),
+              adjustedSocialSecurityBenefit(
+                spouse.ssIncome,
+                spouse.ssAge,
+                spouseFra,
+              ) * Math.pow(1 + shared.inflation, year - currentYear),
             )
           : 0;
       const pensionPrimaryAccum =
         primaryAge >= primary.pensionStartAge && primary.pensionIncome > 0
           ? Math.round(
               primary.pensionIncome *
-                Math.pow(1 + primary.pensionCola, year - currentYear),
+                Math.pow(
+                  1 + shared.inflation,
+                  primaryPensionStartYear - currentYear,
+                ) *
+                Math.pow(
+                  1 + primary.pensionCola,
+                  Math.max(0, year - primaryPensionStartYear),
+                ),
             )
           : 0;
       const pensionSpouseAccum =
         spouseAge >= spouse.pensionStartAge && spouse.pensionIncome > 0
           ? Math.round(
               spouse.pensionIncome *
-                Math.pow(1 + spouse.pensionCola, year - currentYear),
+                Math.pow(
+                  1 + shared.inflation,
+                  spousePensionStartYear - currentYear,
+                ) *
+                Math.pow(
+                  1 + spouse.pensionCola,
+                  Math.max(0, year - spousePensionStartYear),
+                ),
             )
           : 0;
       const accumIncome =
         ssPrimaryAccum + ssSpouseAccum + pensionPrimaryAccum + pensionSpouseAccum;
+      // Taxable wages (gross salary minus this year's pre-tax contributions)
+      // stack under the forced flows; the salary-only baseline tax is
+      // credited back through netNeed so only the increment is charged.
+      const primarySalaryTaxAccum = Math.max(
+        0,
+        primarySalaryNominal - primary401kApplied - primaryHsaApplied,
+      );
+      const spouseSalaryTaxAccum = Math.max(
+        0,
+        spouseSalaryNominal - spouse401kApplied - spouseHsaApplied,
+      );
+      const accumSeniors65 =
+        (primaryAge >= 65 ? 1 : 0) + (spouseAge >= 65 ? 1 : 0);
+      const baselineSalaryTax =
+        primarySalaryTaxAccum + spouseSalaryTaxAccum > 0
+          ? totalTax(
+              primarySalaryTaxAccum + spouseSalaryTaxAccum,
+              0,
+              year,
+              0,
+              shared.inflation,
+              0,
+              0,
+              accumSeniors65,
+            )
+          : 0;
       const solve = solveCoupleGrossedUpWithdrawals({
-        // Negative net need: passive income with no modeled spending.
-        netNeed: -accumIncome,
+        // Negative net need: passive income with no modeled spending, plus
+        // the salary-only baseline tax (paid by the out-of-scope salaries,
+        // never from the portfolio).
+        netNeed: -(accumIncome + baselineSalaryTax),
         state: {
           cash,
           taxable,
@@ -5030,8 +5996,10 @@ function simulateCouple(coupleInputs, options = {}) {
         conversions: { primary: 0, spouse: 0 },
         rmds: { primary: primaryAccumRmd, spouse: spouseAccumRmd },
         incomes: {
-          primaryWage: 0,
-          spouseWage: 0,
+          // Taxable wages enter the tax base only (ordinary income,
+          // provisional income, MAGI) — the matching cash never does.
+          primaryWage: primarySalaryTaxAccum,
+          spouseWage: spouseSalaryTaxAccum,
           primaryPartTime: 0,
           spousePartTime: 0,
           primarySs: ssPrimaryAccum,
@@ -5082,17 +6050,28 @@ function simulateCouple(coupleInputs, options = {}) {
         w.spouseIra +
         w.primaryRoth +
         w.spouseRoth;
-      // After-tax remainder of forced distributions + SS/pension income is
-      // reinvested in the taxable account at full basis.
-      const accumSurplus = Math.max(0, grossWithdrawal + accumIncome - tax);
-      const accumUnmet = Math.max(0, tax - accumIncome - grossWithdrawal);
+      // The projection's tax is the INCREMENT over the salary-only baseline
+      // (equal to the full tax when no salaries are entered). Reinvest the
+      // forced flows net of that increment in taxable at full basis.
+      const incrementalTax = Math.max(0, Math.round(tax - baselineSalaryTax));
+      const accumSurplus = Math.max(
+        0,
+        grossWithdrawal + accumIncome - incrementalTax,
+      );
+      const accumUnmet = Math.max(
+        0,
+        incrementalTax - accumIncome - grossWithdrawal,
+      );
       totalUnmetCashFlow += accumUnmet;
       taxable += accumSurplus;
       taxableBasis += accumSurplus;
-      totalTaxesPaid += tax;
-      // coupleMagiByYear deliberately not recorded: this MAGI excludes
-      // salary, so IRMAA's lookback would understate surcharges (see the
-      // individual engine note).
+      totalTaxesPaid += incrementalTax;
+      // IRMAA's 2-year lookback: record MAGI only when salaries make it
+      // complete; otherwise keep the same-year fallback (see the individual
+      // engine note).
+      if (primarySalaryTaxAccum + spouseSalaryTaxAccum > 0) {
+        coupleMagiByYear[year] = solve.ordIncome + solve.realizedGain;
+      }
 
       primaryState.b401k =
         primaryState.b401k * (1 + marketReturn) +
@@ -5122,6 +6101,7 @@ function simulateCouple(coupleInputs, options = {}) {
         phase: "accumulation",
         spending: 0,
         wages: 0,
+        ficaTax: 0,
         partTime: 0,
         ss: ssPrimaryAccum + ssSpouseAccum,
         pension: pensionPrimaryAccum + pensionSpouseAccum,
@@ -5134,7 +6114,9 @@ function simulateCouple(coupleInputs, options = {}) {
         fromRoth: Math.round(w.primaryRoth + w.spouseRoth),
         hsaWithdrawal: 0,
         conversion: 0,
-        tax,
+        // Incremental over the salary-only baseline; full-year MAGI (incl.
+        // taxable wages) is in `magi`.
+        tax: incrementalTax,
         strategy: "Accumulating",
         cash: Math.round(cash),
         taxable: Math.round(taxable),
@@ -5188,12 +6170,19 @@ function simulateCouple(coupleInputs, options = {}) {
       ? (spouseAge < 65 ? spouse.healthcarePre65 : spouse.healthcarePost65) * inflMult
       : 0;
     const lifestyleSpending = Math.round(shared.baseExpenses * inflMult);
-    let spending = Math.round(lifestyleSpending + primaryHealthcare + spouseHealthcare);
+    // Flexible spending cuts discretionary lifestyle only — see the
+    // individual-engine note (a whole-spending cut was absorbed by the HSA
+    // offset and never reduced the portfolio draw).
+    let flexCut = 0;
     if (useFlexibleSpending && priorPriorYearEndTotal > 0 && yearsFromRetirement > 0) {
       const yoyChange =
         (priorYearEndTotal - priorPriorYearEndTotal) / priorPriorYearEndTotal;
-      if (yoyChange < -0.15) spending = Math.round(spending * 0.9);
+      if (yoyChange < -0.15) flexCut = Math.round(lifestyleSpending * 0.1);
     }
+    const lifestyleAfterFlex = lifestyleSpending - flexCut;
+    let spending = Math.round(
+      lifestyleAfterFlex + primaryHealthcare + spouseHealthcare,
+    );
 
     const primaryPartTime =
       primaryRetired && primaryAge < primary.retirementAge + primary.partTimeYears
@@ -5206,64 +6195,104 @@ function simulateCouple(coupleInputs, options = {}) {
     const primarySs =
       primaryAge >= effectiveSsClaimAge(primary.ssAge)
         ? Math.round(
-            adjustedSocialSecurityBenefit(primary.ssIncome, primary.ssAge) *
-              Math.pow(1 + shared.inflation, year - currentYear),
+            adjustedSocialSecurityBenefit(
+              primary.ssIncome,
+              primary.ssAge,
+              primaryFra,
+            ) * Math.pow(1 + shared.inflation, year - currentYear),
           )
         : 0;
     const spouseSs =
       spouseAge >= effectiveSsClaimAge(spouse.ssAge)
         ? Math.round(
-            adjustedSocialSecurityBenefit(spouse.ssIncome, spouse.ssAge) *
-              Math.pow(1 + shared.inflation, year - currentYear),
+            adjustedSocialSecurityBenefit(
+              spouse.ssIncome,
+              spouse.ssAge,
+              spouseFra,
+            ) * Math.pow(1 + shared.inflation, year - currentYear),
           )
         : 0;
     const primaryPension =
       primaryAge >= primary.pensionStartAge && primary.pensionIncome > 0
         ? Math.round(
             primary.pensionIncome *
-              Math.pow(1 + primary.pensionCola, year - currentYear),
+              Math.pow(
+                1 + shared.inflation,
+                primaryPensionStartYear - currentYear,
+              ) *
+              Math.pow(
+                1 + primary.pensionCola,
+                Math.max(0, year - primaryPensionStartYear),
+              ),
           )
         : 0;
     const spousePension =
       spouseAge >= spouse.pensionStartAge && spouse.pensionIncome > 0
         ? Math.round(
             spouse.pensionIncome *
-              Math.pow(1 + spouse.pensionCola, year - currentYear),
+              Math.pow(
+                1 + shared.inflation,
+                spousePensionStartYear - currentYear,
+              ) *
+              Math.pow(
+                1 + spouse.pensionCola,
+                Math.max(0, year - spousePensionStartYear),
+              ),
           )
         : 0;
     // Staggered retirement: a spouse who has not yet retired keeps earning
     // while the household is already in distribution mode. Gross salary is
-    // entered in today's dollars and inflates with household inflation;
-    // pre-tax 401k/HSA contributions (credited to balances below) reduce both
-    // take-home cash and taxable wages, so a single net figure serves as
-    // spendable income AND ordinary income in the solver. FICA payroll tax is
-    // not modeled. Without this income the engine used to fund full household
-    // spending from the portfolio while still crediting the working spouse's
-    // contributions — money conservation was violated in both directions.
+    // entered in today's dollars and inflates with household inflation.
+    // Two wage figures per spouse:
+    //  - TAXABLE wages (primaryWage/spouseWage): gross minus pre-tax 401k/
+    //    HSA contributions. Feeds the solver's ordinary income, provisional
+    //    income, and MAGI. Employee FICA is NOT income-tax-deductible, so it
+    //    stays inside this base.
+    //  - SPENDABLE wages (…WageCash): taxable wages minus employee FICA
+    //    (6.2% OASDI to the wage base + 1.45% Medicare, computed in
+    //    fundPersonContributions) minus this household's 0.9% Additional
+    //    Medicare Tax above $250K MFJ of combined covered wages (statutory,
+    //    not indexed), allocated pro-rata. Feeds household income available
+    //    for spending. Contributions were already capped so that
+    //    HSA + FICA + deferral never exceed salary — spendable cash is
+    //    exact, not floored.
+    const combinedFicaBase = primaryFunding.ficaBase + spouseFunding.ficaBase;
+    const additionalMedicare =
+      0.009 * Math.max(0, combinedFicaBase - 250000);
+    const primaryFica =
+      primaryFunding.fica +
+      (combinedFicaBase > 0
+        ? additionalMedicare * (primaryFunding.ficaBase / combinedFicaBase)
+        : 0);
+    const spouseFica =
+      spouseFunding.fica +
+      (combinedFicaBase > 0
+        ? additionalMedicare * (spouseFunding.ficaBase / combinedFicaBase)
+        : 0);
     const primaryWage = !primaryRetired
       ? Math.max(
           0,
-          Math.round((primary.salaryIncome || 0) * inflMult) -
-            primary401kApplied -
-            primaryHsaApplied,
+          primarySalaryNominal - primary401kApplied - primaryHsaApplied,
         )
       : 0;
     const spouseWage = !spouseRetired
-      ? Math.max(
-          0,
-          Math.round((spouse.salaryIncome || 0) * inflMult) -
-            spouse401kApplied -
-            spouseHsaApplied,
-        )
+      ? Math.max(0, spouseSalaryNominal - spouse401kApplied - spouseHsaApplied)
       : 0;
+    const primaryWageCash = Math.max(0, primaryWage - primaryFica);
+    const spouseWageCash = Math.max(0, spouseWage - spouseFica);
 
     // RMDs use start-of-year balances, which equal the prior December 31
     // balances now that growth is applied once at the end of each year.
+    // Still-working exception (per spouse): the current employer's 401k has
+    // no RMD until the year that spouse retires — only the Traditional IRA
+    // is RMD-subject while they work. (Not modeled: 5% owners, who get no
+    // exception.) Matches the accumulation-branch treatment.
     const primaryRmd =
       primaryAge >= primary.rmdStartAge
         ? Math.max(
             0,
-            (primaryState.b401k + primaryState.bTradIra) /
+            ((primaryRetired ? primaryState.b401k : 0) +
+              primaryState.bTradIra) /
               (rmdDivisor(primaryAge) || Infinity),
           )
         : 0;
@@ -5271,7 +6300,8 @@ function simulateCouple(coupleInputs, options = {}) {
       spouseAge >= spouse.rmdStartAge
         ? Math.max(
             0,
-            (spouseState.b401k + spouseState.bTradIra) /
+            ((spouseRetired ? spouseState.b401k : 0) +
+              spouseState.bTradIra) /
               (rmdDivisor(spouseAge) || Infinity),
           )
         : 0;
@@ -5295,15 +6325,15 @@ function simulateCouple(coupleInputs, options = {}) {
     let hsaAllocation = allocateCoupleHsaWithdrawals(
       primaryState.bHsa,
       spouseState.bHsa,
-      Math.max(0, spending - lifestyleSpending),
+      Math.max(0, spending - lifestyleAfterFlex),
     );
     let totalPrimaryHsaWithdrawal = hsaAllocation.primary;
     let totalSpouseHsaWithdrawal = hsaAllocation.spouse;
     let hsaWithdrawal = hsaAllocation.total;
 
     const incomeTotal =
-      primaryWage +
-      spouseWage +
+      primaryWageCash +
+      spouseWageCash +
       primaryPartTime +
       spousePartTime +
       primarySs +
@@ -5332,6 +6362,17 @@ function simulateCouple(coupleInputs, options = {}) {
     // then cleared so it applies only once.
     const debtPayoffGainThisYear = pendingDebtPayoffGain;
     pendingDebtPayoffGain = 0;
+    // Withdrawal-eligible employer-plan balances: a still-working spouse's
+    // current-employer 401k is not withdrawable (in-service withdrawals are
+    // not modeled), so the waterfall must never see it — mirrors the RMD
+    // still-working exception above. Their Traditional IRA and Roth remain
+    // reachable.
+    const primary401kAvailable = primaryRetired
+      ? Math.max(0, primaryState.b401k - primaryConversion)
+      : 0;
+    const spouse401kAvailable = spouseRetired
+      ? Math.max(0, spouseState.b401k - spouseConversion)
+      : 0;
     // Signed net cash flow (see the individual engine): negative when
     // recurring household income exceeds spending. The solver floors the
     // withdrawal at zero; the after-tax surplus is swept to shared cash below.
@@ -5342,8 +6383,8 @@ function simulateCouple(coupleInputs, options = {}) {
         cash,
         taxable,
         taxableBasis,
-        primary401k: Math.max(0, primaryState.b401k - primaryConversion),
-        spouse401k: Math.max(0, spouseState.b401k - spouseConversion),
+        primary401k: primary401kAvailable,
+        spouse401k: spouse401kAvailable,
         primaryTradIra: primaryState.bTradIra,
         spouseTradIra: spouseState.bTradIra,
         primaryRoth: primaryState.bRoth,
@@ -5378,33 +6419,49 @@ function simulateCouple(coupleInputs, options = {}) {
       (primaryRetired && primaryAge < 65 ? primary.healthcarePre65 * inflMult : 0) +
       (spouseRetired && spouseAge < 65 ? spouse.healthcarePre65 * inflMult : 0);
     if (shared.useAcaSubsidyEstimate && pre65HealthcareSticker > 0) {
-      const estimatedMagi = solve.ordIncome + solve.realizedGain;
+      // Iterate subsidy ↔ MAGI to a fixed point (max 4 passes, like the
+      // individual engine): a single re-solve could leave a subsidy granted
+      // at a MAGI that already crossed the 400%-FPL cliff. ACA MAGI adds
+      // back nontaxable Social Security (§36B household income).
+      const spendingBeforeAca = spending;
+      for (let acaIter = 0; acaIter < 4; acaIter++) {
+      const acaMagi =
+        solve.ordIncome +
+        solve.realizedGain +
+        debtPayoffGainThisYear +
+        Math.max(0, primarySs + spouseSs - solve.taxableSs);
       const subsidizedPre65Healthcare = estimateAcaHealthcareCost(
         pre65HealthcareSticker,
-        estimatedMagi,
+        acaMagi,
         shared.householdSize,
         year,
         shared.inflation,
       );
-      acaSubsidy = Math.max(0, pre65HealthcareSticker - subsidizedPre65Healthcare);
-      spending = Math.max(0, Math.round(spending - acaSubsidy));
+      const newAcaSubsidy = Math.max(
+        0,
+        pre65HealthcareSticker - subsidizedPre65Healthcare,
+      );
+      const acaStable = Math.abs(newAcaSubsidy - acaSubsidy) < 10;
+      acaSubsidy = newAcaSubsidy;
+      spending = Math.max(0, Math.round(spendingBeforeAca - acaSubsidy));
       hsaAllocation = allocateCoupleHsaWithdrawals(
         primaryState.bHsa,
         spouseState.bHsa,
-        Math.max(0, spending - lifestyleSpending),
+        Math.max(0, spending - lifestyleAfterFlex),
       );
       totalPrimaryHsaWithdrawal = hsaAllocation.primary;
       totalSpouseHsaWithdrawal = hsaAllocation.spouse;
       hsaWithdrawal = hsaAllocation.total;
       netNeed = spending - hsaWithdrawal - incomeTotal;
+      if (acaStable) break;
       solve = solveCoupleGrossedUpWithdrawals({
         netNeed,
         state: {
           cash,
           taxable,
           taxableBasis,
-          primary401k: Math.max(0, primaryState.b401k - primaryConversion),
-          spouse401k: Math.max(0, spouseState.b401k - spouseConversion),
+          primary401k: primary401kAvailable,
+          spouse401k: spouse401kAvailable,
           primaryTradIra: primaryState.bTradIra,
           spouseTradIra: spouseState.bTradIra,
           primaryRoth: primaryState.bRoth,
@@ -5434,6 +6491,7 @@ function simulateCouple(coupleInputs, options = {}) {
         interestIncome: coupleCashInterest,
         additionalRealizedGain: debtPayoffGainThisYear,
       });
+      }
     }
 
     let irmaaSurcharge = 0;
@@ -5463,7 +6521,7 @@ function simulateCouple(coupleInputs, options = {}) {
         hsaAllocation = allocateCoupleHsaWithdrawals(
           primaryState.bHsa,
           spouseState.bHsa,
-          Math.max(0, spending - lifestyleSpending),
+          Math.max(0, spending - lifestyleAfterFlex),
         );
         totalPrimaryHsaWithdrawal = hsaAllocation.primary;
         totalSpouseHsaWithdrawal = hsaAllocation.spouse;
@@ -5475,8 +6533,8 @@ function simulateCouple(coupleInputs, options = {}) {
             cash,
             taxable,
             taxableBasis,
-            primary401k: Math.max(0, primaryState.b401k - primaryConversion),
-            spouse401k: Math.max(0, spouseState.b401k - spouseConversion),
+            primary401k: primary401kAvailable,
+            spouse401k: spouse401kAvailable,
             primaryTradIra: primaryState.bTradIra,
             spouseTradIra: spouseState.bTradIra,
             primaryRoth: primaryState.bRoth,
@@ -5537,11 +6595,11 @@ function simulateCouple(coupleInputs, options = {}) {
           taxableBasis,
           primary401k: Math.max(
             0,
-            primaryState.b401k - primaryConversion - withdrawals.primary401k,
+            primary401kAvailable - withdrawals.primary401k,
           ),
           spouse401k: Math.max(
             0,
-            spouseState.b401k - spouseConversion - withdrawals.spouse401k,
+            spouse401kAvailable - withdrawals.spouse401k,
           ),
           primaryTradIra: Math.max(
             0,
@@ -5657,7 +6715,9 @@ function simulateCouple(coupleInputs, options = {}) {
       spouseAge,
       phase,
       spending,
-      wages: primaryWage + spouseWage,
+      // Spendable (after employee FICA); taxable wages appear inside magi.
+      wages: Math.round(primaryWageCash + spouseWageCash),
+      ficaTax: Math.round(primaryFica + spouseFica),
       partTime: primaryPartTime + spousePartTime,
       ss: primarySs + spouseSs,
       pension: primaryPension + spousePension,
@@ -5707,7 +6767,12 @@ function simulateCouple(coupleInputs, options = {}) {
           ss: primarySs,
           pension: primaryPension,
           partTime: primaryPartTime,
-          wages: primaryWage,
+          wages: Math.round(primaryWageCash),
+          fica: Math.round(primaryFica),
+          // Still-working spouse contributions continue during staggered
+          // years (funded from salary; see fundPersonContributions).
+          contribution401kApplied: Math.round(primary401kApplied),
+          contributionHsaApplied: Math.round(primaryHsaApplied),
         },
         spouse: {
           name: spouse.name,
@@ -5721,7 +6786,10 @@ function simulateCouple(coupleInputs, options = {}) {
           ss: spouseSs,
           pension: spousePension,
           partTime: spousePartTime,
-          wages: spouseWage,
+          wages: Math.round(spouseWageCash),
+          fica: Math.round(spouseFica),
+          contribution401kApplied: Math.round(spouse401kApplied),
+          contributionHsaApplied: Math.round(spouseHsaApplied),
         },
       },
     });
@@ -5736,12 +6804,30 @@ function simulateCouple(coupleInputs, options = {}) {
       .slice()
       .reverse()
       .find((d) => d.year < retirementData.year);
+  const coupleCurrentTotal =
+    shared.balanceCash +
+    shared.balanceTaxable +
+    primary.balance401k +
+    spouse.balance401k +
+    primary.balanceTradIra +
+    spouse.balanceTradIra +
+    primary.balanceRoth +
+    spouse.balanceRoth +
+    primary.balanceHsa +
+    spouse.balanceHsa -
+    (shared.creditCardDebt || 0);
+  // Already-retired couples have no pre-retirement row: use TODAY'S assets
+  // as the withdrawal-rate denominator (matching the individual engine).
+  // Falling back to the first year's END-of-year total overstated the rate
+  // ($100K from $1M displayed as 11.1% instead of 10%).
   const startBalance =
     startOfRetirement && startOfRetirement.total > 0
       ? startOfRetirement.total
-      : retirementData && retirementData.total > 0
-        ? retirementData.total
-        : 1;
+      : coupleCurrentTotal > 0
+        ? coupleCurrentTotal
+        : retirementData && retirementData.total > 0
+          ? retirementData.total
+          : 1;
 
   // Cumulative unmet cash flow marks the plan depleted only when it clears
   // the banner's materiality bar (materialUnmetThreshold).
@@ -5765,18 +6851,7 @@ function simulateCouple(coupleInputs, options = {}) {
       totalUnmetCashFlow: Math.round(totalUnmetCashFlow),
       depleted,
       rmdStartAge: Math.min(primary.rmdStartAge, spouse.rmdStartAge),
-      currentTotal:
-        shared.balanceCash +
-        shared.balanceTaxable +
-        primary.balance401k +
-        spouse.balance401k +
-        primary.balanceTradIra +
-        spouse.balanceTradIra +
-        primary.balanceRoth +
-        spouse.balanceRoth +
-        primary.balanceHsa +
-        spouse.balanceHsa -
-        (shared.creditCardDebt || 0),
+      currentTotal: coupleCurrentTotal,
       planThroughAge: displayInputs.planThroughAge,
     },
   };
@@ -5814,7 +6889,7 @@ const TERM_HELP = {
   flexibleSpending:
     "A Monte Carlo assumption that cuts discretionary spending by 10% after a year when the portfolio falls more than 15%. This models retirees tightening spending after bad markets.",
   fra:
-    "Full Retirement Age for Social Security. This app treats age 67 as the full-benefit age, then adjusts benefits down for earlier claims or up for later claims.",
+    "Full Retirement Age for Social Security, derived from your birth year: 66 for those born 1943-1954, rising by 2 months per year to 67 for 1960 and later. Benefits are reduced for claims before FRA and earn 8%/year delayed credits (no cap) up to age 70.",
   hsa:
     "Health Savings Account. Tax-advantaged medical account; withdrawals for qualified medical costs are tax-free.",
   hysa:
@@ -6702,6 +7777,7 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
     {
       title: "Income",
       rows: [
+        ["Annual Salary (Gross)", fmtMoney(exportInputs.salaryIncome || 0)],
         ["Part-Time Income / Year", fmtMoney(exportInputs.partTimeIncome)],
         ["Years of Part-Time Work", fmtNum(exportInputs.partTimeYears)],
         ["Social Security at FRA / Year", fmtMoney(exportInputs.ssIncome)],
@@ -7934,6 +9010,14 @@ const DEFAULT_INPUTS = {
   baseExpenses: 60000,
   healthcarePre65: 18000,
   healthcarePost65: 8000,
+  // Gross annual salary (today's dollars) while still working. Affects
+  // PRE-RETIREMENT TAXES ONLY: forced RMDs, inherited payouts, SS, and
+  // pensions received while working are taxed stacked on top of this salary
+  // (the projection is charged the incremental tax above a salary-only
+  // baseline) instead of from the bottom brackets. Salary cash itself —
+  // its own income tax, FICA, and spending — stays out of scope and never
+  // funds balances. $0 = no stacking (legacy tax floor).
+  salaryIncome: 0,
   partTimeIncome: 0,
   partTimeYears: 0,
   ssIncome: 24000,
@@ -8027,9 +9111,14 @@ const DEFAULT_COUPLE_INPUTS = {
     contribMatch: DEFAULT_INPUTS.contribMatch,
     contribHsa: DEFAULT_INPUTS.contribHsa,
     // Gross annual salary (today's dollars) while this spouse still works.
-    // Only used in projection years AFTER the other spouse has retired
-    // (staggered retirement): it funds household spending and is taxed as
-    // ordinary income. Joint working years remain out of scope.
+    // In ALL working years it stacks under forced flows (RMDs, inherited
+    // payouts, SS, pensions) for tax purposes — the plan is charged only the
+    // incremental tax; the salary's own tax/FICA/spending stay out of scope.
+    // In years AFTER the other spouse has retired (staggered retirement) it
+    // additionally funds this spouse's contributions (capped at pay), pays
+    // employee FICA, and the remainder covers household spending as taxable
+    // income; $0 in those years means contributions stop (no funding
+    // source).
     salaryIncome: 0,
     partTimeIncome: DEFAULT_INPUTS.partTimeIncome,
     partTimeYears: DEFAULT_INPUTS.partTimeYears,
@@ -8302,7 +9391,7 @@ function compareScenarios(baseInputs, retirementAges, spendingLevels) {
 // ============================================================
 
 function normalizeCouplePerson(person, fallback) {
-  const merged = { ...fallback, ...(person || {}) };
+  const merged = sanitizeEngineInputs({ ...fallback, ...(person || {}) });
   const computedRmdStartAge = defaultRmdStartAge(
     merged.currentAge,
     PROJECTION_START_YEAR,
@@ -8314,10 +9403,10 @@ function normalizeCouplePerson(person, fallback) {
 }
 
 function normalizeCoupleInputs(coupleInputs) {
-  const shared = {
+  const shared = sanitizeEngineInputs({
     ...DEFAULT_COUPLE_INPUTS.shared,
     ...(coupleInputs?.shared || {}),
-  };
+  });
   // Couple mode always models at least a 2-person household; stored scenarios
   // from before this floor existed may carry a stale householdSize of 1,
   // which silently capped the household HSA at the self-only limit.
@@ -8697,6 +9786,11 @@ const SETTINGS_IMPORT_SPECS = [
     labels: ["healthcare post-65", "healthcare 65+", "healthcare post 65"],
   },
   // --- Income
+  {
+    field: "salaryIncome",
+    kind: "money",
+    labels: ["annual salary (gross)", "annual salary", "gross salary"],
+  },
   {
     field: "partTimeIncome",
     kind: "money",
@@ -9486,6 +10580,7 @@ function scaleOwnerDetails(ownerDetails, factor) {
     "pension",
     "partTime",
     "wages",
+    "fica",
     "contribution401kApplied",
     "contributionHsaApplied",
   ];
@@ -9604,7 +10699,7 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
         onChange={onChange("salaryIncome")}
         prefix="$"
         step={1000}
-        hint="Only matters with staggered retirements: after the other spouse retires, this salary (net of pre-tax contributions) funds household spending and is taxed. Joint working years stay out of scope."
+        hint="While working, taxes on RMDs/SS/pensions stack on top of this salary (its own tax stays outside the plan). After the other spouse retires it also funds this spouse's contributions (capped at pay), employee FICA, and household spending — $0 means contributions stop in those years."
       />
       <NumberInput
         label="Part-Time Income / Year"
@@ -9630,7 +10725,7 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
         label="Age to Claim SS"
         value={person.ssAge}
         onChange={onChange("ssAge")}
-        hint="62 (earliest) to 70; 67 = full benefit. Entries above 70 are treated as 70 (delayed credits stop there)."
+        hint="62 (earliest) to 70; full benefit at your FRA (66–67 by birth year). Entries above 70 are treated as 70 (delayed credits stop there)."
       />
       <NumberInput
         label="Annual Pension"
@@ -10097,10 +11192,11 @@ function CoupleInputs({ couple, updateCouple, penaltyImpact = null }) {
             <span className="font-semibold">Heads up:</span> with staggered
             retirements, enter the still-working spouse's{" "}
             <em>Annual Salary (Gross)</em> in their section. After the first
-            spouse retires, that salary (net of pre-tax contributions) funds
-            household spending and is taxed; any after-tax surplus is saved to
-            cash. If it's left at $0, all household spending is drawn from
-            savings — more pessimistic than reality.
+            spouse retires, that salary funds their contributions (capped at
+            pay — a $0 salary means contributions stop), pays employee FICA,
+            and the remainder covers household spending and is taxed; any
+            after-tax surplus is saved to cash. Their workplace plan is
+            shielded from withdrawals and RMDs until they retire.
           </span>
         </div>
         <NumberInput
@@ -10556,6 +11652,7 @@ export default function RetirementPlanner() {
       ...row,
       spending: row.spending * factor,
       wages: (row.wages || 0) * factor,
+      ficaTax: (row.ficaTax || 0) * factor,
       partTime: row.partTime * factor,
       ss: row.ss * factor,
       pension: (row.pension || 0) * factor,
@@ -11490,6 +12587,14 @@ export default function RetirementPlanner() {
 
             <Section title="Income" icon="💵">
               <NumberInput
+                label="Annual Salary (Gross)"
+                value={inputs.salaryIncome || 0}
+                onChange={update("salaryIncome")}
+                prefix="$"
+                step={1000}
+                hint="Pre-retirement taxes only: RMDs, inherited payouts, SS, and pensions received while still working are taxed on top of this salary instead of from the bottom brackets. Never funds spending or contributions here. $0 = ignore salary."
+              />
+              <NumberInput
                 label="Part-Time Income / Year"
                 value={inputs.partTimeIncome}
                 onChange={update("partTimeIncome")}
@@ -11515,7 +12620,7 @@ export default function RetirementPlanner() {
                 label="Age to Claim SS"
                 value={inputs.ssAge}
                 onChange={update("ssAge")}
-                hint="62 (earliest) to 70; 67 = full benefit. Entries above 70 are treated as 70 (delayed credits stop there)."
+                hint="62 (earliest) to 70; full benefit at your FRA (66–67 by birth year). Entries above 70 are treated as 70 (delayed credits stop there)."
               />
             </Section>
 
@@ -11549,7 +12654,7 @@ export default function RetirementPlanner() {
                 }}
                 prefix="$"
                 step={1000}
-                hint="In today's dollars at benefit start"
+                hint="Today's dollars at benefit start: inflated to commencement at your general inflation rate, then the Pension COLA applies once payments begin"
               />
               {inputs.pensionIncome > 0 && (
                 <>
@@ -12868,15 +13973,26 @@ export default function RetirementPlanner() {
                 withdrawals cover both spending and tax on those withdrawals).
               </li>
               <li>
-                RMDs modeled from your configured start age using the 2022+
-                Uniform Lifetime Table. Inherited-account rules not modeled.
-                RMDs are computed on the combined 401k + IRA balance; in real
-                life each employer plan's RMD must be taken from that plan
-                (only IRAs can be aggregated).
+                Balances are treated as of January 1 of the current year: the
+                first projection year applies a full year of growth, and the
+                model works in whole calendar years (retirement, claims, and
+                RMDs are not prorated mid-year).
               </li>
               <li>
-                <TermLabel info={TERM_HELP.niit}>NIIT</TermLabel> (3.8%)
-                modeled above $250K joint / $200K single{" "}
+                RMDs modeled from your configured start age using the 2022+
+                Uniform Lifetime Table (whole-year ages). The Joint & Last
+                Survivor table for a sole-beneficiary spouse more than 10
+                years younger is not modeled — those RMDs are overstated.
+                Inherited (BCO) accounts follow beneficiary payout rules.
+                RMDs are computed on the combined 401k + IRA balance; in real
+                life each employer plan's RMD must be taken from that plan
+                (only IRAs can be aggregated). A still-working spouse's
+                current-employer plan is RMD-exempt until they retire.
+              </li>
+              <li>
+                <TermLabel info={TERM_HELP.niit}>NIIT</TermLabel> (3.8%) on
+                investment income (realized gains + cash interest) above
+                $250K joint / $200K single{" "}
                 <TermLabel info={TERM_HELP.magi}>MAGI</TermLabel>. Thresholds
                 not indexed (statutory).
               </li>
