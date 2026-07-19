@@ -74,6 +74,7 @@ The projection engine models:
 - Taxable Social Security using provisional-income rules.
 - Roth conversions and tax gross-up through an iterative solver.
 - RMDs using the 2022+ Uniform Lifetime Table and an RMD start age derived from current age/start year unless overridden.
+- Inherited BCO accounts in Individual mode, including explicit 403(b)/TSA versus IRA plan type, life-expectancy or 10-year payout rules, contract-specific final distribution dates, no-charge endorsement selection, and termination after full distribution.
 - 401(k) employee, catch-up, annual-addition, and HSA contribution caps.
 - Medicare IRMAA using 2026 Part B and Part D surcharge tiers.
 - ACA premium subsidy estimates with the 2026 return of the 400% FPL cliff under current law.
@@ -87,7 +88,9 @@ Use the Plan Type control in the sidebar to switch between Individual and
 Married Couple. Couple mode assumes both spouses remain alive through the plan
 horizon and uses Married Filing Jointly tax treatment. It does not model
 survivor benefits, widow/widower filing-status changes, first-death expense
-changes, inherited-account rules, or estate outcomes.
+changes, couple-mode inherited-account transitions, or estate outcomes.
+Individual mode supports explicitly configured inherited BCO accounts; a
+contract-specific age-72 deadline is not assumed for every inherited account.
 
 In couple mode, cash, taxable brokerage, taxable cost basis, debt, lifestyle
 spending, returns, inflation, ACA settings, IRMAA/MAGI thresholds, and Monte

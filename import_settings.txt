@@ -19,11 +19,17 @@ Credit Card Debt: $0
 
 ## Inherited (BCO)
 Balance: $300,000
-Account Type: Qualified (inherited IRA / 403b / 401k)
+Inherited Plan Type: Other qualified retirement plan
+Contract / Product: Generic inherited BCO example
+Withdrawal-Charge Treatment: Unknown - verify contract
+Partial Withdrawal Minimum: $0
 Payout Rule: Life expectancy (stretch)
 Relationship to Owner: Surviving spouse
 Year of Owner's Death: 2026
 Owner's Birth Year: 1965
+Owner RMD Status: Auto (infer from years)
+Contract Final Distribution Rule: No contract-specific final deadline
+Contract Source Note: Generic example - verify plan documents
 
 ## Cash Strategy
 Cash Withdrawal Strategy: Preserve cash reserve

@@ -512,6 +512,50 @@ function rmdDivisor(age) {
   return 2.0;
 }
 
+// ============================================================
+// INHERITED BCO — TWO-LAYER MODEL
+// ============================================================
+// Layer A — FEDERAL beneficiary-distribution rules (inheritedRmdRequirement
+// below): the life-expectancy schedule, the statutory 10-year rule, whether
+// annual distributions are required in years 1-9, and whether the original
+// owner died before or on/after their required beginning date (RBD).
+// Layer B — CONTRACT-specific BCO terms (this helper): an insurer's
+// Beneficiary Continuation Option endorsement (e.g. Equitable EQUI-VEST
+// Series 201 for a public-school 403(b)/TSA) can impose its OWN
+// full-liquidation deadline — such as "fully distributed when the deceased
+// owner would have reached age 72" — plus execution terms: a withdrawal-
+// charge waiver, a partial-withdrawal minimum, and termination of the BCO on
+// full withdrawal.
+// The layers are deliberately separate. A contract deadline can only SHORTEN
+// the federal 10-year deadline, never extend it; and a contract age-72 rule
+// is NOT a universal inherited-account rule — it applies only when the
+// user's contract configuration says so. The final year derives from the
+// deceased owner's ENTERED birth year (born 1971 → age 72 in 2043; born
+// 1970 → 2042), never from a hard-coded offset.
+function resolveInheritedFinalDistributionYear({
+  payoutRule,
+  deathYear,
+  deceasedBirthYear,
+  contractMode = "none",
+  contractAge = 72,
+  contractYear = 0,
+}) {
+  const contractDeadline =
+    contractMode === "ownerAge"
+      ? deceasedBirthYear + contractAge
+      : contractMode === "explicitYear" && contractYear > 0
+        ? contractYear
+        : null;
+  const federalDeadline = payoutRule === "tenYear" ? deathYear + 10 : null;
+  const effectiveDeadline =
+    payoutRule === "tenYear"
+      ? contractDeadline != null
+        ? Math.min(federalDeadline, contractDeadline)
+        : federalDeadline
+      : contractDeadline;
+  return { contractDeadline, federalDeadline, effectiveDeadline };
+}
+
 // Required distribution this year from an inherited (BCO — Beneficiary
 // Continuation Option) account, per post-SECURE beneficiary rules (final
 // regulations T.D. 10001, July 2024):
@@ -536,13 +580,33 @@ function inheritedRmdRequirement({
   relationship, // "spouse" | "nonSpouse"
   deathYear,
   deceasedBirthYear,
+  // Layer-B contract overlay: the EFFECTIVE final distribution year from
+  // resolveInheritedFinalDistributionYear (contract deadline, federal
+  // 10-year deadline, or the earlier of the two). null = no forced
+  // liquidation year beyond what the payout rule itself imposes.
+  finalDistributionYear = null,
+  // "auto" infers the owner's RBD status from birth/death years (whole-
+  // calendar-year approximation); "beforeRbd" / "onOrAfterRbd" override it —
+  // exact RBDs can turn on the owner's birthday, retirement status, and
+  // plan provisions the model cannot see.
+  ownerRmdStatus = "auto",
 }) {
   if (balance <= 0 || year <= deathYear) return 0;
+  // Contract/effective liquidation deadline: the ENTIRE remaining balance
+  // must be distributed in (or after) that year.
+  if (finalDistributionYear != null && year >= finalDistributionYear) {
+    return balance;
+  }
   const isSpouse = relationship === "spouse";
   const deceasedRmdAge = rmdStartAgeForBirthYear(deceasedBirthYear);
   // Annual-model RBD: April 1 of the year after the owner's RMD-age year, so
   // a death in any later year is "on or after" the RBD.
-  const diedAfterRbd = deathYear > deceasedBirthYear + deceasedRmdAge;
+  const diedAfterRbd =
+    ownerRmdStatus === "onOrAfterRbd"
+      ? true
+      : ownerRmdStatus === "beforeRbd"
+        ? false
+        : deathYear > deceasedBirthYear + deceasedRmdAge;
   const firstPaymentYear = deathYear + 1;
 
   if (payoutRule === "tenYear") {
@@ -3061,6 +3125,130 @@ function runSelfTests() {
     },
   );
 
+  // --- Contract-specific BCO deadlines (Equitable Series 201 example)
+  testScenario("BCO Series 201: owner age 72 deadline derives from birth year", () => {
+    const born1971 = resolveInheritedFinalDistributionYear({
+      payoutRule: "lifeExpectancy",
+      deathYear: 2026,
+      deceasedBirthYear: 1971,
+      contractMode: "ownerAge",
+      contractAge: 72,
+    });
+    const born1970 = resolveInheritedFinalDistributionYear({
+      payoutRule: "lifeExpectancy",
+      deathYear: 2026,
+      deceasedBirthYear: 1970,
+      contractMode: "ownerAge",
+      contractAge: 72,
+    });
+    return {
+      passed:
+        born1971.contractDeadline === 2043 &&
+        born1970.contractDeadline === 2042 &&
+        born1971.effectiveDeadline === 2043,
+      details: `born 1971=${born1971.contractDeadline}, born 1970=${born1970.contractDeadline}`,
+    };
+  });
+
+  testScenario("BCO 10-year rule: federal deadline cannot be extended by age-72 contract date", () => {
+    const deadlines = resolveInheritedFinalDistributionYear({
+      payoutRule: "tenYear",
+      deathYear: 2026,
+      deceasedBirthYear: 1971,
+      contractMode: "ownerAge",
+      contractAge: 72,
+    });
+    return {
+      passed:
+        deadlines.contractDeadline === 2043 &&
+        deadlines.federalDeadline === 2036 &&
+        deadlines.effectiveDeadline === 2036,
+      details: `contract=${deadlines.contractDeadline}, federal=${deadlines.federalDeadline}, effective=${deadlines.effectiveDeadline}`,
+    };
+  });
+
+  const series201TestInputs = {
+    ...baseInputs,
+    filingStatus: "single",
+    currentAge: 50,
+    retirementAge: 50,
+    planThroughAge: 75,
+    balanceCash: 0,
+    balanceTaxable: 0,
+    balance401k: 0,
+    balanceTradIra: 0,
+    balanceRoth: 0,
+    balanceHsa: 0,
+    baseExpenses: 0,
+    healthcarePre65: 0,
+    healthcarePost65: 0,
+    partTimeIncome: 0,
+    partTimeYears: 0,
+    ssIncome: 0,
+    pensionIncome: 0,
+    conversionBridge: 0,
+    conversionMid: 0,
+    conversionFinal: 0,
+    balanceInherited: 100000,
+    inheritedPlanType: "403bTsa",
+    inheritedTaxType: "qualified",
+    inheritedRelationship: "spouse",
+    inheritedDeathYear: 2026,
+    inheritedDeceasedBirthYear: 1971,
+    inheritedOwnerRmdStatus: "onOrAfterRbd",
+    inheritedWithdrawalChargePolicy: "bcoNoCharge",
+    inheritedPartialWithdrawalMinimum: 300,
+    inheritedContractFinalDistributionMode: "ownerAge",
+    inheritedContractFinalDistributionAge: 72,
+  };
+
+  testScenario("BCO Series 201: life-expectancy final year empties and terminates the BCO", () => {
+    const r = simulate({
+      ...series201TestInputs,
+      inheritedPayoutRule: "lifeExpectancy",
+    });
+    const finalRow = r.yearlyData.find((d) => d.year === 2043);
+    const afterFinal = r.yearlyData.filter((d) => d.year > 2043);
+    return {
+      passed:
+        !!finalRow &&
+        finalRow.inherited === 0 &&
+        finalRow.fromInherited > 0 &&
+        finalRow.inheritedFinalDistributionRequired === true &&
+        finalRow.inheritedFinalDistributionYear === 2043 &&
+        finalRow.inheritedBcoTerminated === true &&
+        finalRow.inheritedWithdrawalCharge === 0 &&
+        finalRow.earlyPenalty === 0 &&
+        finalRow.surplusToCash > 0 &&
+        afterFinal.every((d) => d.inherited === 0),
+      details: finalRow
+        ? `2043 draw=${finalRow.fromInherited}, balance=${finalRow.inherited}, surplusToCash=${finalRow.surplusToCash}, terminated=${finalRow.inheritedBcoTerminated}`
+        : "2043 row not in plan",
+    };
+  });
+
+  testScenario("BCO Series 201: 10-year selection uses 2036 even with age-72 contract metadata", () => {
+    const r = simulate({
+      ...series201TestInputs,
+      inheritedPayoutRule: "tenYear",
+    });
+    const finalRow = r.yearlyData.find((d) => d.year === 2036);
+    const laterAgeRow = r.yearlyData.find((d) => d.year === 2043);
+    return {
+      passed:
+        !!finalRow &&
+        finalRow.inherited === 0 &&
+        finalRow.fromInherited > 0 &&
+        finalRow.inheritedFinalDistributionRequired === true &&
+        finalRow.inheritedFinalDistributionYear === 2036 &&
+        !!laterAgeRow &&
+        laterAgeRow.inherited === 0,
+      details: finalRow
+        ? `2036 draw=${finalRow.fromInherited}, balance=${finalRow.inherited}, effective deadline=${finalRow.inheritedFinalDistributionYear}`
+        : "2036 row not in plan",
+    };
+  });
+
   // ============================================================
   // SETTINGS IMPORT — parse pasted "Label: value" text
   // ============================================================
@@ -3173,6 +3361,41 @@ function runSelfTests() {
         scoped.updates.inheritedPayoutRule === "tenYear" &&
         loose.updates.balanceInherited === undefined,
       details: `scoped balanceInherited=${scoped.updates.balanceInherited}, loose=${loose.updates.balanceInherited}`,
+    };
+  });
+  testScenario("import: BCO contract fields preserve plan type and deadline settings", () => {
+    const parsed = parseSettingsText(
+      [
+        "## Inherited (BCO)",
+        "Balance: $300,000",
+        "Inherited Plan Type: 403(b) TSA / public-school plan",
+        "Contract / Product: Equitable EQUI-VEST Series 201",
+        "Withdrawal-Charge Treatment: BCO endorsement: no withdrawal charge",
+        "Partial Withdrawal Minimum: $300",
+        "Payout Rule: Life expectancy (stretch)",
+        "Relationship to Owner: Surviving spouse",
+        "Year of Owner's Death: 2026",
+        "Owner's Birth Year: 1971",
+        "Owner RMD Status: Died before required beginning date",
+        "Contract Final Distribution Rule: Deceased owner's age 72",
+        "Deceased Owner's Final Distribution Age: 72",
+        "Contract Final Distribution Year: 2043",
+        "Contract Source Note: Equitable Series 201 BCO endorsement",
+      ].join("\n"),
+    );
+    return {
+      passed:
+        parsed.updates.balanceInherited === 300000 &&
+        parsed.updates.inheritedPlanType === "403bTsa" &&
+        parsed.updates.inheritedContractLabel === "Equitable EQUI-VEST Series 201" &&
+        parsed.updates.inheritedWithdrawalChargePolicy === "bcoNoCharge" &&
+        parsed.updates.inheritedPartialWithdrawalMinimum === 300 &&
+        parsed.updates.inheritedContractFinalDistributionMode === "ownerAge" &&
+        parsed.updates.inheritedContractFinalDistributionAge === 72 &&
+        parsed.updates.inheritedContractFinalDistributionYear === 2043 &&
+        parsed.updates.inheritedOwnerRmdStatus === "beforeRbd" &&
+        parsed.updates.inheritedContractSourceNote.includes("Equitable Series 201"),
+      details: `plan=${parsed.updates.inheritedPlanType}, mode=${parsed.updates.inheritedContractFinalDistributionMode}, year=${parsed.updates.inheritedContractFinalDistributionYear}`,
     };
   });
   testScenario("import: couple-mode text is detected and refused", () => {
@@ -4303,6 +4526,15 @@ function simulate(inputs, options = {}) {
     inheritedRelationship = "spouse",
     inheritedDeathYear = PROJECTION_START_YEAR,
     inheritedDeceasedBirthYear = 1965,
+    // Layer-B contract overlay (see resolveInheritedFinalDistributionYear).
+    // Defaults reproduce pure federal behavior for legacy inputs.
+    inheritedPlanType = "",
+    inheritedWithdrawalChargePolicy = "unknown",
+    inheritedPartialWithdrawalMinimum = 0,
+    inheritedContractFinalDistributionMode = "none",
+    inheritedContractFinalDistributionAge = 72,
+    inheritedContractFinalDistributionYear = 0,
+    inheritedOwnerRmdStatus = "auto",
   } = inputs;
 
   // Guard against invalid inputs during manual typing. A retirement age at or
@@ -4371,11 +4603,38 @@ function simulate(inputs, options = {}) {
   let bRoth = balanceRoth;
   let bHsa = balanceHsa;
   let bInherited = Math.max(0, balanceInherited);
+  // Plan-type classification (backward compatible): legacy inputs carry only
+  // inheritedTaxType — "qualified" maps to a GENERIC qualified inherited
+  // retirement plan (never assumed to be an IRA), "nonqualified" to a
+  // nonqualified annuity. When inheritedPlanType is present it wins, and the
+  // tax character follows from it: 403(b)/TSA, IRA, and other qualified
+  // plans are ordinary-income accounts; only "nonqualifiedAnnuity" keeps the
+  // earnings-first/basis treatment.
+  const effectiveInheritedPlanType =
+    inheritedPlanType ||
+    (inheritedTaxType === "nonqualified"
+      ? "nonqualifiedAnnuity"
+      : "qualifiedOther");
+  const effectiveInheritedTaxType =
+    effectiveInheritedPlanType === "nonqualifiedAnnuity"
+      ? "nonqualified"
+      : "qualified";
+  // Layer A (federal) vs layer B (contract) deadlines. The effective
+  // deadline forces the ENTIRE remaining balance out in that year; a
+  // contract deadline can only shorten the federal 10-year deadline.
+  const inheritedDeadlines = resolveInheritedFinalDistributionYear({
+    payoutRule: inheritedPayoutRule,
+    deathYear: inheritedDeathYear,
+    deceasedBirthYear: inheritedDeceasedBirthYear,
+    contractMode: inheritedContractFinalDistributionMode,
+    contractAge: inheritedContractFinalDistributionAge,
+    contractYear: inheritedContractFinalDistributionYear,
+  });
   // Non-qualified annuity cost basis ("investment in the contract"): the
   // portion of the balance that returns tax-free after gains distribute
   // first. Qualified inherited accounts have no after-tax basis here.
   let bInheritedBasis =
-    inheritedTaxType === "nonqualified"
+    effectiveInheritedTaxType === "nonqualified"
       ? Math.max(0, Math.min(inheritedBasis, bInherited))
       : 0;
   const inheritedConfig = {
@@ -4383,7 +4642,11 @@ function simulate(inputs, options = {}) {
     relationship: inheritedRelationship,
     deathYear: inheritedDeathYear,
     deceasedBirthYear: inheritedDeceasedBirthYear,
+    finalDistributionYear: inheritedDeadlines.effectiveDeadline,
+    ownerRmdStatus: inheritedOwnerRmdStatus,
   };
+  // Contract execution state: a full withdrawal terminates the BCO.
+  let inheritedBcoTerminated = false;
   let unpaidDebt = Math.max(0, creditCardDebt);
   const initialCashPayoff = Math.min(bCash, unpaidDebt);
   bCash -= initialCashPayoff;
@@ -4587,7 +4850,7 @@ function simulate(inputs, options = {}) {
         filingStatus,
         rothLayers,
         inheritedRmd: accumInheritedRmd,
-        inheritedTaxType,
+        inheritedTaxType: effectiveInheritedTaxType,
         inheritedNyExcludable: accumInheritedNyExcludable,
       });
       const { wCash, wTaxable, wInherited = 0, wIra, wRoth } =
@@ -4595,6 +4858,7 @@ function simulate(inputs, options = {}) {
       const tax = solve.tax;
       // Execute withdrawals exactly like a retirement year.
       const basisReduction = Math.max(0, wTaxable - solve.realizedGain);
+      const inheritedStartBalance = bInherited;
       bCash = Math.max(0, bCash - wCash);
       bTaxable = Math.max(0, bTaxable - wTaxable);
       bTaxableBasis = Math.max(0, bTaxableBasis - basisReduction);
@@ -4607,6 +4871,25 @@ function simulate(inputs, options = {}) {
         bInheritedBasis -
           Math.max(0, wInherited - (solve.inheritedTaxable || 0)),
       );
+      // Contract (layer-B) execution overlay: the projection NEVER deducts a
+      // withdrawal charge — "bcoNoCharge" because the endorsement waives it,
+      // other policies because no schedule is modeled (the UI warns that
+      // zero is not proof the real contract charges nothing). The partial-
+      // withdrawal minimum is an execution constraint only: it flags, it
+      // never alters the federal RMD math. A withdrawal that empties the
+      // account is a FULL withdrawal (exempt from the minimum) and
+      // terminates the BCO.
+      const inheritedFinalDistributionRequired =
+        inheritedDeadlines.effectiveDeadline != null &&
+        year >= inheritedDeadlines.effectiveDeadline &&
+        inheritedStartBalance > 0.5;
+      const inheritedPartialMinimumWarning =
+        wInherited > 0 &&
+        wInherited < Math.max(0, inheritedPartialWithdrawalMinimum || 0) &&
+        wInherited < inheritedStartBalance - 0.5;
+      if (inheritedStartBalance > 0.5 && bInherited <= 0.5) {
+        inheritedBcoTerminated = true;
+      }
       // The projection's tax for the year is the INCREMENT over the
       // salary-only baseline (equal to the full tax when no salary is
       // entered). Reinvest the forced flows net of that increment.
@@ -4675,6 +4958,12 @@ function simulate(inputs, options = {}) {
         total: Math.round(total),
         rmdAmount: Math.round(accumIraRmd),
         inheritedRmdAmount: Math.round(accumInheritedRmd),
+        inheritedWithdrawalCharge: 0,
+        inheritedWithdrawalChargePolicy,
+        inheritedPartialMinimumWarning,
+        inheritedBcoTerminated,
+        inheritedFinalDistributionRequired,
+        inheritedFinalDistributionYear: inheritedDeadlines.effectiveDeadline,
         realizedGain: Math.round(solve.realizedGain),
         taxableSs: Math.round(solve.taxableSs),
         magi: Math.round(solve.ordIncome + solve.realizedGain),
@@ -4914,7 +5203,7 @@ function simulate(inputs, options = {}) {
         seppExempt: seppActive ? seppPayment : 0,
         additionalRealizedGain: debtPayoffGainThisYear,
         inheritedRmd,
-        inheritedTaxType,
+        inheritedTaxType: effectiveInheritedTaxType,
         inheritedNyExcludable,
       });
 
@@ -5020,7 +5309,7 @@ function simulate(inputs, options = {}) {
         seppExempt: seppActive ? seppPayment : 0,
         additionalRealizedGain: debtPayoffGainThisYear,
         inheritedRmd,
-        inheritedTaxType,
+        inheritedTaxType: effectiveInheritedTaxType,
         inheritedNyExcludable,
       });
       }
@@ -5075,6 +5364,7 @@ function simulate(inputs, options = {}) {
 
     // Apply realized gain to basis tracking BEFORE executing withdrawal
     const basisReduction = Math.max(0, wTaxable - realizedGain);
+    const inheritedStartBalance = bInherited;
 
     // Execute withdrawals (balances updated)
     bCash = Math.max(0, bCash - wCash);
@@ -5094,6 +5384,20 @@ function simulate(inputs, options = {}) {
       0,
       bInheritedBasis - Math.max(0, wInherited - inheritedTaxable),
     );
+    // Contract (layer-B) execution overlay — see the accumulation branch:
+    // no withdrawal charge is ever deducted; the partial minimum only
+    // flags; emptying the account terminates the BCO.
+    const inheritedFinalDistributionRequired =
+      inheritedDeadlines.effectiveDeadline != null &&
+      year >= inheritedDeadlines.effectiveDeadline &&
+      inheritedStartBalance > 0.5;
+    const inheritedPartialMinimumWarning =
+      wInherited > 0 &&
+      wInherited < Math.max(0, inheritedPartialWithdrawalMinimum || 0) &&
+      wInherited < inheritedStartBalance - 0.5;
+    if (inheritedStartBalance > 0.5 && bInherited <= 0.5) {
+      inheritedBcoTerminated = true;
+    }
 
     // Anything received or withdrawn beyond spending + tax goes to cash
     // (reinvested in HYSA-equivalent): forced RMD/SEPP/inherited draws above
@@ -5186,6 +5490,12 @@ function simulate(inputs, options = {}) {
       rmdAmount: Math.round(rmdAmount),
       inheritedRmdAmount: Math.round(inheritedRmd),
       inheritedTaxable: Math.round(inheritedTaxable),
+      inheritedWithdrawalCharge: 0,
+      inheritedWithdrawalChargePolicy,
+      inheritedPartialMinimumWarning,
+      inheritedBcoTerminated,
+      inheritedFinalDistributionRequired,
+      inheritedFinalDistributionYear: inheritedDeadlines.effectiveDeadline,
       // Forced withdrawals (RMDs / SEPP / inherited payouts) above spending +
       // tax are deposited into Cash — recorded so the UI can explain why the
       // cash balance grows in RMD years instead of silently swelling.
@@ -6886,6 +7196,8 @@ const TERM_HELP = {
     "Affordable Care Act marketplace health insurance. Subsidies can lower pre-Medicare premiums, but they depend heavily on MAGI and household size.",
   bco:
     "Beneficiary Continuation Option. Offered on inherited annuity/retirement contracts (e.g. EQUI-VEST): the beneficiary keeps the account invested in inherited form instead of cashing out. Because the account stays in beneficiary form, withdrawals at ANY age are exempt from the 10% early-withdrawal penalty (the IRS death exception) — but the taxable portion is still ordinary income, and required payouts apply (life-expectancy payments for eligible beneficiaries, or full depletion within 10 years). Caution: a surviving spouse who instead elects spousal continuation (treating the account as their own) gives up the penalty exemption before 59½.",
+  bcoContract:
+    "Contract-specific BCO terms are separate from federal beneficiary rules. An Equitable EQUI-VEST Series 201 endorsement may waive withdrawal charges and require final liquidation at the deceased owner's stated age, but an age-based deadline is not universal and must be entered from the actual endorsement.",
   flexibleSpending:
     "A Monte Carlo assumption that cuts discretionary spending by 10% after a year when the portfolio falls more than 15%. This models retirees tightening spending after bad markets.",
   fra:
@@ -7558,6 +7870,42 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
     ? normalizeCoupleInputs(sourceInputs.couple)
     : null;
   const exportInputs = isCoupleExport ? sourceInputs : inputs;
+  const inheritedExportPlanType = exportInputs.inheritedPlanType ||
+    (exportInputs.inheritedTaxType === "nonqualified"
+      ? "nonqualifiedAnnuity"
+      : "qualifiedOther");
+  const inheritedExportChargePolicy =
+    exportInputs.inheritedWithdrawalChargePolicy || "unknown";
+  const inheritedExportDeadline = resolveInheritedFinalDistributionYear({
+    payoutRule: exportInputs.inheritedPayoutRule || "lifeExpectancy",
+    deathYear: exportInputs.inheritedDeathYear || PROJECTION_START_YEAR,
+    deceasedBirthYear: exportInputs.inheritedDeceasedBirthYear || 1965,
+    contractMode: exportInputs.inheritedContractFinalDistributionMode || "none",
+    contractAge: exportInputs.inheritedContractFinalDistributionAge || 72,
+    contractYear: exportInputs.inheritedContractFinalDistributionYear || 0,
+  });
+  const inheritedExportPlanLabel = {
+    "403bTsa": "403(b) TSA / public-school plan",
+    ira: "Inherited IRA",
+    qualifiedOther: "Other qualified retirement plan",
+    nonqualifiedAnnuity: "Nonqualified annuity",
+  }[inheritedExportPlanType] || "Other qualified retirement plan";
+  const inheritedExportChargeLabel = {
+    bcoNoCharge: "BCO endorsement: no withdrawal charge",
+    standardContract: "Standard contract schedule - not modeled",
+    unknown: "Unknown - verify contract",
+  }[inheritedExportChargePolicy] || "Unknown - verify contract";
+  const inheritedExportFinalRuleLabel = {
+    none: "No contract-specific final deadline",
+    ownerAge: `Deceased owner's age ${fmtNum(exportInputs.inheritedContractFinalDistributionAge || 72)}`,
+    explicitYear: `Specific calendar year ${fmtNum(exportInputs.inheritedContractFinalDistributionYear || 0)}`,
+  }[exportInputs.inheritedContractFinalDistributionMode || "none"] ||
+    "No contract-specific final deadline";
+  const inheritedExportOwnerRmdLabel = {
+    auto: "Auto (infer from years)",
+    beforeRbd: "Died before required beginning date",
+    onOrAfterRbd: "Died on or after required beginning date",
+  }[exportInputs.inheritedOwnerRmdStatus || "auto"] || "Auto (infer from years)";
   const personGroups = (title, person) => {
     const planLabel = person.employerPlanLabel || (title === "Spouse" ? "403b" : "401k");
     return [
@@ -7698,12 +8046,19 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
             rows: [
               ["Balance", fmtMoney(exportInputs.balanceInherited)],
               [
-                "Account Type",
-                exportInputs.inheritedTaxType === "nonqualified"
-                  ? "Non-qualified annuity"
-                  : "Qualified (inherited IRA / 403b / 401k)",
+                "Inherited Plan Type",
+                inheritedExportPlanLabel,
               ],
-              ...(exportInputs.inheritedTaxType === "nonqualified"
+              [
+                "Contract / Product",
+                exportInputs.inheritedContractLabel || "Not entered",
+              ],
+              ["Withdrawal-Charge Treatment", inheritedExportChargeLabel],
+              [
+                "Partial Withdrawal Minimum",
+                fmtMoney(exportInputs.inheritedPartialWithdrawalMinimum || 0),
+              ],
+              ...(inheritedExportPlanType === "nonqualifiedAnnuity"
                 ? [["Cost Basis", fmtMoney(exportInputs.inheritedBasis || 0)]]
                 : []),
               [
@@ -7722,6 +8077,20 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
               [
                 "Owner's Birth Year",
                 fmtNum(exportInputs.inheritedDeceasedBirthYear),
+              ],
+              ["Owner RMD Status", inheritedExportOwnerRmdLabel],
+              ["Contract Final Distribution Rule", inheritedExportFinalRuleLabel],
+              [
+                "Contract Final Distribution Year",
+                fmtNum(inheritedExportDeadline.contractDeadline),
+              ],
+              [
+                "Effective Final Distribution Year",
+                fmtNum(inheritedExportDeadline.effectiveDeadline),
+              ],
+              [
+                "Contract Source Note",
+                exportInputs.inheritedContractSourceNote || "Not entered",
               ],
             ],
           },
@@ -9082,6 +9451,37 @@ const DEFAULT_INPUTS = {
   // (a spouse may wait until the owner would have reached RMD age) and
   // whether annual RMDs apply during the 10-year rule.
   inheritedDeceasedBirthYear: 1965,
+  // --- Layer-B contract-specific BCO terms (see
+  // resolveInheritedFinalDistributionYear). Generic defaults are
+  // deliberately neutral: no contract deadline, unknown charge treatment.
+  // A real endorsement (e.g. Equitable EQUI-VEST Series 201 TSA under a
+  // BCO: no withdrawal charge, $300 partial minimum, full distribution at
+  // the deceased owner's age 72) is entered by the user — never assumed.
+  // "403bTsa" | "ira" | "qualifiedOther" | "nonqualifiedAnnuity". Drives
+  // the qualified-vs-nonqualified tax treatment; a 403(b)/TSA is a
+  // qualified inherited PLAN account, not an inherited IRA.
+  inheritedPlanType: "qualifiedOther",
+  // Free-text contract/product label, e.g.
+  // "Equitable EQUI-VEST Series 201 — TSA Public School".
+  inheritedContractLabel: "",
+  // "bcoNoCharge" (endorsement waives withdrawal charges) |
+  // "standardContract" (schedule exists but is NOT modeled) | "unknown".
+  // The projection never deducts a charge; anything but "bcoNoCharge"
+  // surfaces a verify-your-contract warning instead.
+  inheritedWithdrawalChargePolicy: "unknown",
+  // Contract minimum for PARTIAL withdrawals (execution constraint only —
+  // never changes federal RMD math; a full withdrawal is exempt).
+  inheritedPartialWithdrawalMinimum: 0,
+  // "none" | "ownerAge" (deceased owner's age at final distribution) |
+  // "explicitYear". "none" keeps pure federal behavior.
+  inheritedContractFinalDistributionMode: "none",
+  inheritedContractFinalDistributionAge: 72,
+  inheritedContractFinalDistributionYear: 0,
+  // "auto" (infer from birth/death years) | "beforeRbd" | "onOrAfterRbd".
+  inheritedOwnerRmdStatus: "auto",
+  // Where the contract terms came from, e.g. "Equitable Series 201 BCO
+  // endorsement" — documentation only, not used in math.
+  inheritedContractSourceNote: "",
   conversionBridge: 0,
   conversionMid: 0,
   conversionFinal: 0,
@@ -9712,6 +10112,99 @@ const SETTINGS_IMPORT_SPECS = [
     requireSection: "inherited",
     labels: ["owner's birth year", "owners birth year"],
   },
+  {
+    field: "inheritedPlanType",
+    requireSection: "inherited",
+    labels: ["inherited plan type", "plan type"],
+    parseEnum: (v) => {
+      const s = v.toLowerCase();
+      if (
+        s.includes("403") ||
+        s.includes("tsa") ||
+        s.includes("public-school") ||
+        s.includes("public school")
+      )
+        return "403bTsa";
+      if (s.includes("ira")) return "ira";
+      if (s.includes("nonqualified") || s.includes("non-qualified") || s.includes("annuity"))
+        return "nonqualifiedAnnuity";
+      if (s.includes("qualified")) return "qualifiedOther";
+      return null;
+    },
+  },
+  {
+    field: "inheritedContractLabel",
+    requireSection: "inherited",
+    labels: ["contract / product", "contract/product", "contract product", "product"],
+  },
+  {
+    field: "inheritedWithdrawalChargePolicy",
+    requireSection: "inherited",
+    labels: ["withdrawal-charge treatment", "withdrawal charge treatment", "withdrawal charge policy"],
+    parseEnum: (v) => {
+      const s = v.toLowerCase();
+      if (s.includes("no charge") || s.includes("no withdrawal") || s.includes("bco endorsement"))
+        return "bcoNoCharge";
+      if (s.includes("standard") || s.includes("surrender")) return "standardContract";
+      if (s.includes("unknown") || s.includes("verify")) return "unknown";
+      return null;
+    },
+  },
+  {
+    field: "inheritedPartialWithdrawalMinimum",
+    kind: "money",
+    requireSection: "inherited",
+    labels: ["partial withdrawal minimum", "partial minimum"],
+  },
+  {
+    field: "inheritedContractFinalDistributionMode",
+    requireSection: "inherited",
+    labels: ["contract final distribution rule", "final distribution rule"],
+    parseEnum: (v) => {
+      const s = v.toLowerCase();
+      if (s.includes("none") || s.includes("no contract")) return "none";
+      if (s.includes("age") || s.includes("deceased owner") || s.includes("72"))
+        return "ownerAge";
+      if (s.includes("specific") || s.includes("calendar") || s.includes("year"))
+        return "explicitYear";
+      return null;
+    },
+  },
+  {
+    field: "inheritedContractFinalDistributionAge",
+    kind: "int",
+    requireSection: "inherited",
+    labels: [
+      "deceased owner's final distribution age",
+      "deceased owners final distribution age",
+      "final distribution age",
+      "contract final distribution age",
+    ],
+  },
+  {
+    field: "inheritedContractFinalDistributionYear",
+    kind: "int",
+    requireSection: "inherited",
+    labels: ["contract final distribution year", "final distribution year"],
+  },
+  {
+    field: "inheritedOwnerRmdStatus",
+    requireSection: "inherited",
+    labels: ["owner rmd status", "owner rmd timing"],
+    parseEnum: (v) => {
+      const s = v.toLowerCase();
+      if (s.includes("before") || s.includes("pre-rbd")) return "beforeRbd";
+      if (s.includes("after") || s.includes("on or") || s.includes("post-rbd"))
+        return "onOrAfterRbd";
+      if (s.includes("auto") || s.includes("infer")) return "auto";
+      return null;
+    },
+  },
+  {
+    field: "inheritedContractSourceNote",
+    requireSection: "inherited",
+    labels: ["contract source note", "source note"],
+  },
   // --- Cash Strategy
   {
     field: "cashStrategy",
@@ -9948,6 +10441,17 @@ function buildChatProfile(inputs, results) {
       },
       rmdAmount: row.rmdAmount || 0,
       inheritedRmdAmount: row.inheritedRmdAmount || 0,
+      inheritedTaxable: row.inheritedTaxable || 0,
+      inheritedWithdrawalCharge: row.inheritedWithdrawalCharge || 0,
+      inheritedWithdrawalChargePolicy:
+        row.inheritedWithdrawalChargePolicy || "unknown",
+      inheritedPartialMinimumWarning:
+        row.inheritedPartialMinimumWarning === true,
+      inheritedBcoTerminated: row.inheritedBcoTerminated === true,
+      inheritedFinalDistributionRequired:
+        row.inheritedFinalDistributionRequired === true,
+      inheritedFinalDistributionYear:
+        row.inheritedFinalDistributionYear ?? null,
       surplusToCash: row.surplusToCash || 0,
       magi: row.magi || 0,
       taxableSs: row.taxableSs || 0,
@@ -9959,7 +10463,9 @@ function buildChatProfile(inputs, results) {
     modelNotes: [
       "Projection values are nominal unless the UI toggle displays today's dollars.",
       "Monte Carlo reuses the same deterministic tax/RMD/conversion engine with randomized returns.",
-      "Inherited (BCO) accounts: withdrawals are penalty-free at any age (death exception); the taxable portion is ordinary income; beneficiary required distributions are enforced per the selected payout rule.",
+      "Inherited BCO accounts are modeled as beneficiary-form accounts: an inherited 403(b)/TSA is a qualified plan account, not automatically an inherited IRA. The taxable portion is ordinary income, and beneficiary required distributions follow the selected federal payout rule.",
+      "Contract-specific BCO terms are separate from federal rules. An owner-age final deadline is used only when configured from the contract (for example, an Equitable EQUI-VEST Series 201 endorsement), and its year is derived from the deceased owner's entered birth year. A configured contract deadline can shorten, but never extend, the federal 10-year deadline.",
+      "The final BCO liquidation is a required distribution, not required spending. After tax, any excess follows the existing surplusToCash behavior in retirement; a full withdrawal terminates the BCO. Withdrawal charges are only treated as waived when the user selects the actual no-charge endorsement; standard/unknown schedules are not modeled.",
       "Cash can GROW during retirement: when forced withdrawals (RMDs, SEPP, inherited payouts) exceed spending + tax, the after-tax excess is deposited into Cash/HYSA (surplusToCash per row). Cash also earns the Cash/HYSA return. This is the standard answer to 'why is my cash balance increasing?'",
       "This is planning analysis, not tax, legal, investment, or fiduciary advice.",
     ],
@@ -11679,6 +12185,7 @@ export default function RetirementPlanner() {
       rmdAmount: (row.rmdAmount || 0) * factor,
       inheritedRmdAmount: (row.inheritedRmdAmount || 0) * factor,
       inheritedTaxable: (row.inheritedTaxable || 0) * factor,
+      inheritedWithdrawalCharge: (row.inheritedWithdrawalCharge || 0) * factor,
       surplusToCash: (row.surplusToCash || 0) * factor,
       surplusToTaxable: (row.surplusToTaxable || 0) * factor,
       realizedGain: (row.realizedGain || 0) * factor,
@@ -12360,7 +12867,7 @@ export default function RetirementPlanner() {
               />
             </Section>
 
-            <Section title="Inherited (BCO)" badge="Beneficiary" icon="🎗️">
+            <Section title="Inherited BCO Account" badge="Beneficiary" icon="🎗️">
               <NumberInput
                 label="Inherited Account Balance"
                 value={inputs.balanceInherited || 0}
@@ -12373,23 +12880,52 @@ export default function RetirementPlanner() {
               {(inputs.balanceInherited || 0) > 0 && (
                 <>
                   <SelectInput
-                    label="Account Type"
-                    value={inputs.inheritedTaxType || "qualified"}
-                    onChange={update("inheritedTaxType")}
+                    label="Inherited Plan Type"
+                    value={inputs.inheritedPlanType || "qualifiedOther"}
+                    onChange={(val) =>
+                      setInputs((prev) =>
+                        normalizeInputs({
+                          ...prev,
+                          inheritedPlanType: val,
+                          inheritedTaxType:
+                            val === "nonqualifiedAnnuity"
+                              ? "nonqualified"
+                              : "qualified",
+                        }),
+                      )
+                    }
                     options={[
                       {
-                        value: "qualified",
-                        label: "Qualified (inherited IRA / 403b / 401k)",
+                        value: "403bTsa",
+                        label: "403(b) TSA / public-school plan",
                       },
-                      { value: "nonqualified", label: "Non-qualified annuity" },
+                      { value: "ira", label: "Inherited IRA" },
+                      {
+                        value: "qualifiedOther",
+                        label: "Other qualified retirement plan",
+                      },
+                      {
+                        value: "nonqualifiedAnnuity",
+                        label: "Nonqualified annuity",
+                      },
                     ]}
                     hint={
-                      (inputs.inheritedTaxType || "qualified") === "nonqualified"
-                        ? "Taxed earnings-first: withdrawals are fully taxable ordinary income until only your cost basis remains, then tax-free."
-                        : "Every withdrawal is ordinary income (pre-tax money) — but never the 10% early penalty."
+                      (inputs.inheritedPlanType || "qualifiedOther") ===
+                      "nonqualifiedAnnuity"
+                        ? "Taxed earnings-first (IRC §72(e)): fully taxable ordinary income until only your cost basis remains, then tax-free."
+                        : "Every withdrawal is ordinary income (pre-tax money) — but never the 10% early penalty. An inherited 403(b)/TSA is a qualified PLAN account, not an inherited IRA."
                     }
                   />
-                  {(inputs.inheritedTaxType || "qualified") === "nonqualified" && (
+                  <TextInput
+                    label="Contract / Product"
+                    value={inputs.inheritedContractLabel || ""}
+                    onChange={update("inheritedContractLabel")}
+                    hint={
+                      'Optional label, e.g. "Equitable EQUI-VEST Series 201 — TSA Public School".'
+                    }
+                  />
+                  {(inputs.inheritedPlanType || "qualifiedOther") ===
+                    "nonqualifiedAnnuity" && (
                     <NumberInput
                       label="Cost Basis (Investment in Contract)"
                       value={inputs.inheritedBasis || 0}
@@ -12406,18 +12942,19 @@ export default function RetirementPlanner() {
                     options={[
                       {
                         value: "lifeExpectancy",
-                        label: "Life expectancy (stretch)",
+                        label:
+                          "Life expectancy / stretch — subject to beneficiary eligibility and BCO terms",
                       },
-                      { value: "tenYear", label: "10-year rule" },
+                      { value: "tenYear", label: "Federal 10-year rule" },
                     ]}
                     hint={
                       (inputs.inheritedPayoutRule || "lifeExpectancy") ===
                       "tenYear"
-                        ? `Everything must be withdrawn by Dec 31, ${
+                        ? `Federal deadline: everything must be distributed by Dec 31, ${
                             (inputs.inheritedDeathYear || PROJECTION_START_YEAR) +
                             10
-                          }; the plan forces out any remaining balance that year.`
-                        : "Annual required payouts over your single-life expectancy — available to a surviving spouse and other eligible designated beneficiaries."
+                          }. A contract deadline can only shorten this, never extend it.`
+                        : "Annual required payouts over your single-life expectancy — available to a surviving spouse and other eligible designated beneficiaries. A contract-specific BCO deadline (below) may still force full distribution earlier."
                     }
                   />
                   <SelectInput
@@ -12440,8 +12977,210 @@ export default function RetirementPlanner() {
                     label="Owner's Birth Year"
                     value={inputs.inheritedDeceasedBirthYear || 1965}
                     onChange={update("inheritedDeceasedBirthYear")}
-                    hint="Sets the owner's RMD age — which determines when a spouse's required payouts must begin, and whether annual RMDs apply inside the 10-year rule."
+                    hint="Sets the owner's RMD age and any contract age-based final distribution year. Enter the actual birth year — an owner who died in 2026 at 55 may have been born in 1970 or 1971, and the contract deadline differs by a year."
                   />
+                  <SelectInput
+                    label="Owner RMD Status"
+                    value={inputs.inheritedOwnerRmdStatus || "auto"}
+                    onChange={update("inheritedOwnerRmdStatus")}
+                    options={[
+                      { value: "auto", label: "Auto (infer from years)" },
+                      {
+                        value: "beforeRbd",
+                        label: "Died before required beginning date",
+                      },
+                      {
+                        value: "onOrAfterRbd",
+                        label: "Died on or after required beginning date",
+                      },
+                    ]}
+                    hint="Controls whether annual distributions are required in years 1–9 of the 10-year rule and when spousal life-expectancy payouts must begin. Auto uses a whole-calendar-year approximation; the exact required beginning date can depend on the owner's birthday, retirement status, plan provisions, and federal rules."
+                  />
+                  <SelectInput
+                    label="Withdrawal-Charge Treatment"
+                    value={
+                      inputs.inheritedWithdrawalChargePolicy || "unknown"
+                    }
+                    onChange={update("inheritedWithdrawalChargePolicy")}
+                    options={[
+                      {
+                        value: "bcoNoCharge",
+                        label: "BCO endorsement: no withdrawal charge",
+                      },
+                      {
+                        value: "standardContract",
+                        label: "Standard contract schedule — not modeled",
+                      },
+                      { value: "unknown", label: "Unknown — verify contract" },
+                    ]}
+                    hint={
+                      (inputs.inheritedWithdrawalChargePolicy || "unknown") ===
+                      "bcoNoCharge"
+                        ? "Your BCO endorsement overrides the standard contract surrender schedule: withdrawals are modeled with NO charge."
+                        : "The projection applies NO charge because the exact contract schedule is not modeled — a zero here does not prove the real contract charges nothing. Verify the schedule with the insurer."
+                    }
+                  />
+                  {(inputs.inheritedWithdrawalChargePolicy || "unknown") !==
+                    "bcoNoCharge" && (
+                    <div className="mb-3 p-2 bg-amber-50 border border-amber-300 rounded text-xs text-amber-900">
+                      ⚠ The contract's withdrawal-charge schedule is{" "}
+                      <span className="font-semibold">not modeled</span>. The
+                      projection assumes $0 in charges, which may understate
+                      costs. Confirm the schedule (or a BCO no-charge
+                      endorsement) with the insurer.
+                    </div>
+                  )}
+                  <NumberInput
+                    label="Partial Withdrawal Minimum"
+                    value={inputs.inheritedPartialWithdrawalMinimum || 0}
+                    onChange={update("inheritedPartialWithdrawalMinimum")}
+                    prefix="$"
+                    step={50}
+                    hint="Contract minimum for partial withdrawals. This does not change federal RMD calculations. A full withdrawal is treated separately."
+                  />
+                  <SelectInput
+                    label="Contract Final Distribution Rule"
+                    value={
+                      inputs.inheritedContractFinalDistributionMode || "none"
+                    }
+                    onChange={update("inheritedContractFinalDistributionMode")}
+                    options={[
+                      {
+                        value: "none",
+                        label: "No contract-specific final deadline",
+                      },
+                      {
+                        value: "ownerAge",
+                        label: "Deceased owner's age at final distribution",
+                      },
+                      { value: "explicitYear", label: "Specific calendar year" },
+                    ]}
+                    hint="A BCO endorsement may require full distribution by a contract-specific date — e.g. when the deceased owner would have reached a stated age. This is a CONTRACT term, not a federal rule, and it never extends the federal 10-year deadline."
+                  />
+                  {(inputs.inheritedContractFinalDistributionMode || "none") ===
+                    "ownerAge" && (
+                    <NumberInput
+                      label="Deceased Owner's Final Distribution Age"
+                      value={
+                        inputs.inheritedContractFinalDistributionAge || 72
+                      }
+                      onChange={update("inheritedContractFinalDistributionAge")}
+                      hint="From the BCO endorsement (72 for the Equitable Series 201 BCO). Final year = owner's birth year + this age."
+                    />
+                  )}
+                  {(inputs.inheritedContractFinalDistributionMode || "none") ===
+                    "explicitYear" && (
+                    <NumberInput
+                      label="Contract Final Distribution Year"
+                      value={
+                        inputs.inheritedContractFinalDistributionYear || 0
+                      }
+                      onChange={update("inheritedContractFinalDistributionYear")}
+                      hint="Calendar year by which the contract requires the account to be fully distributed."
+                    />
+                  )}
+                  <TextInput
+                    label="Contract Source Note"
+                    value={inputs.inheritedContractSourceNote || ""}
+                    onChange={update("inheritedContractSourceNote")}
+                    hint={
+                      'Where these contract terms came from, e.g. "Equitable Series 201 BCO endorsement". Documentation only.'
+                    }
+                  />
+                  {(() => {
+                    const deadlines = resolveInheritedFinalDistributionYear({
+                      payoutRule:
+                        inputs.inheritedPayoutRule || "lifeExpectancy",
+                      deathYear:
+                        inputs.inheritedDeathYear || PROJECTION_START_YEAR,
+                      deceasedBirthYear:
+                        inputs.inheritedDeceasedBirthYear || 1965,
+                      contractMode:
+                        inputs.inheritedContractFinalDistributionMode ||
+                        "none",
+                      contractAge:
+                        inputs.inheritedContractFinalDistributionAge || 72,
+                      contractYear:
+                        inputs.inheritedContractFinalDistributionYear || 0,
+                    });
+                    const horizonEndYear =
+                      PROJECTION_START_YEAR +
+                      ((inputs.planThroughAge || 0) -
+                        (inputs.currentAge || 0));
+                    const horizonReaches =
+                      deadlines.effectiveDeadline == null ||
+                      horizonEndYear >= deadlines.effectiveDeadline;
+                    const contractEarlierThanFederal =
+                      deadlines.federalDeadline != null &&
+                      deadlines.contractDeadline != null &&
+                      deadlines.contractDeadline < deadlines.federalDeadline;
+                    return (
+                      <div className="mb-3 p-2 bg-slate-50 border border-slate-200 rounded text-xs text-slate-700 space-y-1">
+                        <div className="font-semibold text-slate-800">
+                          Calculated distribution deadlines
+                        </div>
+                        <div>
+                          Contract BCO final distribution year:{" "}
+                          <span className="font-semibold">
+                            {deadlines.contractDeadline ?? "none"}
+                          </span>
+                        </div>
+                        <div>
+                          Federal 10-year deadline:{" "}
+                          <span className="font-semibold">
+                            {deadlines.federalDeadline ??
+                              "n/a (life-expectancy option)"}
+                          </span>
+                        </div>
+                        <div>
+                          Effective final distribution year:{" "}
+                          <span className="font-semibold">
+                            {deadlines.effectiveDeadline ??
+                              "none — annual payouts continue"}
+                          </span>
+                        </div>
+                        {deadlines.effectiveDeadline != null && (
+                          <div>
+                            Projection horizon ({horizonEndYear}){" "}
+                            {horizonReaches ? "reaches" : "does NOT reach"} the
+                            required liquidation year.
+                          </div>
+                        )}
+                        {contractEarlierThanFederal && (
+                          <div className="text-amber-800">
+                            ⚠ The contract deadline (
+                            {deadlines.contractDeadline}) is earlier than the
+                            federal 10-year deadline (
+                            {deadlines.federalDeadline}); the earlier contract
+                            date governs.
+                          </div>
+                        )}
+                        {!horizonReaches && (
+                          <div className="text-amber-800">
+                            ⚠ The projection ends before the required
+                            liquidation year — extend "Plan Through Age" to
+                            see the forced full distribution.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                  <p className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1.5 mb-2">
+                    This is an inherited 403(b)/TSA, not an inherited IRA,
+                    when the 403(b) plan type is selected. Federal beneficiary
+                    distribution rules are modeled separately from the
+                    Equitable contract's BCO provisions. The actual BCO
+                    endorsement controls withdrawal charges and the
+                    contract-specific final distribution date. Product-level
+                    fees (variable-account expenses, fund expenses,
+                    administrative charges) and standard surrender schedules
+                    are NOT modeled.
+                  </p>
+                  <p className="text-xs text-amber-900 bg-amber-50 border border-amber-300 rounded px-2 py-1.5 mb-2">
+                    ⚠ Verify the BCO election, beneficiary status,
+                    sole-beneficiary status, final distribution age, and plan
+                    provisions with Equitable or the plan administrator.
+                  </p>
                   <p className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5">
                     ✓ Withdrawals from this account are modeled with{" "}
                     <span className="font-semibold">
@@ -12450,7 +13189,8 @@ export default function RetirementPlanner() {
                     (IRS death exception). The taxable portion is still ordinary
                     income. Keeping the account in beneficiary (BCO) form
                     preserves the exemption — electing spousal continuation
-                    (treating it as your own) would not.
+                    (retitling it as your own) is NOT modeled and would change
+                    both the penalty treatment and the distribution schedule.
                   </p>
                 </>
               )}

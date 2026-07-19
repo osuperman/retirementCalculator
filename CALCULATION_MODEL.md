@@ -159,6 +159,34 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
 - In married-couple mode, RMDs are calculated independently for each spouse's
   tax-deferred accounts and then included in the household tax solve.
 
+## Inherited BCO accounts
+
+- Individual mode supports an inherited account kept in beneficiary form under
+  a Beneficiary Continuation Option (BCO). The plan type is explicit: a
+  403(b)/TSA is modeled as a qualified employer-plan account, not as an
+  inherited IRA by default. Qualified withdrawals are ordinary income; a
+  nonqualified annuity uses earnings-first taxation followed by tax-free return
+  of entered cost basis.
+- Federal beneficiary rules and contract rules are separate layers. The user
+  selects either life expectancy / stretch or the federal 10-year rule. Life
+  expectancy continues annual required beneficiary distributions. The 10-year
+  rule ends with full distribution by death year + 10; a configured contract
+  deadline can shorten that date but never extend it.
+- A contract-specific final rule can be entered as the deceased owner's age or
+  as an explicit calendar year. For an Equitable EQUI-VEST Series 201 BCO, an
+  age-72 endorsement produces `inheritedDeceasedBirthYear + 72`: birth year
+  1971 gives 2043 and birth year 1970 gives 2042. This is not a universal rule
+  for inherited accounts and is applied only when the user's endorsement says
+  so.
+- In the configured final year, the entire remaining BCO balance is forced out
+  as a required distribution, not required spending. The account is marked
+  terminated after it is emptied. After-tax excess follows the existing
+  `surplusToCash` behavior in retirement. A partial-withdrawal minimum is an
+  execution warning only; it does not change the federal RMD amount.
+- Withdrawal charges are not estimated from a generic surrender schedule. A
+  no-charge result is selected only when the user enters the actual BCO
+  endorsement; standard or unknown schedules remain flagged for verification.
+
 ## Healthcare, ACA, HSA, And IRMAA
 
 - HSA withdrawals are applied against healthcare spending before taxable account withdrawals.
@@ -208,8 +236,9 @@ This document summarizes the projection rules implemented in `src/App.jsx`.
   can fund spending. Roth conversions are taxable account-to-account transfers
   and do not create spending cash.
 - Not modeled in v1: survivor benefits, first-death expense changes, widow(er)
-  filing status, inherited-account rules, estate outcomes, or account titling
-  beyond spouse-specific retirement/HSA buckets.
+  filing status, couple-mode inherited-account transitions, estate outcomes,
+  or account titling beyond spouse-specific retirement/HSA buckets. Individual
+  mode does model an explicitly configured inherited BCO account.
 
 ## Cash Withdrawal Strategy
 

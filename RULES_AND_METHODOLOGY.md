@@ -83,6 +83,36 @@ The engine models seven account types. For each: how money goes in, how it grows
 | Federal tax | 100% ordinary income. |
 | NY tax | If flagged as a NY public pension (NYS/local government, teachers, federal, military), **fully exempt** from NY tax (NY Tax Law §612(c)(3)). Otherwise it is private retirement income eligible for the $20,000 exclusion (§10.3). |
 
+### 1.8 Inherited BCO accounts (403(b)/TSA, IRA, and annuity)
+
+The individual-mode inherited bucket represents an account kept in beneficiary
+form under a Beneficiary Continuation Option (BCO). It is not automatically an
+inherited IRA. The user selects the plan type so a 403(b)/TSA is treated as a
+qualified employer-plan account, while a nonqualified annuity uses
+earnings-first taxation followed by return of entered cost basis.
+
+Federal beneficiary rules and contract terms are modeled as separate layers:
+
+- `lifeExpectancy` continues annual required beneficiary distributions under
+  the selected relationship and owner RMD-status assumptions.
+- `tenYear` uses the statutory death-year-plus-10 deadline. If a contract
+  deadline is also configured, the earlier of the federal and contract dates
+  controls; the contract date can never extend the federal deadline.
+- `ownerAge` derives the contract final distribution year as
+  `inheritedDeceasedBirthYear + inheritedContractFinalDistributionAge`.
+  Therefore an owner born in 1971 reaches age 72 in 2043, while an owner born
+  in 1970 reaches age 72 in 2042. This is a contract-specific setting, not a
+  universal inherited-account rule.
+- In the effective final year, the entire remaining balance is forced out as a
+  required distribution (not required spending), and the BCO is marked
+  terminated after the balance is emptied. In retirement, after-tax excess is
+  sent to Cash/HYSA through the existing `surplusToCash` flow.
+- The partial-withdrawal minimum is surfaced as an execution warning only; it
+  does not alter federal distribution math. Withdrawal charges are not
+  estimated from a generic schedule. The no-charge result is used only when
+  the user selects an actual BCO endorsement that waives charges; standard and
+  unknown schedules remain unmodeled and require contract verification.
+
 ---
 
 ## 2. The age timeline that drives everything
@@ -296,7 +326,7 @@ The reserve floor is entered in today's dollars and inflates with the plan.
 - Each spouse has independent ages, retirement dates, employer-plan/IRA/Roth/HSA balances, contributions (capped per person), Social Security benefit and claim age, pension, RMD schedule, and Roth conversion targets.
 - Shared: cash, taxable brokerage (and basis), lifestyle spending, returns, inflation, cash strategy, ACA/IRMAA settings.
 - Taxes are computed once on household totals with MFJ parameters; the NY $20K exclusion and Rule-of-55/§72(t) tests apply per spouse; HSA family limit + per-spouse catch-ups per §1.6.
-- ⚠️ Both spouses are assumed alive through the horizon: no survivor benefits, no widow(er) filing status (single brackets + compressed IRMAA tiers after first death are a real risk this model does not show), no inherited-account transitions.
+- ⚠️ Both spouses are assumed alive through the horizon: no survivor benefits, no widow(er) filing status (single brackets + compressed IRMAA tiers after first death are a real risk this model does not show), and no couple-mode inherited-account transitions. Individual mode has a separate inherited BCO model.
 
 ---
 
@@ -330,7 +360,7 @@ Anyone reconstructing or auditing this engine should know these are *deliberate*
 6. Cash interest **is** taxed (ordinary income on the start-of-year balance); all brokerage gains long-term; no loss harvesting; no step-up simulation; NIIT investment income is approximated as realized LTCG only (cash interest excluded from the NIIT base).
 7. No AMT, itemized deductions, credits, trust/estate tax, or gift planning.
 8. Federal/NY brackets projected by user inflation, not statutory indexing (chained CPI / NY non-indexation).
-9. Survivor scenarios, inherited accounts, long-term care, and annuitization not modeled.
+9. Survivor scenarios and couple-mode inherited-account transitions, long-term care, and annuitization are not modeled. Individual-mode inherited BCO accounts are modeled only from the explicit plan type, payout rule, and contract terms entered by the user.
 10. Contribution limits beyond 2026 projected by inflation with statutory rounding increments.
 11. IRA contributions during accumulation not modeled (401k + HSA only).
 12. SECURE 2.0 Roth catch-up mandate for high earners not modeled.
