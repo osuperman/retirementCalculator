@@ -1,0 +1,15 @@
+import fs from 'node:fs';
+const path='src/App.jsx';
+let source=fs.readFileSync(path,'utf8');
+const start=source.indexOf('function RiskAnalysis(');
+let risk=source.slice(start);
+risk=risk.replace('  adjust,\n','');
+risk=risk.replace('  const chartData = mcResults',`  const firstYear = results.yearlyData[0]?.year ?? PROJECTION_START_YEAR;
+  const endYear = results.yearlyData.at(-1)?.year ?? firstYear;
+  const adjustRisk = (value, year) => showRealDollars ? value / Math.pow(1 + inputs.inflation, year - firstYear) : value;
+  const chartData = mcResults`);
+risk=risk.replace('.map((p) => ({','.map((p, index) => ({');
+for(const key of ['p10','p25','p50','p75','p90']) risk=risk.replace('Math.round(p.'+key+')','Math.round(adjustRisk(p.'+key+', results.yearlyData[index]?.year ?? firstYear + index))');
+risk=risk.replaceAll('                  adjust(','                  adjustRisk(').replaceAll('PROJECTION_START_YEAR + (inputs.planThroughAge - inputs.currentAge)','endYear');
+source=source.slice(0,start)+risk;
+fs.writeFileSync(path,source);

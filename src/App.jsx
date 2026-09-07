@@ -1,4 +1,6 @@
 import FinancialDetails from "./FinancialDetails.jsx";
+import { NumericField, WorkspaceNav, ScenarioDialog, SettingsWorkspace, BaselineControls, ExploreDetails, YearInspector, CompactMetric } from './ui/PlannerWorkspace.jsx';
+import { captureBaseline, baselineSeries, compareBaseline } from './ui/planComparison.js';
 import {
   CASH_STRATEGY_OPTIONS,
   DEFAULT_INPUTS,
@@ -15,7 +17,6 @@ import {
   generatePlanNarrative,
   getContributionLimits,
   getDisplayInputs,
-  hasMaterialUnmetCashFlow,
   isCoupleMode,
   materialYearUnmetThreshold,
   normalizeCoupleInputs,
@@ -27,7 +28,7 @@ import {
   simulatePlan,
   solveMaxSustainableSpending
 } from "./finance/engine.js";
-import { Fragment, useState, useMemo, useEffect, useRef } from "react";
+import { Fragment, useState, useMemo, useEffect, useRef, useId } from "react";
 import {
   Area,
   AreaChart,
@@ -82,7 +83,13 @@ function TermInfo({ text }) {
     <span
       className="relative ml-1 inline-flex cursor-help select-none align-middle"
       title={text}
-      aria-hidden="true"
+      role="button"
+      tabIndex={0}
+      aria-label={text}
+      aria-expanded={isOpen}
+      onFocus={() => setIsOpen(true)}
+      onBlur={() => setIsOpen(false)}
+      onKeyDown={event => { if (["Enter", " ", "Escape"].includes(event.key)) { event.preventDefault(); event.stopPropagation(); setIsOpen(event.key === "Escape" ? false : !isOpen); } }}
       onClick={(event) => {
         event.stopPropagation();
         setIsOpen((open) => !open);
@@ -115,9 +122,10 @@ function TermLabel({ children, info }) {
 }
 
 function NumberInput({ label, value, onChange, prefix, suffix, step = 1, hint, info }) {
+  const id = useId();
   return (
     <div className="mb-3">
-      <label className="block text-xs font-medium text-slate-600 mb-1">
+      <label htmlFor={id} className="block text-xs font-medium text-slate-600 mb-1">
         {info ? <TermLabel info={info}>{label}</TermLabel> : label}
       </label>
       <div className="relative">
@@ -126,13 +134,11 @@ function NumberInput({ label, value, onChange, prefix, suffix, step = 1, hint, i
             {prefix}
           </span>
         )}
-        <input
-          type="number"
+        <NumericField
+          id={id}
+          aria-describedby={hint ? `${id}-hint` : undefined}
           value={value}
-          onChange={(e) => {
-            const n = Number(e.target.value);
-            if (!isNaN(n)) onChange(n);
-          }}
+          onValue={onChange}
           step={step}
           className={`w-full rounded-md border border-slate-300 bg-white text-slate-900 text-sm py-1.5 ${
             prefix ? "pl-7" : "pl-3"
@@ -146,24 +152,27 @@ function NumberInput({ label, value, onChange, prefix, suffix, step = 1, hint, i
           </span>
         )}
       </div>
-      {hint && <p className="text-xs text-slate-500 mt-1">{hint}</p>}
+      {hint && <p id={`${id}-hint`} className="text-xs text-slate-500 mt-1">{hint}</p>}
     </div>
   );
 }
 
 function TextInput({ label, value, onChange, hint }) {
+  const id = useId();
   return (
     <div className="mb-3">
-      <label className="block text-xs font-medium text-slate-600 mb-1">
+      <label htmlFor={id} className="block text-xs font-medium text-slate-600 mb-1">
         {label}
       </label>
       <input
+        id={id}
+        aria-describedby={hint ? `${id}-hint` : undefined}
         type="text"
         value={value || ""}
         onChange={(e) => onChange(e.target.value)}
         className="w-full rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-900 transition focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
       />
-      {hint && <p className="text-xs text-slate-500 mt-1">{hint}</p>}
+      {hint && <p id={`${id}-hint`} className="text-xs text-slate-500 mt-1">{hint}</p>}
     </div>
   );
 }
@@ -184,12 +193,15 @@ function PctInput({ label, value, onChange, hint, info }) {
 }
 
 function SelectInput({ label, value, onChange, options, hint, info }) {
+  const id = useId();
   return (
     <div className="mb-3">
-      <label className="block text-xs font-medium text-slate-600 mb-1">
+      <label htmlFor={id} className="block text-xs font-medium text-slate-600 mb-1">
         {info ? <TermLabel info={info}>{label}</TermLabel> : label}
       </label>
       <select
+        id={id}
+        aria-describedby={hint ? `${id}-hint` : undefined}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         className="w-full rounded-md border border-slate-300 bg-white text-slate-900 text-sm py-1.5 px-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
@@ -200,7 +212,7 @@ function SelectInput({ label, value, onChange, options, hint, info }) {
           </option>
         ))}
       </select>
-      {hint && <p className="text-xs text-slate-500 mt-1">{hint}</p>}
+      {hint && <p id={`${id}-hint`} className="text-xs text-slate-500 mt-1">{hint}</p>}
     </div>
   );
 }
@@ -216,6 +228,7 @@ function Section({
   icon,
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const sectionId = useId();
   const variantStyles = {
     default: {
       wrapper:
@@ -262,9 +275,12 @@ function Section({
   };
   const styles = variantStyles[variant] || variantStyles.default;
   return (
-    <div className={styles.wrapper}>
+    <section id={sectionId} data-settings-title={title} className={`settings-section ${styles.wrapper}`}>
       <button
         onClick={() => setOpen(!open)}
+        data-section-toggle
+        aria-expanded={open}
+        aria-controls={`${sectionId}-body`}
         className={styles.button}
       >
         <div className="flex items-center gap-2">
@@ -292,8 +308,8 @@ function Section({
           <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
         </svg>
       </button>
-      {open && <div className={styles.body}>{children}</div>}
-    </div>
+      <div id={`${sectionId}-body`} hidden={!open} className={`section-body ${styles.body}`}>{children}</div>
+    </section>
   );
 }
 
@@ -570,6 +586,22 @@ function SettingsImport({ open, onClose, onApply }) {
     }
   }, [open]);
 
+  const importRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const previous = document.activeElement;
+    const onKey = event => {
+      if (event.key === 'Escape') { event.preventDefault(); onClose(); }
+      if (event.key === 'Tab') {
+        const controls = [...importRef.current.querySelectorAll('button:not(:disabled), textarea, input, select')];
+        const first = controls[0], last = controls.at(-1);
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('keydown', onKey); previous?.focus(); };
+  }, [open, onClose]);
   if (!open) return null;
 
   const handleLoad = () => {
@@ -585,6 +617,7 @@ function SettingsImport({ open, onClose, onApply }) {
     onApply(parsed.updates);
     setResult({
       kind: "ok",
+      completeScenario: parsed.completeScenario,
       applied: parsed.applied,
       skipped: parsed.skipped,
     });
@@ -594,6 +627,7 @@ function SettingsImport({ open, onClose, onApply }) {
     <div
       className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/50 p-4 sm:p-8 print:hidden"
       onClick={onClose}
+      ref={importRef}
       role="dialog"
       aria-modal="true"
       aria-label="Load settings from text"
@@ -682,8 +716,7 @@ function SettingsImport({ open, onClose, onApply }) {
           {result?.kind === "ok" && (
             <div className="mt-3 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
               <p className="font-semibold">
-                ✓ Applied {result.applied.length} setting
-                {result.applied.length === 1 ? "" : "s"}. The plan has been
+                ✓ {result.completeScenario ? 'Loaded the complete scenario' : `Applied ${result.applied.length} setting${result.applied.length === 1 ? '' : 's'}`}. The plan has been
                 updated — close this dialog to see the results.
               </p>
               {result.skipped.length > 0 && (
@@ -1105,6 +1138,7 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
   return (
     <div className="mt-4 bg-white border border-slate-200 rounded-lg shadow-sm print-avoid-break">
       <button
+        aria-expanded={open}
         onClick={() => setOpen(!open)}
         className="w-full flex justify-between items-center px-4 py-3 text-left hover:bg-slate-50 transition rounded-lg"
       >
@@ -1188,6 +1222,7 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
             </summary>
             <textarea
               id="settings-export-textarea"
+              aria-label="Complete scenario settings export"
               readOnly
               value={buildPlainText()}
               className="mt-2 w-full h-64 text-xs font-mono p-2 border border-slate-300 rounded bg-slate-50 text-slate-800"
@@ -1847,7 +1882,7 @@ function EarlyAccessStrategyPanel({
             {fmtMoney(penaltyDraws)} through retirement accounts before 59½,
             costing about {fmtMoney(totalPenalties)} in{" "}
             <em>avoidable</em> 10% penalties. Switching the Cash Withdrawal
-            Strategy (sidebar → Cash Strategy) to "{strategyBestLabel}"
+            Strategy (All settings → Cash Strategy) to "{strategyBestLabel}"
             eliminates them entirely — these penalties are a consequence of
             the chosen order, not of your finances.
           </span>
@@ -2081,7 +2116,7 @@ function EarlyAccessStrategyPanel({
             keep growing — good for the bridge, but it builds up the balance
             subject to RMDs at {results.summary.rmdStartAge}. Low-income
             bridge years are also the cheapest time for{" "}
-            <span className="font-medium">Roth conversions</span> (sidebar →
+            <span className="font-medium">Roth conversions</span> (All settings →
             Roth Conversions) to defuse that later tax bomb.
           </li>
           <li>
@@ -2110,7 +2145,7 @@ function EarlyAccessStrategyPanel({
                 Change the cash withdrawal order
               </span>{" "}
               — verified against your projection: switching the Cash
-              Withdrawal Strategy (sidebar → Cash Strategy) to "
+              Withdrawal Strategy (All settings → Cash Strategy) to "
               {strategyBestLabel}"{" "}
               {strategyBest.penaltyTotal <= 0
                 ? "eliminates the projected early-withdrawal penalties entirely."
@@ -2390,6 +2425,7 @@ function compareScenarios(baseInputs, retirementAges, spendingLevels) {
         baseExpenses: spending,
         portfolioAtRetirement: result.summary.portfolioAtRetirement,
         portfolioAtEnd: result.summary.portfolioAtEnd,
+        endYear: result.yearlyData.at(-1)?.year,
         yearsOfRetirement: displayInputs.planThroughAge - age,
         lifetimeSpending:
           (spending + displayInputs.healthcarePre65) *
@@ -2623,7 +2659,7 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
       badge={person.pensionIncome > 0 ? "Pension Active" : "No Pension"}
       variant={title === "Spouse" ? "spouse" : "primary"}
     >
-      <FinancialDetails values={person} onChange={onChange} personOnly />
+      <FinancialDetails values={person} onChange={onChange} personOnly scope={title} />
       <TextInput label="Name" value={person.name} onChange={onChange("name")} />
       <TextInput
         label="Employer Plan Label"
@@ -2825,6 +2861,7 @@ function CouplePersonInputs({ title, person, onChange, shared }) {
 // One always-visible slider+number pair. Slider for exploration (continuous
 // live feedback), number input for exact entry — both bound to the same state.
 function LeverRow({ label, value, onChange, min, max, step, isPercent = false, prefix }) {
+  const id = useId();
   const display = isPercent ? Math.round(value * 10000) / 100 : value;
   const emit = (n) => {
     if (Number.isNaN(n)) return;
@@ -2834,18 +2871,18 @@ function LeverRow({ label, value, onChange, min, max, step, isPercent = false, p
   return (
     <div className="mb-2.5 last:mb-0">
       <div className="flex items-center justify-between gap-2">
-        <label className="text-xs font-medium text-slate-600">{label}</label>
+        <label htmlFor={id} className="text-xs font-medium text-slate-600">{label}</label>
         <div className="relative">
           {prefix && (
             <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-slate-400 text-[11px] pointer-events-none">
               {prefix}
             </span>
           )}
-          <input
-            type="number"
+          <NumericField
+            id={id}
             value={display}
             step={step}
-            onChange={(e) => emit(Number(e.target.value))}
+            onValue={emit}
             className={`w-24 text-right rounded border border-slate-300 bg-white text-slate-900 text-xs py-0.5 pr-1.5 ${prefix ? "pl-4" : "pl-1.5"} focus:outline-none focus:ring-1 focus:ring-indigo-500`}
           />
         </div>
@@ -2869,7 +2906,7 @@ function LeverRow({ label, value, onChange, min, max, step, isPercent = false, p
 // lever also exists in the detailed sections below — same state, two views.
 const LEVERS_OPEN_KEY = "retirement-planner-levers-open";
 
-function KeyLevers({ inputs, isCouple, update, updateCouple }) {
+function KeyLevers({ inputs, isCouple, update, updateCouple, onSettings }) {
   const couple = isCouple ? normalizeCoupleInputs(inputs.couple) : null;
   // Collapsed state persists across visits so the panel stays out of the way
   // for users who prefer working in the detailed sections.
@@ -2890,16 +2927,17 @@ function KeyLevers({ inputs, isCouple, update, updateCouple }) {
     setOpen(next);
   };
   return (
-    <div className="bg-white rounded-lg border border-indigo-300 shadow-sm mb-4 lg:sticky lg:top-0 lg:z-20 overflow-hidden">
+    <div className="quick-controls">
       <button
         onClick={toggle}
+        aria-expanded={open}
         className="w-full flex items-center justify-between gap-2 text-left px-4 py-2.5 bg-indigo-50 hover:bg-indigo-100 transition"
         title={open ? "Collapse the key levers" : "Expand the key levers"}
       >
         <span className="flex items-center gap-2">
-          <span className="text-base leading-none">🎚️</span>
+          <span className="live-dot" aria-hidden="true" />
           <span className="text-sm font-semibold text-slate-900">
-            Key levers
+            Adjust your plan
           </span>
           <span className="text-[10px] uppercase tracking-wider text-indigo-600 font-semibold">
             Live
@@ -2919,8 +2957,7 @@ function KeyLevers({ inputs, isCouple, update, updateCouple }) {
       {open && (
       <div className="p-4 pt-3">
       <p className="text-xs text-slate-500 mb-3">
-        The inputs that move the plan most — drag and watch the results react.
-        Everything else is in the sections below.
+        Change an assumption and see the graph update.
       </p>
       {isCouple ? (
         <>
@@ -2946,7 +2983,7 @@ function KeyLevers({ inputs, isCouple, update, updateCouple }) {
             onChange={updateCouple("shared", "baseExpenses")}
             min={20000}
             max={200000}
-            step={5000}
+            step={500}
             prefix="$"
           />
           <LeverRow
@@ -2955,14 +2992,14 @@ function KeyLevers({ inputs, isCouple, update, updateCouple }) {
             onChange={updateCouple("shared", "postReturn")}
             min={2}
             max={10}
-            step={0.25}
+            step={0.1}
             isPercent
           />
         </>
       ) : (
         <>
           <LeverRow
-            label="Retire at age"
+            label="Retirement age"
             value={inputs.retirementAge}
             onChange={update("retirementAge")}
             min={50}
@@ -2970,16 +3007,16 @@ function KeyLevers({ inputs, isCouple, update, updateCouple }) {
             step={1}
           />
           <LeverRow
-            label="Spending / yr"
+            label="Lifestyle spending / year"
             value={inputs.baseExpenses}
             onChange={update("baseExpenses")}
             min={20000}
             max={200000}
-            step={5000}
+            step={500}
             prefix="$"
           />
           <LeverRow
-            label="SS claim age"
+            label="Social Security claim age"
             value={inputs.ssAge}
             onChange={update("ssAge")}
             min={62}
@@ -2992,7 +3029,7 @@ function KeyLevers({ inputs, isCouple, update, updateCouple }) {
             onChange={update("preReturn")}
             min={2}
             max={10}
-            step={0.25}
+            step={0.1}
             isPercent
           />
           <LeverRow
@@ -3001,11 +3038,14 @@ function KeyLevers({ inputs, isCouple, update, updateCouple }) {
             onChange={update("postReturn")}
             min={2}
             max={10}
-            step={0.25}
+            step={0.1}
             isPercent
           />
         </>
       )}
+      <p className="muted">Spending is in today's dollars and excludes healthcare.</p>
+      <button className="text-action" onClick={onSettings}>All settings →</button>
+      <p className="muted">Accounts, income, taxes and advanced rules.</p>
       </div>
       )}
     </div>
@@ -3025,6 +3065,7 @@ function CashStrategyInputs({
   earlyRetirement = false,
   penaltyImpact = null,
 }) {
+  const strategyId = useId();
   const strategy = values.cashStrategy || "cashFirst";
   const selected = CASH_STRATEGY_OPTIONS.find((o) => o.value === strategy);
   const reserveActive = strategy !== "cashFirst";
@@ -3038,10 +3079,11 @@ function CashStrategyInputs({
   return (
     <>
       <div className="mb-3">
-        <label className="block text-xs font-medium text-slate-600 mb-1">
+        <label htmlFor={strategyId} className="block text-xs font-medium text-slate-600 mb-1">
           Cash Withdrawal Strategy
         </label>
         <select
+          id={strategyId}
           value={strategy}
           onChange={(e) => onChange("cashStrategy")(e.target.value)}
           className="w-full rounded-md border border-slate-300 bg-white text-slate-900 text-sm py-1.5 px-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
@@ -3357,14 +3399,26 @@ export default function RetirementPlanner() {
   const [inputs, setInputs] = useState(() => normalizeInputs(DEFAULT_INPUTS));
   const [showRealDollars, setShowRealDollars] = useState(false);
   const [activeTab, setActiveTab] = useState("plan");
-  // Slim fixed results bar appears once the full metrics strip scrolls away,
-  // so edits anywhere in the long input list show instant feedback.
-  const [pageScrolled, setPageScrolled] = useState(false);
+  const [baselineInputs, setBaselineInputs] = useState(() => captureBaseline(normalizeInputs(DEFAULT_INPUTS)));
+  const [historyRequest, setHistoryRequest] = useState(0);
+  const [selectedYear, setSelectedYear] = useState(null);
+  const [scenarioRequest, setScenarioRequest] = useState(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const workspaceRef = useRef(null);
+  const navigate = (destination) => {
+    setActiveTab(destination === 'history' ? 'settings' : destination);
+    if (destination === 'history') setHistoryRequest(value => value + 1);
+    else setHistoryRequest(0);
+    requestAnimationFrame(() => { window.scrollTo({top:0}); workspaceRef.current?.focus({preventScroll:true}); });
+  };
   useEffect(() => {
-    const onScroll = () => setPageScrolled(window.scrollY > 180);
-    window.addEventListener("scroll", onScroll, { passive: true });
-    onScroll();
-    return () => window.removeEventListener("scroll", onScroll);
+    let opened = [];
+    const prepare = () => { opened = [...document.querySelectorAll('details:not([open])')]; opened.forEach(el => { el.open = true; }); };
+    const restore = () => opened.forEach(el => { el.open = false; });
+    window.addEventListener('beforeprint', prepare);
+    window.addEventListener('afterprint', restore);
+    return () => { window.removeEventListener('beforeprint', prepare); window.removeEventListener('afterprint', restore); };
   }, []);
   const [mcRunning, setMcRunning] = useState(false);
   const [mcResults, setMcResults] = useState(null);
@@ -3395,6 +3449,8 @@ export default function RetirementPlanner() {
   const isCouple = isCoupleMode(inputs);
   const displayInputs = useMemo(() => getDisplayInputs(inputs), [inputs]);
   const results = useMemo(() => simulatePlan(inputs), [inputs]);
+  const baseline = useMemo(() => ({inputs: baselineInputs, results: simulatePlan(baselineInputs)}), [baselineInputs]);
+  const comparison = useMemo(() => compareBaseline(baseline, inputs, results), [baseline, inputs, results]);
   // "How much can I actually spend?" — one number, solved by bisection.
   const maxSustainableSpending = useMemo(
     () => solveMaxSustainableSpending(inputs),
@@ -3432,6 +3488,7 @@ export default function RetirementPlanner() {
       if (active) {
         // Merge saved inputs with defaults in case new fields were added.
         setInputs(normalizeInputs(active.inputs));
+        setBaselineInputs(captureBaseline(normalizeInputs(active.inputs)));
       }
     });
     return () => {
@@ -3450,6 +3507,7 @@ export default function RetirementPlanner() {
       activeScenarioId: nextActiveId,
     });
     setSaveStatus(ok ? status : "idle");
+    setSaveError(ok ? "" : "Could not save in this browser. Export your settings to keep a copy.");
     setTimeout(() => setSaveStatus("idle"), 2500);
     return ok;
   };
@@ -3473,15 +3531,19 @@ export default function RetirementPlanner() {
       savedScenarios.length === 0
         ? "My plan"
         : `Scenario ${savedScenarios.length + 1}`;
-    const name = (window.prompt("Name this scenario:", suggested) || "").trim();
-    if (!name) return;
-    const scenario = {
-      id: makeScenarioId(),
-      name,
-      inputs,
-      savedAt: Date.now(),
-    };
-    await persistStore([...savedScenarios, scenario], scenario.id);
+    setScenarioRequest({kind: 'new', initial: suggested});
+  };
+
+  const submitScenarioName = async name => {
+    if (scenarioRequest.kind === 'delete' && activeScenario) {
+      await deleteConfirmedScenario();
+    } else if (scenarioRequest.kind === 'rename' && activeScenario) {
+      await persistStore(savedScenarios.map(item => item.id === activeScenario.id ? {...item,name} : item), activeScenario.id);
+    } else {
+      const scenario = { id: makeScenarioId(), name, inputs: captureBaseline(inputs), savedAt: Date.now() };
+      await persistStore([...savedScenarios, scenario], scenario.id);
+    }
+    setScenarioRequest(null);
   };
 
   // Switch to a saved scenario, loading its inputs as the working set.
@@ -3490,35 +3552,28 @@ export default function RetirementPlanner() {
     const scenario = savedScenarios.find((s) => s.id === id);
     if (!scenario) return;
     setInputs(normalizeInputs(scenario.inputs));
+    setBaselineInputs(captureBaseline(normalizeInputs(scenario.inputs)));
     await persistStore(savedScenarios, id, "loaded");
   };
 
-  const handleRenameScenario = async () => {
-    if (!activeScenario) return;
-    const name = (
-      window.prompt("Rename scenario:", activeScenario.name) || ""
-    ).trim();
-    if (!name) return;
-    const next = savedScenarios.map((s) =>
-      s.id === activeScenario.id ? { ...s, name } : s,
-    );
-    await persistStore(next, activeScenario.id);
+  const handleRenameScenario = () => {
+    if (activeScenario) setScenarioRequest({kind:'rename', initial:activeScenario.name});
   };
 
-  const handleDeleteScenario = async () => {
+  const handleDeleteScenario = () => {
+    if (activeScenario) setScenarioRequest({kind:'delete', initial:activeScenario.name});
+  };
+
+  const deleteConfirmedScenario = async () => {
     if (!activeScenario) return;
-    if (
-      !window.confirm(
-        `Delete scenario "${activeScenario.name}"? This only affects this browser.`,
-      )
-    ) {
-      return;
-    }
     const next = savedScenarios.filter((s) => s.id !== activeScenario.id);
     const nextActiveId = next[0]?.id ?? null;
     if (nextActiveId) {
       const nextActive = next.find((s) => s.id === nextActiveId);
-      if (nextActive) setInputs(normalizeInputs(nextActive.inputs));
+      if (nextActive) {
+        setInputs(normalizeInputs(nextActive.inputs));
+        setBaselineInputs(captureBaseline(normalizeInputs(nextActive.inputs)));
+      }
     }
     await persistStore(next, nextActiveId, "cleared");
   };
@@ -3526,6 +3581,7 @@ export default function RetirementPlanner() {
   // Reset only the working inputs to built-in defaults; does not delete scenarios.
   const handleResetToDefaults = () => {
     setInputs(normalizeInputs(DEFAULT_INPUTS));
+    setBaselineInputs(captureBaseline(normalizeInputs(DEFAULT_INPUTS)));
     setActiveScenarioId(null);
     setSaveStatus("cleared");
     setTimeout(() => setSaveStatus("idle"), 2500);
@@ -3626,7 +3682,21 @@ export default function RetirementPlanner() {
 
   const reset = handleResetToDefaults;
 
-  const currentYear = PROJECTION_START_YEAR;
+  const printReport = () => {
+    const previousTab = activeTab;
+    const restore = () => setActiveTab(previousTab);
+    window.addEventListener('afterprint', restore, {once:true});
+    setActiveTab('plan');
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      try { window.print(); }
+      finally {
+        window.removeEventListener('afterprint', restore);
+        restore();
+      }
+    }));
+  };
+
+  const currentYear = results.yearlyData[0]?.year ?? PROJECTION_START_YEAR;
   // Convert a nominal value to today's dollars based on the year it occurs
   const adjust = (val, year) => {
     if (!showRealDollars) return val;
@@ -3684,8 +3754,10 @@ export default function RetirementPlanner() {
   };
 
   const employerPlanChartKey = isCouple ? "Employer Plans" : "401k";
-  const chartData = results.yearlyData.map((d) => ({
+  const baselineValues = baselineSeries(baseline, results.yearlyData, showRealDollars);
+  const chartData = results.yearlyData.map((raw, index) => { const d = adjustRow(raw); return ({
     ...d,
+    Baseline: baselineValues[index],
     age: d.age,
     axisLabel: formatAxisLabel(d, isCouple),
     Cash: d.cash,
@@ -3696,11 +3768,11 @@ export default function RetirementPlanner() {
     HSA: d.hsa,
     Inherited: d.inherited || 0,
     "Annual Spending": d.phase === "accumulation" ? null : d.spending,
-  }));
+  }); });
 
   const flowData = results.yearlyData
     .filter((d) => d.phase !== "accumulation")
-    .map((d) => ({
+    .map((raw) => { const d = adjustRow(raw); return ({
       ...d,
       age: d.age,
       axisLabel: formatAxisLabel(d, isCouple),
@@ -3717,8 +3789,9 @@ export default function RetirementPlanner() {
       Spending: d.spending,
       "Need (Spending + Tax)": d.spending + d.tax,
       ownerDetails: d.ownerDetails,
-    }));
-  const chartAxisTicks = buildReadableAxisTicks(chartData, isCouple ? 10 : 12);
+    }); });
+  const chartAxisTicks = isCouple ? buildReadableAxisTicks(chartData, 7)
+    : chartData.filter((row, index) => index === 0 || index === chartData.length - 1 || row.age % 10 === 0).map(row => row.axisLabel);
   const flowAxisTicks = buildReadableAxisTicks(flowData, isCouple ? 8 : 10);
   const adjustedSpendableRows = isCouple
     ? results.yearlyData
@@ -3733,7 +3806,6 @@ export default function RetirementPlanner() {
     displayInputs.ssAge;
 
   const s = results.summary;
-  const materialUnmetCashFlow = hasMaterialUnmetCashFlow(s);
   const shortfall = computeShortfallInfo(results);
   const shortfallAxisValue =
     shortfall.firstShortfallAge != null
@@ -3761,78 +3833,7 @@ export default function RetirementPlanner() {
   );
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      {/* Slim live results bar — fixed overlay once the metrics strip is
-          scrolled out of view. Mirrors the headline numbers + plan status. */}
-      {pageScrolled && (
-        <div className="fixed top-0 inset-x-0 z-40 bg-white border-b border-slate-300 shadow-sm print:hidden">
-          <div className="max-w-[1800px] mx-auto px-6 py-2 flex items-center gap-x-5 gap-y-1 flex-wrap text-xs">
-            <span
-              className={`inline-flex items-center gap-1.5 font-semibold ${
-                shortfall.status === "danger"
-                  ? "text-rose-700"
-                  : shortfall.status === "warning"
-                    ? "text-amber-700"
-                    : "text-emerald-700"
-              }`}
-            >
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  shortfall.status === "danger"
-                    ? "bg-rose-500 animate-pulse"
-                    : shortfall.status === "warning"
-                      ? "bg-amber-500"
-                      : "bg-emerald-500"
-                }`}
-              ></span>
-              {shortfall.status === "danger"
-                ? `Shortfall at age ${shortfall.firstShortfallAge ?? "—"}`
-                : shortfall.status === "warning"
-                  ? "Funded — thin margin"
-                  : `On track to ${displayInputs.planThroughAge}`}
-            </span>
-            <span>
-              <span className="text-slate-500">
-                At {retirementDisplayAge}:
-              </span>{" "}
-              <span className="font-bold">
-                {fmtMoney(
-                  adjust(
-                    s.portfolioAtRetirement,
-                    currentYear +
-                      (retirementDisplayAge - displayInputs.currentAge),
-                  ),
-                )}
-              </span>
-            </span>
-            <span>
-              <span className="text-slate-500">
-                At {displayInputs.planThroughAge}:
-              </span>{" "}
-              <span
-                className={`font-bold ${
-                  shortfall.status === "danger" ? "text-rose-700" : ""
-                }`}
-              >
-                {fmtMoney(
-                  adjust(
-                    s.portfolioAtEnd,
-                    currentYear +
-                      (displayInputs.planThroughAge - displayInputs.currentAge),
-                  ),
-                )}
-              </span>
-            </span>
-            <span>
-              <span className="text-slate-500">Rate:</span>{" "}
-              <span className="font-bold">{fmtPct(s.year1WithdrawalRate)}</span>
-            </span>
-            <span className="text-slate-400 hidden md:inline">
-              {showRealDollars ? "today's $" : "nominal $"}
-            </span>
-          </div>
-        </div>
-      )}
+    <div className="planner-app min-h-screen bg-slate-50 text-slate-900">
       {/* Print-specific styles */}
       <style>{`
         @media print {
@@ -3868,145 +3869,45 @@ export default function RetirementPlanner() {
               day: "numeric",
             })}</p>
             <p>
-              Retirement age {inputs.retirementAge} → Plan through age{" "}
-              {inputs.planThroughAge}
+              Retirement age {displayInputs.retirementAge} → Plan through age{" "}
+              {displayInputs.planThroughAge}
             </p>
           </div>
         </div>
       </div>
 
       {/* Header */}
-      <header className="bg-gradient-to-r from-indigo-900 via-indigo-800 to-indigo-700 text-white px-6 py-5 shadow-md print:hidden">
-        <div className="flex justify-between items-center max-w-[1800px] mx-auto">
-          <div>
-            <h1 className="text-xl font-bold tracking-tight">
-              Retirement Planner
-            </h1>
-            <p className="text-indigo-200 text-sm mt-0.5">
-              Tax-aware projection • Roth conversion strategy • NY State
-            </p>
-          </div>
-          <div className="flex items-center gap-2 flex-wrap justify-end">
-            {/* Scenario switcher lives here — always visible, like a
-                document picker — instead of buried in the sidebar. */}
-            <label className="flex items-center gap-1.5 text-xs text-indigo-200">
-              <span className="hidden sm:inline font-medium">Scenario:</span>
-              <select
-                value={activeScenarioId ?? ""}
-                onChange={(e) => handleSelectScenario(e.target.value)}
-                aria-label="Active scenario"
-                className="max-w-[200px] text-xs bg-white/10 hover:bg-white/20 border border-white/30 rounded px-2 py-1.5 text-white focus:outline-none focus:ring-2 focus:ring-white/50 [&>option]:text-slate-900 cursor-pointer"
-                title="Switch between saved scenarios. Scenarios live only in this browser — nothing is uploaded."
-              >
-                {!hasSavedScenarios && (
-                  <option value="">No saved scenarios yet</option>
-                )}
-                {activeScenarioId === null && hasSavedScenarios && (
-                  <option value="">Built-in defaults (unsaved)</option>
-                )}
-                {savedScenarios.map((sc) => (
-                  <option key={sc.id} value={sc.id}>
-                    {sc.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {activeScenario && saveStatus === "idle" && (
-              <span
-                className={`text-xs flex items-center gap-1 ${
-                  isDirty ? "text-amber-200" : "text-emerald-300"
-                }`}
-              >
-                <span
-                  className={`inline-block w-2 h-2 rounded-full ${
-                    isDirty ? "bg-amber-300" : "bg-emerald-400"
-                  }`}
-                ></span>
-                {isDirty ? "unsaved" : "saved"}
-              </span>
-            )}
-            {saveStatus === "saving" && (
-              <span className="text-xs text-amber-200">Saving...</span>
-            )}
-            {saveStatus === "saved" && (
-              <span className="text-xs text-emerald-300">✓ Saved</span>
-            )}
-            {saveStatus === "loaded" && (
-              <span className="text-xs text-emerald-300">Loaded</span>
-            )}
-            {saveStatus === "cleared" && (
-              <span className="text-xs text-slate-300">Done</span>
-            )}
-            <button
-              onClick={handleSaveScenario}
-              disabled={saveStatus === "saving"}
-              className="text-xs bg-indigo-500 hover:bg-indigo-400 text-white px-3 py-1.5 rounded border border-indigo-400 transition font-medium disabled:opacity-50"
-              title={
-                activeScenario
-                  ? "Save current inputs into the selected scenario"
-                  : "Save current inputs as a new named scenario"
-              }
-            >
-              {activeScenario
-                ? isDirty
-                  ? "Save changes"
-                  : "Save"
-                : "Save Scenario"}
-            </button>
-            <button
-              onClick={handleSaveAsScenario}
-              className="text-xs bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded border border-white/20 transition"
-              title="Save the current inputs as a new named scenario"
-            >
-              Save as new…
-            </button>
-            <button
-              onClick={() => setShowImport(true)}
-              className="text-xs bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded border border-white/20 transition"
-              title="Paste an exported settings block to fill in every field at once"
-            >
-              Load from text…
-            </button>
-            {activeScenario && (
-              <button
-                onClick={handleRenameScenario}
-                aria-label="Rename scenario"
-                className="text-sm leading-none bg-white/10 hover:bg-white/20 px-2 py-1.5 rounded border border-white/20 transition"
-                title="Rename the active scenario"
-              >
-                ✎
-              </button>
-            )}
-            {activeScenario && (
-              <button
-                onClick={handleDeleteScenario}
-                aria-label="Delete scenario"
-                className="text-sm leading-none bg-white/10 hover:bg-rose-500/50 px-2 py-1.5 rounded border border-white/20 transition"
-                title="Delete the active scenario (this browser only)"
-              >
-                🗑
-              </button>
-            )}
-            <span
-              className="w-px h-5 bg-white/20 mx-1 hidden sm:block"
-              aria-hidden="true"
-            ></span>
-            <button
-              onClick={() => window.print()}
-              className="text-xs bg-emerald-500 hover:bg-emerald-400 text-white px-3 py-1.5 rounded border border-emerald-400 transition font-medium"
-            >
-              Save as PDF
-            </button>
-            <button
-              onClick={reset}
-              className="text-xs bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded border border-white/20 transition"
-              title="Revert to built-in defaults (does not delete saved)"
-            >
-              Reset
-            </button>
-          </div>
+      <header className="planner-header print:hidden">
+        <h1>Retirement Planner</h1>
+        <div className="scenario-toolbar">
+          <label className="sr-only" htmlFor="scenario-picker">Active scenario</label>
+          <select id="scenario-picker" value={activeScenarioId ?? ''} onChange={event => handleSelectScenario(event.target.value)}>
+            {(!hasSavedScenarios || !activeScenarioId) && <option value="">Unsaved plan</option>}
+            {savedScenarios.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+          <span className="save-state" role="status">{saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? 'Saved' : activeScenario && !isDirty ? 'Saved scenario' : 'Unsaved changes'}</span>
+          <button className="primary-action" onClick={handleSaveScenario} disabled={saveStatus === 'saving'}>{activeScenario ? 'Save changes' : 'Save scenario'}</button>
+          <details className="scenario-menu"><summary>More <span aria-hidden="true">⌄</span></summary><div onClick={event => { if (event.target.closest('button')) event.currentTarget.parentElement.open = false; }}>
+            <button onClick={handleSaveAsScenario}>Save as new…</button>
+            <button onClick={handleRenameScenario} disabled={!activeScenario}>Rename scenario</button>
+            <button onClick={handleDeleteScenario} disabled={!activeScenario}>Delete scenario</button>
+            <button onClick={() => setShowImport(true)}>Import settings</button>
+            <button onClick={() => { navigate('years'); requestAnimationFrame(() => {
+              const section = document.getElementById('settings-export');
+              const toggle = section?.querySelector('button');
+              if (toggle?.getAttribute('aria-expanded') === 'false') toggle.click();
+              section?.scrollIntoView({ block: 'start' });
+              toggle?.focus({ preventScroll: true });
+            }); }}>Export settings</button>
+            <button onClick={printReport}>Save as PDF</button>
+            <button onClick={reset}>Reset to defaults</button>
+          </div></details>
         </div>
       </header>
+      <div className="navigation-row print:hidden"><WorkspaceNav active={activeTab} onNavigate={navigate} />
+        <button className="assistant-launch" aria-expanded={chatOpen} onClick={() => setChatOpen(!chatOpen)}>Ask about this plan</button></div>
+      {scenarioRequest && <ScenarioDialog request={scenarioRequest} onSubmit={submitScenarioName} onClose={() => setScenarioRequest(null)} />}
+      {saveError && <p role="alert" className="save-error">{saveError}</p>}
 
       {/* Load-from-text modal — reachable from the toolbar on any tab */}
       <SettingsImport
@@ -4015,162 +3916,37 @@ export default function RetirementPlanner() {
         onApply={handleImportSettings}
       />
 
-      {/* Metrics strip */}
-      <div className="bg-white border-b border-slate-200 px-6 py-4 print:px-0 print:py-2 print-avoid-break">
-        <div className="max-w-[1800px] mx-auto flex justify-end mb-2 print:hidden">
-          <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg p-1">
-            <button
-              onClick={() => setShowRealDollars(false)}
-              className={`text-xs px-3 py-1 rounded font-medium transition ${
-                !showRealDollars
-                  ? "bg-indigo-600 text-white shadow-sm"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              Nominal $
-            </button>
-            <button
-              onClick={() => setShowRealDollars(true)}
-              className={`text-xs px-3 py-1 rounded font-medium transition ${
-                showRealDollars
-                  ? "bg-indigo-600 text-white shadow-sm"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              Today's $
-            </button>
+      <div className="dashboard-overview">
+        <div className="overview-heading"><h2 ref={workspaceRef} tabIndex={-1}>{activeTab === 'plan' ? 'Your retirement outlook' : activeTab === 'settings' ? 'Plan assumptions' : activeTab === 'years' ? 'Year-by-year breakdown' : activeTab === 'compare' ? 'Compare retirement and spending' : 'Risk analysis'}</h2>
+          <div className="dollar-switch" role="group" aria-label="Display dollars"><button aria-pressed={!showRealDollars} onClick={() => setShowRealDollars(false)}>Future dollars</button><button aria-pressed={showRealDollars} onClick={() => setShowRealDollars(true)}>Today's dollars</button></div></div>
+        <div className="overview-row"><div className="overview-metrics">
+          <CompactMetric label={'Portfolio at age '+retirementDisplayAge} value={fmtMoney(adjust(s.portfolioAtRetirement,currentYear+retirementDisplayAge-displayInputs.currentAge))} tone="positive" detail={'End of the first projected retirement year. Current portfolio: '+fmtMoney(s.currentTotal)+'. Values use the selected dollar basis.'} />
+          <CompactMetric label={'Portfolio at age '+displayInputs.planThroughAge} value={fmtMoney(adjust(s.portfolioAtEnd,currentYear+displayInputs.planThroughAge-displayInputs.currentAge))} tone={s.portfolioAtEnd <= 0 ? 'negative' : ''} detail="End-of-plan account balances. A positive balance alone does not rule out an earlier cash-flow shortfall; review the plan status." />
+          <CompactMetric label="First-year withdrawal" value={fmtPct(s.year1WithdrawalRate)} tone="caution" detail={'Includes withdrawals to fund taxes. Compare with the '+fmtPct(shortfall.guideline)+' guideline for this '+shortfall.retirementYears+'-year retirement.'} />
+          <CompactMetric label="Total Roth converted" value={fmtMoney(s.totalConverted)} detail={'Total transferred over the plan, in future dollars. Lifetime taxes: '+fmtMoney(s.totalTaxesPaid)+'. These sums are not today’s purchasing power.'} />
+        </div><div className="overview-notices">
+          <div className={'compact-health '+(s.calculationValid === false || shortfall.status === 'danger' ? 'danger' : shortfall.status === 'warning' ? 'caution' : 'funded')}>
+            <strong>{shortfall.status === 'danger' ? (s.calculationValid === false ? 'Estimate: shortfall at age ' : 'Projected shortfall at age ')+(shortfall.firstShortfallAge ?? '—')+(isCouple ? ' (primary)' : '') : s.calculationValid === false ? 'Estimate: calculation needs review' : shortfall.status === 'warning' ? 'Plan funded with a thin margin' : 'Plan funded through age '+displayInputs.planThroughAge}</strong>
+            <button onClick={() => { setSelectedYear(results.yearlyData.find(row => row.age === shortfall.firstShortfallAge)?.year ?? null); navigate('years'); }}>View years →</button>
           </div>
-        </div>
-        <div className="max-w-[1800px] mx-auto grid grid-cols-2 lg:grid-cols-4 gap-3">
-          <MetricCard
-            label={`Portfolio at ${retirementDisplayAge}`}
-            value={fmtMoney(
-              adjust(
-                s.portfolioAtRetirement,
-                currentYear + (retirementDisplayAge - displayInputs.currentAge),
-              ),
-            )}
-            sublabel={
-              showRealDollars
-                ? `Inflation-adjusted — future dollars: ${fmtMoney(s.portfolioAtRetirement)}`
-                : `Measured at the end of your first retirement year. ≈ ${fmtMoney(
-                    s.portfolioAtRetirement /
-                      Math.pow(
-                        1 + displayInputs.inflation,
-                        Math.max(
-                          0,
-                          retirementDisplayAge - displayInputs.currentAge,
-                        ),
-                      ),
-                  )} in today's dollars — vs ${fmtMoney(s.currentTotal)} now`
-            }
-            tone="good"
-          />
-          <MetricCard
-            label={`Portfolio at ${displayInputs.planThroughAge}`}
-            value={fmtMoney(
-              adjust(
-                s.portfolioAtEnd,
-                currentYear + (displayInputs.planThroughAge - displayInputs.currentAge),
-              ),
-            )}
-            sublabel={
-              shortfall.status === "danger"
-                ? shortfall.firstShortfallAge != null
-                  ? `Funds run out at age ${shortfall.firstShortfallAge}`
-                  : `Unmet cash flow: ${fmtMoney(s.totalUnmetCashFlow)}`
-                : materialUnmetCashFlow
-                  ? `Unmet cash flow: ${fmtMoney(s.totalUnmetCashFlow)}`
-                : showRealDollars
-                  ? `Inflation-adjusted — future dollars: ${fmtMoney(s.portfolioAtEnd)}`
-                  : `Future dollars — ≈ ${fmtMoney(
-                      s.portfolioAtEnd /
-                        Math.pow(
-                          1 + displayInputs.inflation,
-                          Math.max(
-                            0,
-                            displayInputs.planThroughAge - displayInputs.currentAge,
-                          ),
-                        ),
-                    )} in today's purchasing power`
-            }
-            tone={
-              shortfall.status === "danger" || s.portfolioAtEnd <= 0
-                ? "bad"
-                : shortfall.status === "warning"
-                  ? "warn"
-                  : "good"
-            }
-          />
-          <MetricCard
-            label="Year 1 Withdrawal Rate"
-            value={fmtPct(s.year1WithdrawalRate)}
-            sublabel={
-              (s.year1WithdrawalRate < shortfall.guideline
-                ? `Below the ${fmtPct(shortfall.guideline)} guideline for a ${shortfall.retirementYears}-year retirement`
-                : `Above the ${fmtPct(shortfall.guideline)} guideline for a ${shortfall.retirementYears}-year retirement`) +
-              " — counts everything pulled from savings in year 1, including money withdrawn to pay taxes"
-            }
-            tone={s.year1WithdrawalRate < shortfall.guideline ? "good" : "warn"}
-          />
-          <MetricCard
-            label="Total Roth Converted"
-            value={fmtMoney(s.totalConverted)}
-            sublabel={`Moved into Roth over the whole plan. Lifetime taxes ${fmtMoney(s.totalTaxesPaid)} adds every year's bill in future (inflated) dollars — use it to compare scenarios, not as today's money`}
-          />
-        </div>
-      </div>
-
-      {/* Plan health banner — always visible, also printed */}
-      <PlanStatusBanner
-        shortfall={shortfall}
-        calculationValid={s.calculationValid}
-        planThroughAge={displayInputs.planThroughAge}
-        isCouple={isCouple}
-        maxSustainableSpending={maxSustainableSpending}
-        plannedSpending={displayInputs.baseExpenses}
-      />
-
-      {/* Tab bar */}
-      <div className="bg-white border-b border-slate-200 px-6 print:hidden">
-        <div className="max-w-[1800px] mx-auto flex gap-1">
-          {[
-            { id: "plan", label: "Plan Details", sub: "Year-by-year breakdown" },
-            { id: "compare", label: "Compare Scenarios", sub: "What if you retired earlier?" },
-            { id: "risk", label: "Risk Analysis", sub: "Monte Carlo simulation" },
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition ${
-                activeTab === tab.id
-                  ? "border-indigo-600 text-indigo-700"
-                  : "border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50"
-              }`}
-            >
-              <div className="text-sm font-semibold">{tab.label}</div>
-              <div className="text-xs text-slate-500 font-normal">
-                {tab.sub}
-              </div>
-            </button>
-          ))}
-        </div>
+          {s.modelNotices?.length > 0 && <details className="compact-notices"><summary>{s.modelNotices.length} financial details need review</summary><div><p>Estimates remain provisional. Sustainable spending is withheld while material inputs are unresolved.</p><ul>{s.modelNotices.map(notice => <li key={notice}>{notice}</li>)}</ul></div></details>}
+          {s.modelNotices?.length > 0 && <button className="review-link" onClick={() => navigate('history')}>Review financial details →</button>}
+        </div></div>
       </div>
 
       {/* Main layout */}
-      <div className="max-w-[1800px] mx-auto grid grid-cols-1 lg:grid-cols-16 gap-6 p-6 print:p-0 print:gap-2">
+      <div className={`planner-workspace workspace-${activeTab}`}>
         {/* Inputs sidebar — its own scroll container on desktop so the
             input list and the results never fight over one scrollbar. */}
-        <aside className="lg:col-span-4 2xl:col-span-3 print:hidden lg:sticky lg:top-12 lg:self-start lg:max-h-[calc(100vh-3.5rem)] lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
-          <KeyLevers
-            inputs={inputs}
-            isCouple={isCouple}
-            update={update}
-            updateCouple={updateCouple}
-          />
+        <aside className="quick-sidebar print:hidden">
+          <KeyLevers inputs={inputs} isCouple={isCouple} update={update} updateCouple={updateCouple} onSettings={() => navigate('settings')} />
+          <BaselineControls comparison={comparison} onCapture={() => setBaselineInputs(captureBaseline(inputs))} onRestore={() => { setInputs(captureBaseline(baselineInputs)); setMcResults(null); }} />
+        </aside>
+        <div className={activeTab === 'settings' ? 'settings-view print:hidden' : 'settings-view hidden print:hidden'}>
+        <SettingsWorkspace scope={isCouple ? 'couple' : 'individual'} historyRequest={historyRequest} notices={s.modelNotices}>
           <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm">
             <h2 className="text-base font-bold text-slate-900 mb-1">
-              Your Inputs
+              Household and filing status
             </h2>
             <p className="text-xs text-slate-500 mb-4">
               Numbers update everything live.
@@ -5178,27 +4954,21 @@ export default function RetirementPlanner() {
               </div>
             )}
           </div>
-        </aside>
+        </SettingsWorkspace>
+        </div>
 
         {/* Results area */}
-        <main className="lg:col-span-12 2xl:col-span-13 print:col-span-12 space-y-6 print:space-y-3">
-          {results.summary.modelNotices?.length>0 && <div role="status" className="rounded border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
-            <p className="font-semibold">Estimate: financial details require confirmation</p>
-            <p className="mt-1">These limitations apply to the projection, Monte Carlo results, comparisons, and assistant analysis. A sustainable-spending recommendation is withheld while material inputs remain unresolved.</p>
-            <ul className="mt-2 list-disc space-y-1 pl-5">{results.summary.modelNotices.map(notice=><li key={notice}>{notice}</li>)}</ul>
-          </div>}
-          {activeTab === "plan" && (
-            <>
-          <PlanNarrative narrative={planNarrative} />
-
+        <main className="workspace-main min-w-0 space-y-6 print:space-y-3">
+          <div className={activeTab === 'plan' || activeTab === 'years' ? 'plan-report space-y-6' : 'plan-report hidden print:block'}>
+          <div className="dashboard-charts space-y-6">
           {/* Portfolio composition chart */}
           <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm print:shadow-none print:border-slate-300 print-avoid-break">
             <div className="flex justify-between items-start mb-4">
               <div>
                 <h2 className="text-lg font-bold text-slate-900">
-                  Portfolio Composition Over Time
+                  Portfolio over time
                 </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
+                <details className="chart-explainer"><summary>Account composition, withdrawals and baseline</summary><p className="text-xs text-slate-500 mt-0.5">
                   Watch how each account evolves through accumulation and
                   drawdown. In married-couple mode, spouse-owned retirement
                   accounts are combined here and split in the year-by-year detail.
@@ -5206,13 +4976,14 @@ export default function RetirementPlanner() {
                   withdrawals (RMDs) often force out more than you spend, and
                   the after-tax excess is re-saved into Cash/HYSA — look for the{" "}
                   <span className="text-[10px] font-medium bg-sky-100 text-sky-800 px-1 py-0.5 rounded">→CASH</span>{" "}
-                  badge in the year-by-year table.
-                </p>
+                  badge in the year-by-year table. The dotted baseline follows the same calendar years; missing years are not extrapolated.
+                </p></details>
               </div>
             </div>
             <ResponsiveContainer width="100%" height={360}>
-              <ComposedChart data={chartData}>
+              <ComposedChart data={chartData} accessibilityLayer>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <Line type="monotone" dataKey="Baseline" stroke="#4f46e5" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} isAnimationActive={false} />
                 <XAxis
                   dataKey="axisLabel"
                   ticks={chartAxisTicks}
@@ -5337,6 +5108,7 @@ export default function RetirementPlanner() {
             </ResponsiveContainer>
           </div>
 
+          <ExploreDetails onNavigate={navigate} noticeCount={s.modelNotices?.length || 0} />
           {/* Annual cash flow chart */}
           <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm print:shadow-none print:border-slate-300 print-avoid-break">
             <div className="mb-4">
@@ -5406,6 +5178,11 @@ export default function RetirementPlanner() {
             {isCouple && <SpendableCashLedger rows={adjustedSpendableRows} />}
           </div>
 
+          </div>
+          <details className="plan-explanation"><summary>Plan explanation, retirement phases and withdrawal strategy</summary>
+          <div className="space-y-6 explanation-body">
+          <PlanStatusBanner shortfall={shortfall} calculationValid={s.calculationValid} planThroughAge={displayInputs.planThroughAge} isCouple={isCouple} maxSustainableSpending={maxSustainableSpending} plannedSpending={displayInputs.baseExpenses} />
+          <PlanNarrative narrative={planNarrative} />
           {/* Phase Guide — ranges derived from the same boundaries the engine uses */}
           <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm print:shadow-none print:border-slate-300 print-avoid-break">
             <h2 className="text-lg font-bold text-slate-900 mb-1">
@@ -5552,6 +5329,11 @@ export default function RetirementPlanner() {
             cashStrategyImpact={cashStrategyImpact}
           />
 
+          </div></details>
+          <div className="year-workspace space-y-6">
+          <YearInspector row={results.yearlyData.find(row => row.year === selectedYear) ?? results.yearlyData.find(row => row.phase !== 'accumulation') ?? results.yearlyData[0]} rows={results.yearlyData} onSelect={setSelectedYear} real={showRealDollars} inflation={displayInputs.inflation} firstYear={currentYear}>
+            {isCouple && <CoupleOwnerDetailGrid ownerDetails={adjustRow(results.yearlyData.find(row => row.year === selectedYear) ?? results.yearlyData.find(row => row.phase !== 'accumulation') ?? results.yearlyData[0]).ownerDetails} />}
+          </YearInspector>
           {/* Year-by-year table */}
           <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden print:shadow-none print:border-slate-300 print-page-break">
             <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap justify-between items-start gap-3">
@@ -5650,7 +5432,7 @@ export default function RetirementPlanner() {
               )}
             </div>
 
-            <div className="overflow-auto max-h-[600px] print:max-h-none print:overflow-visible">
+            <div className="year-table-scroll overflow-auto max-h-[600px] print:max-h-none print:overflow-visible" role="region" aria-label="Year-by-year projection table" tabIndex={0}>
               <table className="w-full min-w-[1500px] text-xs">
                 <thead className="bg-white sticky top-0 z-10 print:static">
                   {/* Group headers */}
@@ -5775,7 +5557,7 @@ export default function RetirementPlanner() {
                               : "border-b border-slate-100 hover:bg-slate-50"
                           }
                         >
-                          <td className="px-3 py-1.5 font-semibold">
+                          <td className="year-identity px-3 py-1.5 font-semibold"><button aria-label={`Inspect year ${d.year}`} onClick={() => { setSelectedYear(d.year); document.querySelector('.year-inspector')?.scrollIntoView({block:'start'}); }}>
                             {isCouple && d.spouseAge != null
                               ? (
                                 <span className="inline-flex flex-col leading-tight">
@@ -5785,7 +5567,7 @@ export default function RetirementPlanner() {
                                   </span>
                                 </span>
                               )
-                              : d.age}
+                              : d.age}</button>
                           </td>
                           <td className="px-3 py-1.5">
                             <div className="flex items-center gap-1 flex-wrap">
@@ -6037,6 +5819,8 @@ export default function RetirementPlanner() {
             </div>
           </div>
 
+          </div>
+          <div className="report-notes space-y-6">
           {/* Explaining the ending balance / inheritance — only when the
               plan actually ends above today's total, otherwise it reads as
               mockery of a struggling plan */}
@@ -6160,7 +5944,7 @@ export default function RetirementPlanner() {
                 ) : (
                   <>
                     This plan currently makes no Roth conversions. Adding
-                    conversions in low-tax years (sidebar → Roth Conversions)
+                    conversions in low-tax years (All settings → Roth Conversions)
                     shifts more of the ending balance into the tax-free Roth
                     bucket — usually the most valuable account to inherit.
                   </>
@@ -6188,9 +5972,9 @@ export default function RetirementPlanner() {
           </div>
 
           {/* Settings Export — collapsible section for copy/paste */}
-          <SettingsExport inputs={displayInputs} sourceInputs={inputs} />
-            </>
-          )}
+          <div id="settings-export"><SettingsExport inputs={displayInputs} sourceInputs={inputs} /></div>
+          </div>
+          </div>
 
           {activeTab === "compare" && (
             <ScenarioComparison
@@ -6204,8 +5988,8 @@ export default function RetirementPlanner() {
 
           {activeTab === "risk" && (
             <RiskAnalysis
-              inputs={displayInputs}
-              results={results}
+              inputs={mcResults && mcInputsRef.current ? getDisplayInputs(mcInputsRef.current) : displayInputs}
+              results={mcResults && mcInputsRef.current ? simulatePlan(mcInputsRef.current) : results}
               mcResults={mcResults}
               mcStale={mcStale}
               runMC={runMC}
@@ -6223,6 +6007,8 @@ export default function RetirementPlanner() {
         onApplyChanges={applyChatChanges}
         compact
         floating
+        open={chatOpen}
+        onOpenChange={setChatOpen}
       />
     </div>
   );
@@ -6255,8 +6041,6 @@ function ScenarioComparison({
   ];
   const spendingLabels = ["Modest", "Current Plan", "Enhanced"];
 
-  const currentYear = PROJECTION_START_YEAR;
-  const endYear = currentYear + (displayInputs.planThroughAge - displayInputs.currentAge);
 
   const chartData = Object.keys(byAge)
     .sort()
@@ -6268,7 +6052,7 @@ function ScenarioComparison({
       };
       byAge[age].forEach((s, i) => {
         row[spendingLabels[i]] = Math.round(
-          adjust(s.portfolioAtEnd, endYear),
+          adjust(s.portfolioAtEnd, s.endYear),
         );
       });
       return row;
@@ -6373,7 +6157,7 @@ function ScenarioComparison({
                         )}
                       </td>
                       {byAge[age].map((s, i) => {
-                        const val = adjust(s.portfolioAtEnd, endYear);
+                        const val = adjust(s.portfolioAtEnd, s.endYear);
                         const depleted = val <= 0;
                         return (
                           <td
@@ -6608,6 +6392,8 @@ function PlannerChat({
   onApplyChanges,
   compact = false,
   floating = false,
+  open = true,
+  onOpenChange,
 }) {
   const [messages, setMessages] = useState([
     {
@@ -6622,7 +6408,7 @@ function PlannerChat({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [appliedSuggestions, setAppliedSuggestions] = useState({});
-  const [collapsed, setCollapsed] = useState(false);
+  const collapsed = !open;
   const chatApiUrl =
     import.meta.env.VITE_CHAT_API_URL || `${import.meta.env.BASE_URL}api/chat`;
 
@@ -6681,14 +6467,14 @@ function PlannerChat({
     : "bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden print:hidden";
 
   return (
-    <div className={shellClass}>
+    <div className={`${shellClass} ${collapsed ? "hidden" : ""}`}>
       <div className="px-5 py-3 border-b border-slate-200 bg-slate-50">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-lg font-bold text-slate-900">Ask AI About This Plan</h2>
           {floating && (
             <button
               type="button"
-              onClick={() => setCollapsed((value) => !value)}
+              onClick={() => onOpenChange?.(!open)}
               className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
               aria-expanded={!collapsed}
             >
@@ -6904,18 +6690,20 @@ function RiskAnalysis({
   mcStale = false,
   runMC,
   mcRunning,
-  adjust,
   showRealDollars,
   setShowRealDollars,
 }) {
+  const firstYear = results.yearlyData[0]?.year ?? PROJECTION_START_YEAR;
+  const endYear = results.yearlyData.at(-1)?.year ?? firstYear;
+  const adjustRisk = (value, year) => showRealDollars ? value / Math.pow(1 + inputs.inflation, year - firstYear) : value;
   const chartData = mcResults
-    ? mcResults.percentiles.map((p) => ({
+    ? mcResults.percentiles.map((p, index) => ({
         age: p.age,
-        "10th %ile (bad)": Math.round(p.p10),
-        "25th %ile": Math.round(p.p25),
-        "50th %ile (median)": Math.round(p.p50),
-        "75th %ile": Math.round(p.p75),
-        "90th %ile (great)": Math.round(p.p90),
+        "10th %ile (bad)": Math.round(adjustRisk(p.p10, results.yearlyData[index]?.year ?? firstYear + index)),
+        "25th %ile": Math.round(adjustRisk(p.p25, results.yearlyData[index]?.year ?? firstYear + index)),
+        "50th %ile (median)": Math.round(adjustRisk(p.p50, results.yearlyData[index]?.year ?? firstYear + index)),
+        "75th %ile": Math.round(adjustRisk(p.p75, results.yearlyData[index]?.year ?? firstYear + index)),
+        "90th %ile (great)": Math.round(adjustRisk(p.p90, results.yearlyData[index]?.year ?? firstYear + index)),
       }))
     : [];
 
@@ -7027,7 +6815,7 @@ function RiskAnalysis({
                 <span className="font-semibold">
                   {fmtPct(inputs.taxableAnnualTaxDrag)}
                 </span>
-                . Both are adjustable in the sidebar under "Risk Assumptions" — roughly 9-11% suits a balanced target-date-style mix, ~15% all equities.
+                . Both are adjustable in All settings under "Risk Assumptions" — roughly 9-11% suits a balanced target-date-style mix, ~15% all equities.
               </p>
             </div>
 
@@ -7059,9 +6847,9 @@ function RiskAnalysis({
               <MetricCard
                 label="Median End Balance"
                 value={fmtMoney(
-                  adjust(
+                  adjustRisk(
                     mcResults.finalP50,
-                    PROJECTION_START_YEAR + (inputs.planThroughAge - inputs.currentAge),
+                    endYear,
                   ),
                 )}
                 sublabel="50th percentile outcome"
@@ -7069,9 +6857,9 @@ function RiskAnalysis({
               <MetricCard
                 label="Worst-Case (10th %ile)"
                 value={fmtMoney(
-                  adjust(
+                  adjustRisk(
                     mcResults.finalP10,
-                    PROJECTION_START_YEAR + (inputs.planThroughAge - inputs.currentAge),
+                    endYear,
                   ),
                 )}
                 sublabel="Bottom 10% of runs"
@@ -7080,9 +6868,9 @@ function RiskAnalysis({
               <MetricCard
                 label="Best-Case (90th %ile)"
                 value={fmtMoney(
-                  adjust(
+                  adjustRisk(
                     mcResults.finalP90,
-                    PROJECTION_START_YEAR + (inputs.planThroughAge - inputs.currentAge),
+                    endYear,
                   ),
                 )}
                 sublabel="Top 10% of runs"
@@ -7166,7 +6954,7 @@ function RiskAnalysis({
                   })}
                 </div>
                 <div className="px-4 py-2 bg-slate-50 border-t border-slate-200 text-xs text-slate-500">
-                  Each factor above is based on your current inputs. Adjust
+                  Each factor above is based on the inputs used for this simulation. Adjust
                   values in the sidebar and re-run the simulation to see how
                   the success rate changes.
                 </div>

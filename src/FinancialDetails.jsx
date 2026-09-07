@@ -1,17 +1,20 @@
+import { NumericField } from './ui/PlannerWorkspace.jsx';
 const inputClass='mt-1 block w-full rounded border border-slate-300 bg-white p-2 text-sm text-slate-900';
 
-export default function FinancialDetails({values,onChange,household=false,personOnly=false}) {
+export default function FinancialDetails({values,onChange,household=false,personOnly=false,scope=''}) {
   const startYear=values.projectionStartYear ?? new Date().getFullYear();
-  const number=(key,label,nullable=false)=> <label className="block text-xs text-slate-700" key={key}>{label}<input className={inputClass} type="number" min="0" value={values[key] ?? ''} onChange={e=>onChange(key)(e.target.value==='' && nullable ? null : Number(e.target.value))}/></label>;
-  const select=(key,label,options)=><label className="block text-xs text-slate-700" key={key}>{label}<select className={inputClass} value={values[key] ?? options[0][0]} onChange={e=>onChange(key)(e.target.value)}>{options.map(([value,text])=><option key={value} value={value}>{text}</option>)}</select></label>;
+  const number=(key,label,nullable=false)=> <label className="block text-xs text-slate-700" key={key}>{label}<NumericField className={inputClass} min="0" step="any" nullable={nullable} data-unconfirmed={nullable && values[key] == null} placeholder={nullable ? 'Unconfirmed' : undefined} value={values[key]} onValue={onChange(key)}/></label>;
+  const select=(key,label,options)=><label className="block text-xs text-slate-700" key={key}>{label}<select className={inputClass} data-unconfirmed={(values[key] ?? options[0][0]) === "unknown"} value={values[key] ?? options[0][0]} onChange={e=>onChange(key)(e.target.value)}>{options.map(([value,text])=><option key={value} value={value}>{text}</option>)}</select></label>;
   const check=(key,label)=><label className="flex gap-2 text-xs text-slate-700" key={key}><input type="checkbox" checked={values[key]===true} onChange={e=>onChange(key)(e.target.checked)}/>{label}</label>;
   const date=(key,label)=><label className="block text-xs text-slate-700" key={key}>{label}<input className={inputClass} type="date" value={values[key] || ''} onChange={e=>onChange(key)(e.target.value)}/></label>;
   const history=(key,label,years)=><fieldset className="space-y-2"><legend className="font-medium text-sm">{label}</legend>{years.map(year=><label className="block text-xs" key={year}>{year}<input className={inputClass} type="number" min="0" placeholder="Unknown" value={values[key]?.[year] ?? ''} onChange={e=>onChange(key)({...values[key],[year]:e.target.value===''?null:Number(e.target.value)})}/></label>)}</fieldset>;
-  return <details className="my-4 rounded border border-slate-200 bg-slate-50 p-3">
-    <summary className="cursor-pointer text-sm font-semibold">Tax eligibility and account history</summary>
+  const title = `${scope || (household ? 'Household' : personOnly ? values.name || 'Owner' : '')}${scope || household || personOnly ? ': ' : ''}Tax eligibility and account history`;
+  return <details data-settings-title={title} className="financial-details my-4 rounded border border-slate-200 bg-slate-50 p-3">
+    <summary className="cursor-pointer text-sm font-semibold">{title}</summary>
     <p className="my-3 text-xs text-slate-600">Amounts are annual, in today’s dollars unless a historical tax year is shown. Blank eligibility facts remain unconfirmed. Healthcare classifications are portions of your existing healthcare budget.</p>
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
       {!household && <>
+        <fieldset className="financial-group"><legend>Roth and employer accounts</legend>
         {number('rothFirstContributionYear','First Roth IRA contribution tax year',true)}
         {number('balanceRoth401k','Employer Roth balance ($)')}
         {number('roth401kBasis','Employer Roth after-tax basis ($)')}
@@ -20,6 +23,7 @@ export default function FinancialDetails({values,onChange,household=false,person
         {check('rothCatchupAvailable','Employer plan accepts Roth catch-ups')}
         {check('currentEmployerPlan','Traditional employer balance is in the current employer’s plan')}
         {check('fivePercentOwner','Owner is subject to the 5% owner exception to the still-working RMD exemption')}
+        </fieldset><fieldset className="financial-group"><legend>HSA and healthcare qualification</legend>
         {select('hsaCoverage','HSA contribution coverage',[['unknown','Unknown'],['none','Not eligible'],['self','Self-only HDHP'],['family','Family HDHP']])}
         {number('hsaEligibleMonths','HSA eligible months per year (0–12)')}
         {number('medicareStartYear','Medicare enrollment year',true)}
@@ -28,6 +32,7 @@ export default function FinancialDetails({values,onChange,household=false,person
         {number('hsaQualifiedExpenses','Qualified medical expenses excluding premiums ($)')}
         {number('hsaQualifiedPremiums','Qualified premium portion ($)')}
         {select('hsaPremiumType','Premium qualification',[['none','Ordinary insurance / Medigap (not eligible)'],['cobra','COBRA continuation'],['unemployment','Coverage while receiving unemployment'],['medicare','Medicare (HSA owner 65+)']])}
+        </fieldset><fieldset className="financial-group"><legend>Social Security and survivor benefits</legend>
         {number('ssBirthMonth','Birth month for Social Security (1–12)')}
         {number('ssClaimMonth','First Social Security benefit month (1–12)')}
         {number('ssPriorWithheldMonths','Pre-projection benefit months withheld for earnings',true)}
@@ -43,6 +48,7 @@ export default function FinancialDetails({values,onChange,household=false,person
           {select('spouseInheritance','Spousal retirement-account election',[['unknown','Unconfirmed'],['own','Treat as spouse’s own accounts']])}
           {number('pensionSurvivorFraction','Pension continuation fraction (0–1)',true)}
         </>}
+        </fieldset><fieldset className="financial-group"><legend>Early access and SEPP</legend>
         {check('useSepp','Model an isolated fixed-amortization SEPP account')}
         {values.useSepp && <>
           {date('birthDate','Date of birth for SEPP')}{date('seppStartDate','First SEPP payment date')}
@@ -53,7 +59,7 @@ export default function FinancialDetails({values,onChange,household=false,person
           {number('seppRecaptureTax','Calculated historical recapture tax ($)',true)}
           {number('seppRecaptureInterest','Calculated recapture interest ($)',true)}
         </>}
-        <fieldset className="space-y-2 sm:col-span-2"><legend className="text-sm font-medium">Existing Roth IRA conversions</legend>
+        </fieldset><fieldset className="space-y-2 sm:col-span-2"><legend className="text-sm font-medium">Existing Roth IRA conversions</legend>
           {(values.rothConversions || []).map((v,index)=><div key={index} className="grid grid-cols-3 gap-2">
             {['year','amount','taxableAmount'].map((field)=><label className="text-xs" key={field}>{field==='year'?'Tax year':field==='amount'?'Remaining principal ($)':'Remaining taxable conversion principal ($)'}<input className={inputClass} type="number" min="0" value={v[field] ?? 0} onChange={e=>onChange('rothConversions')((values.rothConversions || []).map((item,i)=>i===index?{...item,[field]:Number(e.target.value)}:item))}/></label>)}
             <button type="button" className="text-left text-xs text-red-700" onClick={()=>onChange('rothConversions')(values.rothConversions.filter((_,i)=>i!==index))}>Remove conversion</button>
@@ -62,17 +68,20 @@ export default function FinancialDetails({values,onChange,household=false,person
         </fieldset>
       </>}
       {!personOnly && <>
+      <fieldset className="financial-group"><legend>Calendar and marketplace coverage</legend>
       {number('projectionStartYear','Projection starting calendar year',true)}
       {check('acaEligible','Marketplace members are eligible for a premium credit (no disqualifying coverage)')}
       {number('acaAnnualPremium','Actual annual marketplace premium ($)')}
       {number('acaBenchmarkPremium','Applicable annual benchmark premium ($)')}
       {number('acaCoverageMonths','Marketplace coverage months (0–12)')}
+      </fieldset><fieldset className="financial-group"><legend>Investment income and Medicare tax history</legend>
       {number('taxableOrdinaryYield','Brokerage ordinary dividend/interest yield (fraction, e.g. 0.02)')}
       {history('historicalMagi','Actual IRMAA lookback MAGI',[startYear-2,startYear-1])}
       {history('irmaaApprovedMagi','Approved IRMAA adjustment MAGI',[startYear,startYear+1])}
+      </fieldset><fieldset className="financial-group"><legend>Survivor household</legend>
       {number('survivorBaseExpenses','Survivor lifestyle spending ($)',true)}
       {check('qualifyingSurvivingSpouse','Dependent and household requirements for qualifying surviving spouse status are met')}
-      </>}
+      </fieldset></>}
       {!household && check('inheritedNyEligible','Inherited income is from a qualifying employment retirement arrangement for NY exclusion')}
     </div>
   </details>;
