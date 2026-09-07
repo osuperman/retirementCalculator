@@ -2,7 +2,9 @@
 
 A Vite + React retirement projection tool focused on tax-aware drawdowns, Roth conversion planning, RMDs, healthcare costs, and sequence-of-returns risk.
 
-The active app is `src/App.jsx`. (The unused legacy `src/retirement_planner.jsx` and `src/config/defaults.json` were removed — built-in defaults live in `DEFAULT_INPUTS` inside `src/App.jsx`.)
+The UI is `src/App.jsx`; production calculations and defaults live in `src/finance/engine.js`. Eligibility helpers and numerical closure are separate modules under `src/finance/`.
+
+See [Financial accuracy updates](docs/FINANCIAL_ACCURACY_UPDATES.md) for audit coverage, tests and remaining limitations. New eligibility/history fields must be completed for existing saved plans; missing facts are not assumed eligible.
 
 ## Documentation
 
@@ -12,7 +14,7 @@ The active app is `src/App.jsx`. (The unused legacy `src/retirement_planner.jsx`
   NY tax), each with its authoritative source and every simplification
   flagged. Sufficient to reconstruct the calculation engine without the UI.
 - **[CALCULATION_MODEL.md](CALCULATION_MODEL.md)** — the implementation map:
-  how those rules are wired into `src/App.jsx`.
+  how those rules are wired into the production finance modules.
 
 ## Run Locally
 
@@ -21,10 +23,10 @@ npm install
 npm run dev
 ```
 
-The Vite base path is `/retirementCalculator/`, so the local URL is usually:
+The development base path is `/` by default; the GitHub Pages build can set `VITE_BASE=/retirementCalculator/`. The local URL is usually:
 
 ```text
-http://127.0.0.1:5173/retirementCalculator/
+http://127.0.0.1:5173/
 ```
 
 ## Ask AI Chat
@@ -146,3 +148,13 @@ change `src/` and let the build regenerate it.
 ## Not Financial Advice
 
 This tool is for planning and sensitivity analysis. It simplifies tax law, investment returns, healthcare costs, household details, and account rules. Verify material decisions with a CPA, CFP, or other qualified fiduciary.
+
+## Financial regression checks
+
+```bash
+npm test
+npm run lint
+npm run build
+```
+
+Tests import the production engine directly. They include all internal diagnostics, the audit reproductions, boundary cases, equivalent individual/couple inputs, scenario round trips and money-conservation cases. Passing tests does not certify a retirement plan.
