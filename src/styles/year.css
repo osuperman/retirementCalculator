@@ -1,4 +1,53 @@
 .workspace-plan .year-workspace { display:none; }
+.year-view-switch { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:14px 0 16px; padding:10px; border:1px solid var(--brand-border); border-radius:10px; background:var(--brand-tint); width:fit-content; }
+.year-view-switch > span { font-size:13px; font-weight:700; padding:0 6px; color:var(--ink); }
+.year-view-switch button { min-height:46px; padding:10px 20px; border:2px solid var(--interactive); border-radius:7px; font-size:15px; font-weight:700; background:var(--surface); color:var(--interactive); }
+.year-view-switch button[aria-pressed=true] { color:var(--surface); background:var(--interactive); border-color:var(--interactive); box-shadow:0 2px 4px var(--shadow-panel); }
+.year-view-switch button:hover { box-shadow:0 0 0 2px var(--brand-border); }
+@media (max-width:600px) {
+  .year-view-switch { width:100%; }
+  .year-view-switch > span { flex-basis:100%; }
+  .year-view-switch button { flex:1; padding-inline:10px; }
+}
+.full-year-hidden { display:none; }
+.compact-year-view { container-type:inline-size; }
+.compact-year-view > p { padding:0 16px 12px; color:var(--ink-muted); font-size:12px; }
+.compact-year-table { width:100%; table-layout:fixed; border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums; }
+.compact-year-table th,.compact-year-table td { padding:10px 8px; border-bottom:1px solid var(--line); text-align:right; overflow-wrap:anywhere; }
+.year-detail-table .compact-year-table thead tr:first-child th { background:var(--surface-muted); font-size:12px; padding:12px 8px; letter-spacing:0; text-transform:none; }
+.year-detail-table .compact-year-table thead tr:first-child th:nth-child(2) { background:var(--positive-band); }
+.year-detail-table .compact-year-table thead tr:first-child th:nth-child(3) { background:var(--withdrawal-band); }
+.compact-year-table th:first-child { text-align:left; width:20%; }
+.compact-year-table th button { text-align:left; color:var(--interactive); text-decoration:underline; text-underline-offset:3px; min-height:44px; }
+.compact-year-table small { display:block; color:var(--ink-secondary); font-size:11px; font-weight:400; }
+.compact-year-table tr[data-selected=true] { background:var(--brand-tint); }
+.compact-year-table tr[data-shortfall=true] { background:var(--negative-bg); }
+.compact-year-warning { display:block; color:var(--negative-ink); font-size:10px; }
+.compact-year-table td:last-child { font-weight:700; }
+@media (max-width:1000px) {
+  .compact-year-table { font-size:12px; }
+  .compact-year-table th,.compact-year-table td { padding:8px 5px; }
+}
+@media (max-width:600px) {
+  .compact-year-table,.compact-year-table tbody,.compact-year-table tr { display:block; }
+  .compact-year-table thead { display:none; }
+  .compact-year-table tr { padding:10px 14px; border-bottom:1px solid var(--line-strong); }
+  .compact-year-table th:first-child { display:block; width:auto; }
+  .compact-year-table td { display:flex; justify-content:space-between; gap:12px; }
+  .compact-year-table td::before { content:attr(data-label); text-align:left; font-weight:400; color:var(--ink-secondary); }
+}
+@container (max-width:520px) {
+  .compact-year-table,.compact-year-table tbody,.compact-year-table tr { display:block; }
+  .compact-year-table thead { display:none; }
+  .compact-year-table tr { padding:10px 14px; border-bottom:1px solid var(--line-strong); }
+  .compact-year-table th:first-child { display:block; width:auto; }
+  .compact-year-table td { display:flex; justify-content:space-between; gap:12px; }
+  .compact-year-table td::before { content:attr(data-label); text-align:left; font-weight:400; color:var(--ink-secondary); }
+}
+@media print {
+  .sidebar-resize-controls,.compact-year-view { display:none!important; }
+  .full-year-hidden { display:block; }
+}
 .year-inspector { scroll-margin-top:78px; padding:0; }
 .year-inspector-heading { display:flex; justify-content:space-between; gap:20px; align-items:center; padding-bottom:22px; }
 .year-inspector h2 { font-size:26px; font-weight:700; letter-spacing:-.03em; }

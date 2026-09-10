@@ -1,4 +1,7 @@
 import { CompositionLegend, YearComposition } from './ui/YearComposition.jsx';
+import { CompactYearTable } from './ui/CompactYearTable.jsx';
+import { SidebarResize } from './ui/SidebarResize.jsx';
+import { useSidebarSize } from './ui/useSidebarSize.js';
 import FinancialDetails from "./FinancialDetails.jsx";
 import { RetirementOutlook, CompactOutlook } from './ui/RetirementOutlook.jsx';
 import { accountColor, accountLabel } from './ui/accountPalette.js';
@@ -3377,6 +3380,8 @@ export default function RetirementPlanner() {
   const [historyRequest, setHistoryRequest] = useState(0);
   const [settingsTarget, setSettingsTarget] = useState(null);
   const [selectedYear, setSelectedYear] = useState(null);
+  const [fullYearTable, setFullYearTable] = useState(true);
+  const sidebarSize = useSidebarSize();
   const [scenarioRequest, setScenarioRequest] = useState(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [settingsIndexTarget, setSettingsIndexTarget] = useState(null);
@@ -3926,8 +3931,8 @@ export default function RetirementPlanner() {
         onApply={handleImportSettings}
       />
 
-      <div className={`planner-workspace workspace-${activeTab}`}>
-        <aside className="quick-sidebar print:hidden">
+      <div className={`planner-workspace workspace-${activeTab}${sidebarSize.collapsed ? ' sidebar-collapsed' : ''}`} style={{ '--sidebar-width': `${sidebarSize.width}px` }}>
+        <aside id="planner-sidebar" className="quick-sidebar print:hidden">
           <WorkspaceNav active={activeTab} onNavigate={navigate} reviewCount={s.modelNotices?.length ?? 0}
             assistantOpen={chatOpen} onAssistant={() => setChatOpen(value => !value)} settingsIndexRef={setSettingsIndexTarget} />
           <div className="quick-sidebar-controls">
@@ -3935,6 +3940,7 @@ export default function RetirementPlanner() {
             <BaselineControls comparison={comparison} simulationStatus={mcResults ? mcStale ? 'Risk simulation needs rerunning after your changes.' : 'Risk simulation uses current inputs; it is separate from this baseline comparison.' : undefined} onCapture={() => setBaselineInputs(captureBaseline(inputs))} onRestore={() => { setInputs(captureBaseline(baselineInputs)); setMcResults(null); }} />
           </div>
         </aside>
+        <SidebarResize {...sidebarSize} />
         <div className="workspace-content">
       <div className={`dashboard-overview${activeTab !== 'plan' ? ' is-secondary' : ''}`}>
         <div className="overview-heading"><h2 ref={activeTab === 'plan' ? workspaceRef : undefined} tabIndex={-1}>Your retirement outlook</h2>
@@ -5389,6 +5395,11 @@ export default function RetirementPlanner() {
                 <h2 className="text-lg font-bold text-slate-900">
                   Year-by-Year Detail
                 </h2>
+                <div className="year-view-switch print:hidden" role="group" aria-label="Year table view">
+                  <span>Table view</span>
+                  <button aria-pressed={fullYearTable} onClick={() => setFullYearTable(true)}>Full detail</button>
+                  <button aria-pressed={!fullYearTable} onClick={() => setFullYearTable(false)}>Compact view</button>
+                </div>
                 <p className="text-xs text-slate-500 mt-0.5">
                   Each row balances:{" "}
                   <span className="text-emerald-700 font-medium">
@@ -5457,6 +5468,8 @@ export default function RetirementPlanner() {
               </div>
             </div>
 
+            {!fullYearTable && <CompactYearTable rows={results.yearlyData} adjustRow={adjustRow} year1Spending={results.summary.year1Spending} selectedYear={selectedYear ?? results.yearlyData.find(row => row.phase !== 'accumulation')?.year} onSelect={setSelectedYear} />}
+            <div className={fullYearTable ? 'full-year-view' : 'full-year-view full-year-hidden'}>
             <CompositionLegend rows={results.yearlyData.filter(row => row.phase !== 'accumulation')} couple={isCouple} />
             {isCouple && <p className="year-couple-note">Couple rows show year, then primary/spouse ages underneath.</p>}
 
@@ -5820,6 +5833,7 @@ export default function RetirementPlanner() {
             </div>
 
             {/* Explainer under the table */}
+            </div>
             <div className="px-5 py-4 border-t border-slate-200 bg-slate-50 text-xs text-slate-700">
               <p className="font-semibold mb-2">How to read a row:</p>
               <div className="space-y-1 leading-relaxed">
