@@ -1,4 +1,5 @@
 import { getDisplayInputs, computeShortfallInfo } from '../finance/engine.js';
+import { baselineChanges } from './baselineChanges.js';
 
 // A working comparison is independent of the saved scenario store.
 export function captureBaseline(inputs) {
@@ -23,9 +24,17 @@ export function compareBaseline(baseline, inputs, results) {
   const current = getDisplayInputs(inputs);
   const before = computeShortfallInfo(baseline.results);
   const after = computeShortfallInfo(results);
-  const sameHorizon = baseline.results.yearlyData.at(-1)?.year === results.yearlyData.at(-1)?.year;
+  const beforeHorizon = baseline.results.yearlyData.at(-1)?.year ?? null;
+  const afterHorizon = results.yearlyData.at(-1)?.year ?? null;
+  const sameHorizon = beforeHorizon !== null && beforeHorizon === afterHorizon;
   return {
     changed: JSON.stringify(baseline.inputs) !== JSON.stringify(inputs),
+    changes: baselineChanges(baseline.inputs, inputs),
+    beforeHorizon,
+    afterHorizon,
+    beforeEnding: sameHorizon && Number.isFinite(baseline.results.summary.portfolioAtEnd) ? baseline.results.summary.portfolioAtEnd : null,
+    afterEnding: sameHorizon && Number.isFinite(results.summary.portfolioAtEnd) ? results.summary.portfolioAtEnd : null,
+    provisional: baseline.results.summary.calculationValid === false || results.summary.calculationValid === false,
     spending: current.baseExpenses - original.baseExpenses,
     ending: sameHorizon ? results.summary.portfolioAtEnd - baseline.results.summary.portfolioAtEnd : null,
     beforeYear: before.firstShortfallYear,

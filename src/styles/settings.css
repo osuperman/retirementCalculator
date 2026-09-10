@@ -1,0 +1,48 @@
+.settings-view { min-width:0; }
+.settings-index button[aria-current=location] { color:var(--interactive); background:var(--brand-tint); font-weight:600; box-shadow:inset 3px 0 var(--interactive); }
+.settings-editor .section-body label:has(> input[type=checkbox]), .settings-editor .financial-details label:has(> input[type=checkbox]) { display:flex; align-items:flex-start; gap:8px; }
+.settings-editor label > input[type=checkbox] { margin-top:3px; flex:none; width:16px; height:16px; }
+.settings-editor .financial-details [data-needs-review=true] { border-color:var(--warning); background:var(--warning-bg); }
+.field-review-note { display:block; font-size:12px; margin-top:5px; color:var(--warning-ink); }
+.field-unconfirmed-note { display:block; font-size:12px; margin-top:5px; color:var(--ink-muted); }
+.field-review-note[data-needs-review=true] { color:var(--warning-ink); }
+.review-list { display:grid; gap:12px; padding:0!important; list-style:none!important; }
+.review-item { padding:12px 0; border-bottom:1px solid var(--warning-border); }
+.review-item:last-child { border-bottom:0; }
+.review-item p { margin:5px 0; }
+.review-actions { display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:8px; }
+.review-actions button { color:var(--interactive); font-weight:600; text-decoration:underline; text-underline-offset:3px; }
+.settings-workspace { display:grid; grid-template-columns:220px minmax(0,1fr); gap:24px; }
+.settings-heading { grid-column:1/-1; }
+.settings-heading h2 { font-size:20px; font-weight:700; }
+.settings-heading p { margin-top:6px; color:var(--ink-muted); }
+.settings-index { position:sticky; top:78px; max-height:calc(100vh - 95px); overflow:auto; padding-right:12px; }
+.settings-index strong { display:block; font-size:12px; text-transform:uppercase; letter-spacing:.06em; margin-bottom:10px; color:var(--ink-muted); }
+.settings-index button { display:block; width:100%; padding:8px 10px; margin-bottom:3px; text-align:left; border-radius:5px; font-size:12px; }
+.settings-index button:hover { color:var(--interactive); background:var(--brand-tint); }
+.settings-editor { min-width:0; max-width:1120px; }
+.settings-section,.financial-details { scroll-margin-top:80px; }
+.settings-editor > div { box-shadow:none; }
+.settings-editor .section-body { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px 24px; padding:20px; }
+.settings-editor .section-body[hidden] { display:none; }
+.settings-editor .section-body > p,.settings-editor .section-body > section,.settings-editor .section-body > details,.settings-editor .section-body > .grid,.settings-editor .section-body > .flex,.settings-editor .section-body > div:has(>label.flex),.settings-editor .section-body > div:has(>.text-xs):not(:has(input)) { grid-column:1/-1; }
+.settings-editor input:not([type=checkbox]):not([type=range]),.settings-editor select { min-height:38px; font-size:14px; }
+.settings-editor label { font-size:14px; }
+.settings-editor p { line-height:1.6; }
+.settings-notices { margin-bottom:16px; padding:16px 20px; background:var(--warning-bg); border:1px solid var(--warning-border); border-radius:8px; color:var(--warning-ink); font-size:14px; }
+.settings-notices ul { list-style:disc; padding-left:18px; margin-top:8px; line-height:1.7; }
+.financial-details { padding:18px!important; background:var(--canvas)!important; }
+.financial-group { grid-column:1/-1; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px 24px; border-top:1px solid var(--line); padding-top:16px; }
+.financial-group legend { font-size:14px; font-weight:600; padding-right:12px; margin-bottom:10px; }
+.financial-details [data-unconfirmed=true] { border-color:var(--line-strong); background:var(--surface); }
+.financial-details [data-unconfirmed=true]::placeholder { color:var(--ink-muted); font-style:italic; }
+@media (max-width:760px) {
+  .workspace-main,.quick-sidebar,.settings-view { width:100%; }
+  .settings-workspace { display:block; }
+  .settings-index { position:static; display:flex; flex-wrap:wrap; gap:4px; max-height:none; margin:18px 0; padding:0; }
+  .settings-index strong { width:100%; }
+  .settings-index button { width:auto; background:var(--brand-tint); font-size:12px; padding:7px 9px; }
+  .settings-editor .section-body,.financial-group { grid-template-columns:1fr; gap:12px; }
+  .settings-editor .section-body { padding:14px; }
+  .financial-group > * { grid-column:1!important; }
+}

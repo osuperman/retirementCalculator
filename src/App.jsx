@@ -1,6 +1,11 @@
+import { CompositionLegend, YearComposition } from './ui/YearComposition.jsx';
 import FinancialDetails from "./FinancialDetails.jsx";
+import { RetirementOutlook, CompactOutlook } from './ui/RetirementOutlook.jsx';
+import { accountColor, accountLabel } from './ui/accountPalette.js';
+import { moneyMetric } from './ui/metricPresentation.js';
 import { NumericField, WorkspaceNav, ScenarioDialog, SettingsWorkspace, BaselineControls, ExploreDetails, YearInspector, CompactMetric } from './ui/PlannerWorkspace.jsx';
 import { captureBaseline, baselineSeries, compareBaseline } from './ui/planComparison.js';
+import { hasNumericChanges } from './ui/saveState.js';
 import {
   CASH_STRATEGY_OPTIONS,
   DEFAULT_INPUTS,
@@ -97,7 +102,7 @@ function TermInfo({ text }) {
       onMouseEnter={() => setIsOpen(true)}
       onMouseLeave={() => setIsOpen(false)}
     >
-      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[10px] font-bold leading-none text-slate-500">
+      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 bg-white text-[12px] font-bold leading-none text-slate-500">
         ?
       </span>
       <span
@@ -144,7 +149,7 @@ function NumberInput({ label, value, onChange, prefix, suffix, step = 1, hint, i
             prefix ? "pl-7" : "pl-3"
           } ${
             suffix ? "pr-8" : "pr-3"
-          } focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition`}
+          } focus:border-indigo-500 transition`}
         />
         {suffix && (
           <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm pointer-events-none">
@@ -170,7 +175,7 @@ function TextInput({ label, value, onChange, hint }) {
         type="text"
         value={value || ""}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-900 transition focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        className="w-full rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-900 transition focus:border-indigo-500"
       />
       {hint && <p id={`${id}-hint`} className="text-xs text-slate-500 mt-1">{hint}</p>}
     </div>
@@ -204,7 +209,7 @@ function SelectInput({ label, value, onChange, options, hint, info }) {
         aria-describedby={hint ? `${id}-hint` : undefined}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-md border border-slate-300 bg-white text-slate-900 text-sm py-1.5 px-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
+        className="w-full rounded-md border border-slate-300 bg-white text-slate-900 text-sm py-1.5 px-2 focus:border-indigo-500 transition"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>
@@ -455,7 +460,7 @@ function PlanStatusBanner({
   );
 }
 
-function MetricCard({ label, value, sublabel, tone = "neutral" }) {
+function MetricCard({ label, value, sublabel, tone = "neutral", emphasis = false }) {
   const tones = {
     neutral: "text-slate-900",
     good: "text-emerald-600",
@@ -463,11 +468,11 @@ function MetricCard({ label, value, sublabel, tone = "neutral" }) {
     bad: "text-rose-600",
   };
   return (
-    <div className="bg-white rounded-lg p-4 border border-slate-200 shadow-sm">
+    <div className={`bg-white rounded-lg p-4 border border-slate-200 shadow-sm ${emphasis ? "risk-primary" : ""}`}>
       <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">
         {label}
       </p>
-      <p className={`text-2xl font-bold mt-1 ${tones[tone]}`}>{value}</p>
+      <p className={`${emphasis ? "text-4xl" : "text-2xl"} font-bold mt-1 ${tones[tone]}`}>{value}</p>
       {sublabel && (
         <p className="text-xs text-slate-500 mt-1 leading-tight">{sublabel}</p>
       )}
@@ -664,7 +669,7 @@ function SettingsImport({ open, onClose, onApply }) {
             onChange={(e) => setText(e.target.value)}
             autoFocus
             placeholder={"# Retirement Planner Settings\n\n## Timing\nFiling Status: Single\nCurrent Age: 50\nRetirement Age: 51\n\n## Current Balances\nCash / HYSA: $1,400,000\n401k / 403b: $1,258,000\n..."}
-            className="w-full h-64 text-xs font-mono p-2 border border-slate-300 rounded bg-slate-50 text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            className="w-full h-64 text-xs font-mono p-2 border border-slate-300 rounded bg-slate-50 text-slate-800"
           />
           <div className="flex items-center gap-3 mt-3">
             <button
@@ -1234,37 +1239,6 @@ function SettingsExport({ inputs, sourceInputs = inputs }) {
   );
 }
 
-function MiniStackedBar({ row }) {
-  if (!row.total || row.total === 0) return <span className="text-slate-300">—</span>;
-  const segments = [
-    { value: row.cash, color: "#94a3b8", name: "Cash" },
-    { value: row.taxable, color: "#7dd3fc", name: "Taxable" },
-    { value: row.inherited, color: "#bef264", name: "Inherited (BCO)" },
-    { value: row.k401, color: "#c4b5fd", name: "401k" },
-    { value: row.tradIra, color: "#f9a8d4", name: "Trad IRA" },
-    { value: row.roth, color: "#6ee7b7", name: "Roth" },
-    { value: row.hsa, color: "#fdba74", name: "HSA" },
-  ].filter((s) => s.value > 0);
-  return (
-    <div
-      className="flex h-4 w-full rounded overflow-hidden border border-slate-200"
-      title={segments
-        .map((s) => `${s.name}: ${fmtMoney(s.value)}`)
-        .join(" | ")}
-    >
-      {segments.map((seg, i) => (
-        <div
-          key={i}
-          style={{
-            width: `${(seg.value / row.total) * 100}%`,
-            background: seg.color,
-          }}
-        />
-      ))}
-    </div>
-  );
-}
-
 function CoupleOwnerDetailGrid({ ownerDetails }) {
   if (!ownerDetails) return null;
   const primary = ownerDetails.primary || {};
@@ -1290,7 +1264,7 @@ function CoupleOwnerDetailGrid({ ownerDetails }) {
   if (!hasAnyDetail) return null;
 
   return (
-    <div className="grid grid-cols-[1.2fr_1fr_1fr] gap-x-3 gap-y-1 rounded border border-slate-200 bg-white p-3 text-[11px]">
+    <div className="grid grid-cols-[1.2fr_1fr_1fr] gap-x-3 gap-y-1 rounded border border-slate-200 bg-white p-3 text-[12px]">
       <div className="font-semibold text-slate-500">Owner Detail</div>
       <div className="text-right font-semibold text-slate-700">{primaryName}</div>
       <div className="text-right font-semibold text-slate-700">{spouseName}</div>
@@ -1531,7 +1505,7 @@ function CashFlowTooltip({ active, payload, isCouple, showNeedBreakdown = false 
     <tr>
       <td
         colSpan={2}
-        className="pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400"
+        className="pt-1.5 pb-0.5 text-[12px] font-semibold uppercase tracking-wider text-slate-400"
       >
         {label}
       </td>
@@ -2033,7 +2007,7 @@ function EarlyAccessStrategyPanel({
               >
                 {fmtMoney(penaltyDraws)}
                 {totalPenalties > 0 && (
-                  <span className="block text-[10px] font-medium text-rose-600">
+                  <span className="block text-[12px] font-medium text-rose-600">
                     incl. {fmtMoney(totalPenalties)} of 10% penalties
                   </span>
                 )}
@@ -2216,7 +2190,7 @@ function EarlyAccessStrategyPanel({
         </ul>
       </div>
 
-      <p className="text-[11px] text-slate-400 italic">
+      <p className="text-[12px] text-slate-400 italic">
         Estimates only — early-withdrawal rules have exceptions and traps this
         tool can't see (plan documents, state rules, disability/medical
         exceptions, 457(b) plans with no early penalty). Confirm your specific
@@ -2874,7 +2848,7 @@ function LeverRow({ label, value, onChange, min, max, step, isPercent = false, p
         <label htmlFor={id} className="text-xs font-medium text-slate-600">{label}</label>
         <div className="relative">
           {prefix && (
-            <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-slate-400 text-[11px] pointer-events-none">
+            <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-slate-400 text-[12px] pointer-events-none">
               {prefix}
             </span>
           )}
@@ -2883,7 +2857,7 @@ function LeverRow({ label, value, onChange, min, max, step, isPercent = false, p
             value={display}
             step={step}
             onValue={emit}
-            className={`w-24 text-right rounded border border-slate-300 bg-white text-slate-900 text-xs py-0.5 pr-1.5 ${prefix ? "pl-4" : "pl-1.5"} focus:outline-none focus:ring-1 focus:ring-indigo-500`}
+            className={`w-24 text-right rounded border border-slate-300 bg-white text-slate-900 text-xs py-0.5 pr-1.5 ${prefix ? "pl-4" : "pl-1.5"} focus:ring-1`}
           />
         </div>
       </div>
@@ -2939,7 +2913,7 @@ function KeyLevers({ inputs, isCouple, update, updateCouple, onSettings }) {
           <span className="text-sm font-semibold text-slate-900">
             Adjust your plan
           </span>
-          <span className="text-[10px] uppercase tracking-wider text-indigo-600 font-semibold">
+          <span className="text-[12px] uppercase tracking-wider text-indigo-600 font-semibold">
             Live
           </span>
         </span>
@@ -3086,7 +3060,7 @@ function CashStrategyInputs({
           id={strategyId}
           value={strategy}
           onChange={(e) => onChange("cashStrategy")(e.target.value)}
-          className="w-full rounded-md border border-slate-300 bg-white text-slate-900 text-sm py-1.5 px-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
+          className="w-full rounded-md border border-slate-300 bg-white text-slate-900 text-sm py-1.5 px-2 focus:border-indigo-500 transition"
         >
           {CASH_STRATEGY_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>
@@ -3401,12 +3375,14 @@ export default function RetirementPlanner() {
   const [activeTab, setActiveTab] = useState("plan");
   const [baselineInputs, setBaselineInputs] = useState(() => captureBaseline(normalizeInputs(DEFAULT_INPUTS)));
   const [historyRequest, setHistoryRequest] = useState(0);
+  const [settingsTarget, setSettingsTarget] = useState(null);
   const [selectedYear, setSelectedYear] = useState(null);
   const [scenarioRequest, setScenarioRequest] = useState(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [saveError, setSaveError] = useState('');
   const workspaceRef = useRef(null);
   const navigate = (destination) => {
+    setSettingsTarget(null);
     setActiveTab(destination === 'history' ? 'settings' : destination);
     if (destination === 'history') setHistoryRequest(value => value + 1);
     else setHistoryRequest(0);
@@ -3432,20 +3408,30 @@ export default function RetirementPlanner() {
   // Named scenarios persisted in this browser only.
   const [savedScenarios, setSavedScenarios] = useState([]);
   const [activeScenarioId, setActiveScenarioId] = useState(null);
+  const [saveBaseline, setSaveBaseline] = useState(() => normalizeInputs(DEFAULT_INPUTS));
+  const [storeReady, setStoreReady] = useState(false);
+  const savingRef = useRef(false);
   const activeScenario = useMemo(
     () => savedScenarios.find((s) => s.id === activeScenarioId) ?? null,
     [savedScenarios, activeScenarioId],
   );
-  // Has the working input set diverged from the active scenario's saved inputs?
-  const isDirty = useMemo(() => {
-    if (!activeScenario) return false;
-    // Compare against the normalized form so a migrated/legacy scenario whose
-    // stored shape predates newer fields doesn't read as permanently "unsaved".
-    return (
-      JSON.stringify(normalizeInputs(activeScenario.inputs)) !==
-      JSON.stringify(inputs)
-    );
-  }, [activeScenario, inputs]);
+  const isDirty = useMemo(() => hasNumericChanges(inputs, saveBaseline), [inputs, saveBaseline]);
+  useEffect(() => {
+    const app = document.querySelector('.planner-app');
+    const navigation = app?.querySelector('.navigation-row');
+    const reminder = app?.querySelector('.save-reminder');
+    if (!app || !navigation) return;
+    const measure = () => {
+      app.style.setProperty('--workspace-nav-height', `${navigation.getBoundingClientRect().height}px`);
+      app.style.setProperty('--workspace-save-height', `${reminder?.getBoundingClientRect().height || 0}px`);
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(navigation);
+    if (reminder) observer.observe(reminder);
+    measure();
+    return () => observer.disconnect();
+  }, [isDirty]);
+  const canSave = storeReady && isDirty && saveStatus !== 'saving';
   const isCouple = isCoupleMode(inputs);
   const displayInputs = useMemo(() => getDisplayInputs(inputs), [inputs]);
   const results = useMemo(() => simulatePlan(inputs), [inputs]);
@@ -3489,7 +3475,9 @@ export default function RetirementPlanner() {
         // Merge saved inputs with defaults in case new fields were added.
         setInputs(normalizeInputs(active.inputs));
         setBaselineInputs(captureBaseline(normalizeInputs(active.inputs)));
+        setSaveBaseline(normalizeInputs(active.inputs));
       }
+      setStoreReady(true);
     });
     return () => {
       mounted = false;
@@ -3498,14 +3486,23 @@ export default function RetirementPlanner() {
 
   // Persist a scenario list + active id to this browser, and flash status.
   const persistStore = async (nextScenarios, nextActiveId, status = "saved") => {
-    setSavedScenarios(nextScenarios);
-    setActiveScenarioId(nextActiveId);
+    if (savingRef.current) return false;
+    savingRef.current = true;
     setSaveStatus(status === "saved" ? "saving" : status);
     const ok = await saveStore({
       version: 1,
       scenarios: nextScenarios,
       activeScenarioId: nextActiveId,
     });
+    savingRef.current = false;
+    if (ok) {
+      setSavedScenarios(nextScenarios);
+      setActiveScenarioId(nextActiveId);
+      if (status === 'saved') {
+        const saved = nextScenarios.find(s => s.id === nextActiveId);
+        if (saved) setSaveBaseline(normalizeInputs(saved.inputs));
+      }
+    }
     setSaveStatus(ok ? status : "idle");
     setSaveError(ok ? "" : "Could not save in this browser. Export your settings to keep a copy.");
     setTimeout(() => setSaveStatus("idle"), 2500);
@@ -3514,6 +3511,7 @@ export default function RetirementPlanner() {
 
   // Save current inputs into the active scenario (or create one if none).
   const handleSaveScenario = async () => {
+    if (!canSave || savingRef.current) return;
     if (!activeScenario) {
       return handleSaveAsScenario();
     }
@@ -3527,6 +3525,7 @@ export default function RetirementPlanner() {
 
   // Create a new named scenario from the current inputs and make it active.
   const handleSaveAsScenario = async () => {
+    if (!canSave || savingRef.current) return;
     const suggested =
       savedScenarios.length === 0
         ? "My plan"
@@ -3540,19 +3539,23 @@ export default function RetirementPlanner() {
     } else if (scenarioRequest.kind === 'rename' && activeScenario) {
       await persistStore(savedScenarios.map(item => item.id === activeScenario.id ? {...item,name} : item), activeScenario.id);
     } else {
+      if (!canSave || savingRef.current) return;
       const scenario = { id: makeScenarioId(), name, inputs: captureBaseline(inputs), savedAt: Date.now() };
-      await persistStore([...savedScenarios, scenario], scenario.id);
+      const ok = await persistStore([...savedScenarios, scenario], scenario.id);
+      if (!ok) return;
     }
     setScenarioRequest(null);
   };
 
   // Switch to a saved scenario, loading its inputs as the working set.
   const handleSelectScenario = async (id) => {
-    if (!id) return;
+    if (!id || savingRef.current) return;
     const scenario = savedScenarios.find((s) => s.id === id);
     if (!scenario) return;
     setInputs(normalizeInputs(scenario.inputs));
     setBaselineInputs(captureBaseline(normalizeInputs(scenario.inputs)));
+    setSaveBaseline(normalizeInputs(scenario.inputs));
+    setActiveScenarioId(id);
     await persistStore(savedScenarios, id, "loaded");
   };
 
@@ -3568,20 +3571,25 @@ export default function RetirementPlanner() {
     if (!activeScenario) return;
     const next = savedScenarios.filter((s) => s.id !== activeScenario.id);
     const nextActiveId = next[0]?.id ?? null;
+    const ok = await persistStore(next, nextActiveId, "cleared");
+    if (!ok) return;
     if (nextActiveId) {
       const nextActive = next.find((s) => s.id === nextActiveId);
       if (nextActive) {
         setInputs(normalizeInputs(nextActive.inputs));
         setBaselineInputs(captureBaseline(normalizeInputs(nextActive.inputs)));
+        setSaveBaseline(normalizeInputs(nextActive.inputs));
       }
     }
-    await persistStore(next, nextActiveId, "cleared");
+    if (!nextActiveId) setSaveBaseline(captureBaseline(inputs));
   };
 
   // Reset only the working inputs to built-in defaults; does not delete scenarios.
   const handleResetToDefaults = () => {
+    if (savingRef.current) return;
     setInputs(normalizeInputs(DEFAULT_INPUTS));
     setBaselineInputs(captureBaseline(normalizeInputs(DEFAULT_INPUTS)));
+    setSaveBaseline(normalizeInputs(DEFAULT_INPUTS));
     setActiveScenarioId(null);
     setSaveStatus("cleared");
     setTimeout(() => setSaveStatus("idle"), 2500);
@@ -3591,6 +3599,7 @@ export default function RetirementPlanner() {
   // the inputs by hand: it becomes an unsaved working plan, and cached derived
   // results (Monte Carlo, diagnostics) are invalidated so they recompute.
   const handleImportSettings = (updates) => {
+    if (savingRef.current) return;
     setInputs((prev) => normalizeInputs({ ...prev, ...updates }));
     setActiveScenarioId(null);
     setMcResults(null);
@@ -3823,6 +3832,9 @@ export default function RetirementPlanner() {
     displayInputs.householdSize,
   );
   const showInheritedCol = (displayInputs.balanceInherited || 0) > 0;
+  const retirementCompositionMaximum = Math.max(1, ...results.yearlyData
+    .filter(row => row.phase !== 'accumulation')
+    .map(row => adjustRow(row).total));
   const yearDetailColSpan =
     (displayInputs.pensionIncome > 0 ? 16 : 15) + (showInheritedCol ? 1 : 0);
   // For an already-retired user the "portfolio at retirement" metric describes
@@ -3831,26 +3843,19 @@ export default function RetirementPlanner() {
     displayInputs.retirementAge,
     displayInputs.currentAge,
   );
+  const dollarBasis = showRealDollars ? "Today's dollars" : 'Future dollars';
+  const endingValue = Number.isFinite(s.portfolioAtEnd) ? adjust(s.portfolioAtEnd,currentYear+displayInputs.planThroughAge-displayInputs.currentAge) : null;
+  const depleted = s.currentTotal > 0 && s.portfolioAtEnd === 0 && shortfall.status === 'danger'
+    && results.yearlyData.some(row => row.year === shortfall.firstShortfallYear && row.total <= 0);
+  const overviewMetrics = <>
+    <CompactMetric label={'Portfolio at age '+retirementDisplayAge} value={moneyMetric(Number.isFinite(s.portfolioAtRetirement) ? adjust(s.portfolioAtRetirement,currentYear+retirementDisplayAge-displayInputs.currentAge) : null)} basis={dollarBasis} tone="positive" detail={'End of the first projected retirement year. Current portfolio: '+fmtMoney(s.currentTotal)+'. Values use the selected dollar basis.'} />
+    <CompactMetric label={'Portfolio at age '+displayInputs.planThroughAge} value={moneyMetric(endingValue, {depleted})} basis={dollarBasis} tone={depleted ? 'negative' : ''} detail={`End-of-plan account balances: ${Number.isFinite(endingValue) ? '$'+endingValue.toLocaleString('en-US', {maximumFractionDigits: 6}) : 'unavailable'} (${dollarBasis.toLowerCase()}). A positive balance alone does not rule out an earlier cash-flow shortfall; review the plan status.`} />
+    <CompactMetric label="First-year withdrawal" value={fmtPct(s.year1WithdrawalRate)} tone="caution" detail={'Includes withdrawals to fund taxes. Compare with the '+fmtPct(shortfall.guideline)+' guideline for this '+shortfall.retirementYears+'-year retirement.'} />
+    <CompactMetric label="Total Roth converted" value={moneyMetric(s.totalConverted, {none:true})} basis="Lifetime total · future dollars" detail={'Total transferred over the plan: '+fmtMoneyFull(s.totalConverted)+', in future dollars. Lifetime taxes: '+fmtMoney(s.totalTaxesPaid)+'. These sums are not today’s purchasing power.'} />
+  </>;
 
   return (
     <div className="planner-app min-h-screen bg-slate-50 text-slate-900">
-      {/* Print-specific styles */}
-      <style>{`
-        @media print {
-          @page { size: letter; margin: 0.4in; }
-          body { 
-            print-color-adjust: exact; 
-            -webkit-print-color-adjust: exact;
-            background: white !important;
-          }
-          .print-avoid-break { break-inside: avoid; page-break-inside: avoid; }
-          .print-page-break { break-before: page; page-break-before: always; }
-          table { font-size: 9px; }
-          thead { display: table-header-group; }
-          tr { break-inside: avoid; page-break-inside: avoid; }
-        }
-      `}</style>
-
       {/* Print-only report header */}
       <div className="hidden print:block px-6 py-4 border-b-2 border-slate-900 mb-4">
         <div className="flex justify-between items-end">
@@ -3885,10 +3890,10 @@ export default function RetirementPlanner() {
             {(!hasSavedScenarios || !activeScenarioId) && <option value="">Unsaved plan</option>}
             {savedScenarios.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
-          <span className="save-state" role="status">{saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? 'Saved' : activeScenario && !isDirty ? 'Saved scenario' : 'Unsaved changes'}</span>
-          <button className="primary-action" onClick={handleSaveScenario} disabled={saveStatus === 'saving'}>{activeScenario ? 'Save changes' : 'Save scenario'}</button>
+          <span className="save-state" role="status">{saveStatus === 'saving' ? 'Saving…' : isDirty ? 'Settings changed' : saveStatus === 'saved' ? 'Saved' : activeScenario ? 'Saved scenario' : 'No changes'}</span>
+          <button className="primary-action" onClick={handleSaveScenario} disabled={!canSave}>{activeScenario ? 'Save changes' : 'Save scenario'}</button>
           <details className="scenario-menu"><summary>More <span aria-hidden="true">⌄</span></summary><div onClick={event => { if (event.target.closest('button')) event.currentTarget.parentElement.open = false; }}>
-            <button onClick={handleSaveAsScenario}>Save as new…</button>
+            <button onClick={handleSaveAsScenario} disabled={!canSave}>Save as new…</button>
             <button onClick={handleRenameScenario} disabled={!activeScenario}>Rename scenario</button>
             <button onClick={handleDeleteScenario} disabled={!activeScenario}>Delete scenario</button>
             <button onClick={() => setShowImport(true)}>Import settings</button>
@@ -3908,6 +3913,10 @@ export default function RetirementPlanner() {
         <button className="assistant-launch" aria-expanded={chatOpen} onClick={() => setChatOpen(!chatOpen)}>Ask about this plan</button></div>
       {scenarioRequest && <ScenarioDialog request={scenarioRequest} onSubmit={submitScenarioName} onClose={() => setScenarioRequest(null)} />}
       {saveError && <p role="alert" className="save-error">{saveError}</p>}
+      {storeReady && isDirty && <div className="save-reminder print:hidden" role="status">
+        <strong>Settings changed — save your plan</strong>
+        <button className="primary-action" onClick={handleSaveScenario} disabled={!canSave}>{saveStatus === 'saving' ? 'Saving…' : 'Save settings'}</button>
+      </div>}
 
       {/* Load-from-text modal — reachable from the toolbar on any tab */}
       <SettingsImport
@@ -3916,23 +3925,21 @@ export default function RetirementPlanner() {
         onApply={handleImportSettings}
       />
 
-      <div className="dashboard-overview">
-        <div className="overview-heading"><h2 ref={workspaceRef} tabIndex={-1}>{activeTab === 'plan' ? 'Your retirement outlook' : activeTab === 'settings' ? 'Plan assumptions' : activeTab === 'years' ? 'Year-by-year breakdown' : activeTab === 'compare' ? 'Compare retirement and spending' : 'Risk analysis'}</h2>
+      <div className={`dashboard-overview${activeTab !== 'plan' ? ' is-secondary' : ''}`}>
+        <div className="overview-heading"><h2 ref={activeTab === 'plan' ? workspaceRef : undefined} tabIndex={-1}>Your retirement outlook</h2>
           <div className="dollar-switch" role="group" aria-label="Display dollars"><button aria-pressed={!showRealDollars} onClick={() => setShowRealDollars(false)}>Future dollars</button><button aria-pressed={showRealDollars} onClick={() => setShowRealDollars(true)}>Today's dollars</button></div></div>
-        <div className="overview-row"><div className="overview-metrics">
-          <CompactMetric label={'Portfolio at age '+retirementDisplayAge} value={fmtMoney(adjust(s.portfolioAtRetirement,currentYear+retirementDisplayAge-displayInputs.currentAge))} tone="positive" detail={'End of the first projected retirement year. Current portfolio: '+fmtMoney(s.currentTotal)+'. Values use the selected dollar basis.'} />
-          <CompactMetric label={'Portfolio at age '+displayInputs.planThroughAge} value={fmtMoney(adjust(s.portfolioAtEnd,currentYear+displayInputs.planThroughAge-displayInputs.currentAge))} tone={s.portfolioAtEnd <= 0 ? 'negative' : ''} detail="End-of-plan account balances. A positive balance alone does not rule out an earlier cash-flow shortfall; review the plan status." />
-          <CompactMetric label="First-year withdrawal" value={fmtPct(s.year1WithdrawalRate)} tone="caution" detail={'Includes withdrawals to fund taxes. Compare with the '+fmtPct(shortfall.guideline)+' guideline for this '+shortfall.retirementYears+'-year retirement.'} />
-          <CompactMetric label="Total Roth converted" value={fmtMoney(s.totalConverted)} detail={'Total transferred over the plan, in future dollars. Lifetime taxes: '+fmtMoney(s.totalTaxesPaid)+'. These sums are not today’s purchasing power.'} />
-        </div><div className="overview-notices">
-          <div className={'compact-health '+(s.calculationValid === false || shortfall.status === 'danger' ? 'danger' : shortfall.status === 'warning' ? 'caution' : 'funded')}>
-            <strong>{shortfall.status === 'danger' ? (s.calculationValid === false ? 'Estimate: shortfall at age ' : 'Projected shortfall at age ')+(shortfall.firstShortfallAge ?? '—')+(isCouple ? ' (primary)' : '') : s.calculationValid === false ? 'Estimate: calculation needs review' : shortfall.status === 'warning' ? 'Plan funded with a thin margin' : 'Plan funded through age '+displayInputs.planThroughAge}</strong>
-            <button onClick={() => { setSelectedYear(results.yearlyData.find(row => row.age === shortfall.firstShortfallAge)?.year ?? null); navigate('years'); }}>View years →</button>
-          </div>
-          {s.modelNotices?.length > 0 && <details className="compact-notices"><summary>{s.modelNotices.length} financial details need review</summary><div><p>Estimates remain provisional. Sustainable spending is withheld while material inputs are unresolved.</p><ul>{s.modelNotices.map(notice => <li key={notice}>{notice}</li>)}</ul></div></details>}
-          {s.modelNotices?.length > 0 && <button className="review-link" onClick={() => navigate('history')}>Review financial details →</button>}
-        </div></div>
+        <RetirementOutlook rows={chartData} shortfall={shortfall} summary={s} retirementAge={retirementDisplayAge} isCouple={isCouple} real={showRealDollars}
+          onYears={() => { setSelectedYear(shortfall.firstShortfallYear ?? null); navigate('years'); }} onReview={() => navigate('history')}>
+          {overviewMetrics}
+        </RetirementOutlook>
       </div>
+
+      {activeTab !== 'plan' && <div className="workspace-heading print:hidden">
+        <div className="overview-heading"><h2 ref={workspaceRef} tabIndex={-1}>{({settings:'All settings', years:'Year-by-year', compare:'Compare plans', risk:'Risk analysis'})[activeTab]}</h2>
+          <div className="dollar-switch" role="group" aria-label="Display dollars"><button aria-pressed={!showRealDollars} onClick={() => setShowRealDollars(false)}>Future dollars</button><button aria-pressed={showRealDollars} onClick={() => setShowRealDollars(true)}>Today's dollars</button></div></div>
+        <CompactOutlook rows={chartData} shortfall={shortfall} summary={s} isCouple={isCouple} scenario={activeScenario?.name || 'Unsaved plan'} onDashboard={() => navigate('plan')} onReview={() => navigate('history')}
+          simulationStatus={activeTab === 'risk' ? mcRunning ? 'Simulation running' : mcStale ? 'Simulation needs rerunning' : mcResults ? 'Simulation uses current inputs' : 'Simulation not run' : undefined} />
+      </div>}
 
       {/* Main layout */}
       <div className={`planner-workspace workspace-${activeTab}`}>
@@ -3940,10 +3947,10 @@ export default function RetirementPlanner() {
             input list and the results never fight over one scrollbar. */}
         <aside className="quick-sidebar print:hidden">
           <KeyLevers inputs={inputs} isCouple={isCouple} update={update} updateCouple={updateCouple} onSettings={() => navigate('settings')} />
-          <BaselineControls comparison={comparison} onCapture={() => setBaselineInputs(captureBaseline(inputs))} onRestore={() => { setInputs(captureBaseline(baselineInputs)); setMcResults(null); }} />
+          <BaselineControls comparison={comparison} simulationStatus={mcResults ? mcStale ? 'Risk simulation needs rerunning after your changes.' : 'Risk simulation uses current inputs; it is separate from this baseline comparison.' : undefined} onCapture={() => setBaselineInputs(captureBaseline(inputs))} onRestore={() => { setInputs(captureBaseline(baselineInputs)); setMcResults(null); }} />
         </aside>
         <div className={activeTab === 'settings' ? 'settings-view print:hidden' : 'settings-view hidden print:hidden'}>
-        <SettingsWorkspace scope={isCouple ? 'couple' : 'individual'} historyRequest={historyRequest} notices={s.modelNotices}>
+        <SettingsWorkspace scope={isCouple ? 'couple' : 'individual'} inputs={inputs} active={activeTab === 'settings'} sectionRequest={settingsTarget} historyRequest={historyRequest} notices={s.modelNotices} onYear={year => {setSelectedYear(year); navigate('years');}}>
           <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm">
             <h2 className="text-base font-bold text-slate-900 mb-1">
               Household and filing status
@@ -4901,7 +4908,7 @@ export default function RetirementPlanner() {
                   </button>
                 </div>
                 <div className="max-h-64 overflow-y-auto">
-                  <table className="w-full text-[11px]">
+                  <table className="w-full text-[12px]">
                     <thead className="bg-slate-50 sticky top-0">
                       <tr>
                         <th className="px-2 py-1 text-left font-medium text-slate-600">
@@ -4963,11 +4970,11 @@ export default function RetirementPlanner() {
           <div className="dashboard-charts space-y-6">
           {/* Portfolio composition chart */}
           <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm print:shadow-none print:border-slate-300 print-avoid-break">
-            <div className="flex justify-between items-start mb-4">
-              <div>
+            <div className="mb-4 flex flex-col gap-4 xl:flex-row xl:justify-between xl:items-start">
+              <div className="xl:max-w-[40%]">
                 <h2 className="text-lg font-bold text-slate-900">
                   Portfolio over time
-                </h2>
+                </h2><p className="metric-basis">{dollarBasis} · End-of-year balances</p>
                 <details className="chart-explainer"><summary>Account composition, withdrawals and baseline</summary><p className="text-xs text-slate-500 mt-0.5">
                   Watch how each account evolves through accumulation and
                   drawdown. In married-couple mode, spouse-owned retirement
@@ -4975,38 +4982,55 @@ export default function RetirementPlanner() {
                   If Cash grows in later years, that's not a mistake: required
                   withdrawals (RMDs) often force out more than you spend, and
                   the after-tax excess is re-saved into Cash/HYSA — look for the{" "}
-                  <span className="text-[10px] font-medium bg-sky-100 text-sky-800 px-1 py-0.5 rounded">→CASH</span>{" "}
+                  <span className="text-[12px] font-medium bg-sky-100 text-sky-800 px-1 py-0.5 rounded">→CASH</span>{" "}
                   badge in the year-by-year table. The dotted baseline follows the same calendar years; missing years are not extrapolated.
                 </p></details>
               </div>
+              <div className="flex flex-col gap-2 text-xs text-slate-600 xl:items-end" aria-label="Portfolio chart legend">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2 xl:justify-end">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Accounts</span>
+                  {['cash', 'taxable', ...((displayInputs.balanceInherited || 0) > 0 ? ['inherited'] : []), 'k401', 'tradIra', 'roth', 'hsa'].map((account) => (
+                    <span key={account} className="inline-flex items-center gap-1.5 whitespace-nowrap"><SeriesSwatch color={accountColor(account)} />{accountLabel(account, isCouple)}</span>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2 xl:justify-end">
+                  <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                    <svg width="24" height="10" aria-hidden="true"><line x1="0" y1="5" x2="24" y2="5" stroke="#4f46e5" strokeWidth="2" strokeDasharray="4 4" /></svg>
+                    Baseline
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                    <svg width="24" height="10" aria-hidden="true"><line x1="0" y1="5" x2="24" y2="5" stroke="#dc2626" strokeWidth="3" strokeDasharray="6 4" /></svg>
+                    Annual Spending
+                  </span>
+                </div>
+              </div>
             </div>
             <ResponsiveContainer width="100%" height={360}>
-              <ComposedChart data={chartData} accessibilityLayer>
+              <ComposedChart data={chartData} accessibilityLayer margin={{ top: 12, right: 16, bottom: 8, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <Line type="monotone" dataKey="Baseline" stroke="#4f46e5" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={false} isAnimationActive={false} />
                 <XAxis
                   dataKey="axisLabel"
                   ticks={chartAxisTicks}
-                  tick={isCouple ? <YearAgeAxisTick /> : { fontSize: 11, fill: "#64748b" }}
+                  tick={isCouple ? <YearAgeAxisTick /> : { fontSize: 12, fill: "#64748b" }}
                   height={isCouple ? 48 : 30}
                   interval={0}
                   label={{
                     value: isCouple ? "Year | Ages" : "Age",
                     position: "insideBottom",
                     offset: -2,
-                    fontSize: 11,
+                    fontSize: 12,
                   }}
                 />
                 <YAxis
                   tickFormatter={(v) => `$${(v / 1000000).toFixed(1)}M`}
-                  tick={{ fontSize: 11, fill: "#64748b" }}
+                  tick={{ fontSize: 12, fill: "#64748b" }}
                 />
                 <Tooltip
                   content={(props) => (
                     <CashFlowTooltip {...props} isCouple={isCouple} />
                   )}
                 />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
                 <ReferenceLine
                   x={retirementAxisValue}
                   stroke="#ef4444"
@@ -5015,7 +5039,7 @@ export default function RetirementPlanner() {
                     value: "Retire",
                     position: "top",
                     fill: "#ef4444",
-                    fontSize: 11,
+                    fontSize: 12,
                   }}
                 />
                 <ReferenceLine
@@ -5026,7 +5050,7 @@ export default function RetirementPlanner() {
                     value: "SS",
                     position: "top",
                     fill: "#6366f1",
-                    fontSize: 11,
+                    fontSize: 12,
                   }}
                 />
                 {shortfall.status === "danger" && shortfallAxisValue != null && (
@@ -5047,54 +5071,53 @@ export default function RetirementPlanner() {
                   type="monotone"
                   dataKey="Cash"
                   stackId="1"
-                  stroke="#64748b"
-                  fill="#94a3b8"
-                />
+                  stroke={accountColor('cash')}
+                  fill={accountColor('cash')}
+                name={accountLabel('cash', isCouple)} />
                 <Area
                   type="monotone"
                   dataKey="Taxable"
                   stackId="1"
-                  stroke="#0284c7"
-                  fill="#7dd3fc"
-                />
+                  stroke={accountColor('taxable')}
+                  fill={accountColor('taxable')}
+                name={accountLabel('taxable', isCouple)} />
                 {(displayInputs.balanceInherited || 0) > 0 && (
                   <Area
                     type="monotone"
                     dataKey="Inherited"
-                    name="Inherited (BCO)"
                     stackId="1"
-                    stroke="#4d7c0f"
-                    fill="#bef264"
-                  />
+                    stroke={accountColor('inherited')}
+                    fill={accountColor('inherited')}
+                  name={accountLabel('inherited', isCouple)} />
                 )}
                 <Area
                   type="monotone"
                   dataKey={employerPlanChartKey}
                   stackId="1"
-                  stroke="#7c3aed"
-                  fill="#c4b5fd"
-                />
+                  stroke={accountColor('k401')}
+                  fill={accountColor('k401')}
+                name={accountLabel('k401', isCouple)} />
                 <Area
                   type="monotone"
                   dataKey="Trad IRA"
                   stackId="1"
-                  stroke="#db2777"
-                  fill="#f9a8d4"
-                />
+                  stroke={accountColor('tradIra')}
+                  fill={accountColor('tradIra')}
+                name={accountLabel('tradIra', isCouple)} />
                 <Area
                   type="monotone"
                   dataKey="Roth"
                   stackId="1"
-                  stroke="#059669"
-                  fill="#6ee7b7"
-                />
+                  stroke={accountColor('roth')}
+                  fill={accountColor('roth')}
+                name={accountLabel('roth', isCouple)} />
                 <Area
                   type="monotone"
                   dataKey="HSA"
                   stackId="1"
-                  stroke="#ea580c"
-                  fill="#fdba74"
-                />
+                  stroke={accountColor('hsa')}
+                  fill={accountColor('hsa')}
+                name={accountLabel('hsa', isCouple)} />
                 <Line
                   type="monotone"
                   dataKey="Annual Spending"
@@ -5111,17 +5134,41 @@ export default function RetirementPlanner() {
           <ExploreDetails onNavigate={navigate} noticeCount={s.modelNotices?.length || 0} />
           {/* Annual cash flow chart */}
           <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm print:shadow-none print:border-slate-300 print-avoid-break">
-            <div className="mb-4">
+            <div className="mb-4 flex flex-col gap-4 xl:flex-row xl:justify-between xl:items-start">
+              <div className="xl:max-w-[40%]">
               <h2 className="text-lg font-bold text-slate-900">
                 Annual Cash Flow (Retirement Years)
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
                 Where each year's spending and tax are funded from, split by
-                income source and account withdrawal.
+                income source and account withdrawal. {dollarBasis}.
                 {isCouple
                   ? " The ledger below separates spendable cash from account-to-account Roth transfers."
                   : ""}
               </p>
+              </div>
+              <div className="flex flex-col gap-2 text-xs text-slate-600 xl:items-end" aria-label="Cash flow chart legend">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2 xl:justify-end">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Income</span>
+                  {[
+                    { label: 'Part-Time', color: '#059669' },
+                    { label: 'Social Security', color: '#6366f1' },
+                    ...(displayInputs.pensionIncome > 0 ? [{ label: 'Pension', color: '#0f766e' }] : []),
+                  ].map(({ label, color }) => (
+                    <span key={label} className="inline-flex items-center gap-1.5 whitespace-nowrap"><SeriesSwatch color={color} />{label}</span>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2 xl:justify-end">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Withdrawals</span>
+                  {['cash', 'taxable', ...((displayInputs.balanceInherited || 0) > 0 ? ['inherited'] : []), 'k401', 'tradIra', 'roth', 'hsa'].map((account) => (
+                    <span key={account} className="inline-flex items-center gap-1.5 whitespace-nowrap"><SeriesSwatch color={accountColor(account)} />{accountLabel(account, isCouple)}</span>
+                  ))}
+                </div>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="inline-block w-5 border-t-[3px] border-[#ef4444]" aria-hidden="true" />
+                  Need (Spending + Tax)
+                </span>
+              </div>
             </div>
             <ResponsiveContainer width="100%" height={260}>
               <ComposedChart data={flowData}>
@@ -5129,13 +5176,13 @@ export default function RetirementPlanner() {
                 <XAxis
                   dataKey="axisLabel"
                   ticks={flowAxisTicks}
-                  tick={isCouple ? <YearAgeAxisTick /> : { fontSize: 11, fill: "#64748b" }}
+                  tick={isCouple ? <YearAgeAxisTick /> : { fontSize: 12, fill: "#64748b" }}
                   height={isCouple ? 42 : 30}
                   interval={0}
                 />
                 <YAxis
                   tickFormatter={(v) => `$${(v / 1000).toFixed(0)}K`}
-                  tick={{ fontSize: 11, fill: "#64748b" }}
+                  tick={{ fontSize: 12, fill: "#64748b" }}
                 />
                 <Tooltip
                   content={(props) => (
@@ -5146,26 +5193,24 @@ export default function RetirementPlanner() {
                     />
                   )}
                 />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
                 <Bar dataKey="Part-Time" stackId="sources" fill="#059669" />
                 <Bar dataKey="Social Security" stackId="sources" fill="#6366f1" />
                 {displayInputs.pensionIncome > 0 && (
                   <Bar dataKey="Pension" stackId="sources" fill="#0f766e" />
                 )}
-                <Bar dataKey="Cash" stackId="sources" fill="#64748b" />
-                <Bar dataKey="Taxable" stackId="sources" fill="#06b6d4" />
+                <Bar dataKey="Cash" stackId="sources" fill={accountColor('cash')} name={accountLabel('cash', isCouple)} />
+                <Bar dataKey="Taxable" stackId="sources" fill={accountColor('taxable')} name={accountLabel('taxable', isCouple)} />
                 {(displayInputs.balanceInherited || 0) > 0 && (
                   <Bar
                     dataKey="Inherited"
-                    name="Inherited (BCO)"
                     stackId="sources"
-                    fill="#84cc16"
-                  />
+                    fill={accountColor('inherited')}
+                  name={accountLabel('inherited', isCouple)} />
                 )}
-                <Bar dataKey={employerPlanChartKey} stackId="sources" fill="#7c3aed" />
-                <Bar dataKey="IRA" stackId="sources" fill="#db2777" />
-                <Bar dataKey="Roth" stackId="sources" fill="#10b981" />
-                <Bar dataKey="HSA" stackId="sources" fill="#f97316" />
+                <Bar dataKey={employerPlanChartKey} stackId="sources" fill={accountColor('k401')} name={accountLabel('k401', isCouple)} />
+                <Bar dataKey="IRA" stackId="sources" fill={accountColor('tradIra')} name={accountLabel('tradIra', isCouple)} />
+                <Bar dataKey="Roth" stackId="sources" fill={accountColor('roth')} name={accountLabel('roth', isCouple)} />
+                <Bar dataKey="HSA" stackId="sources" fill={accountColor('hsa')} name={accountLabel('hsa', isCouple)} />
                 <Line
                   type="monotone"
                   dataKey="Need (Spending + Tax)"
@@ -5335,14 +5380,14 @@ export default function RetirementPlanner() {
             {isCouple && <CoupleOwnerDetailGrid ownerDetails={adjustRow(results.yearlyData.find(row => row.year === selectedYear) ?? results.yearlyData.find(row => row.phase !== 'accumulation') ?? results.yearlyData[0]).ownerDetails} />}
           </YearInspector>
           {/* Year-by-year table */}
-          <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden print:shadow-none print:border-slate-300 print-page-break">
+          <div className="year-detail-table bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden print:shadow-none print:border-slate-300 print-page-break">
             <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap justify-between items-start gap-3">
               <div>
                 <h2 className="text-lg font-bold text-slate-900">
                   Year-by-Year Detail
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Reading each row:{" "}
+                  Each row balances:{" "}
                   <span className="text-emerald-700 font-medium">
                     income + withdrawals
                   </span>{" "}
@@ -5356,35 +5401,36 @@ export default function RetirementPlanner() {
                   </span>{" "}
                   are separate taxable transfers, not spending withdrawals.
                 </p>
-                <p className="text-[11px] text-slate-500 mt-1">
+                <details className="year-badge-help"><summary>What do the badges mean?</summary><p className="text-[12px] text-slate-500 mt-1">
                   Badges:{" "}
-                  <span className="text-[10px] font-medium bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded">
+                  <span className="text-[12px] font-medium bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded">
                     RMD
                   </span>{" "}
                   = required minimum distribution active,{" "}
-                  <span className="text-[10px] font-medium bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">
+                  <span className="text-[12px] font-medium bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">
                     IRMAA
                   </span>
                   <TermInfo text={TERM_HELP.irmaa} />{" "}
                   = Medicare high-income surcharge flag,{" "}
-                  <span className="text-[10px] font-medium bg-teal-100 text-teal-800 px-1.5 py-0.5 rounded">
+                  <span className="text-[12px] font-medium bg-teal-100 text-teal-800 px-1.5 py-0.5 rounded">
                     ACA
                   </span>
                   <TermInfo text={TERM_HELP.aca} />{" "}
                   = ACA subsidy active,{" "}
-                  <span className="text-[10px] font-medium bg-sky-100 text-sky-800 px-1.5 py-0.5 rounded">
+                  <span className="text-[12px] font-medium bg-sky-100 text-sky-800 px-1.5 py-0.5 rounded">
                     →CASH
                   </span>{" "}
                   = forced withdrawals exceeded spending; the excess was saved
                   to Cash/HYSA (why cash grows in RMD years),{" "}
-                  <span className="text-[10px] font-bold bg-orange-600 text-white px-1.5 py-0.5 rounded">
+                  <span className="text-[12px] font-bold bg-orange-600 text-white px-1.5 py-0.5 rounded">
                     PENALTY
                   </span>{" "}
                   = 10% early-withdrawal penalty before 59½. Hover for details.
-                </p>
+                </p></details>
               </div>
-              <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg p-1">
+              <div className="year-dollar-toggle flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg p-1">
                 <button
+                  aria-pressed={!showRealDollars}
                   onClick={() => setShowRealDollars(false)}
                   className={`text-xs px-3 py-1.5 rounded font-medium transition ${
                     !showRealDollars
@@ -5395,6 +5441,7 @@ export default function RetirementPlanner() {
                   Nominal $
                 </button>
                 <button
+                  aria-pressed={showRealDollars}
                   onClick={() => setShowRealDollars(true)}
                   className={`text-xs px-3 py-1.5 rounded font-medium transition ${
                     showRealDollars
@@ -5407,33 +5454,12 @@ export default function RetirementPlanner() {
               </div>
             </div>
 
-            {/* Column group legend */}
-            <div className="px-5 py-2 bg-slate-50 border-b border-slate-200 flex flex-wrap gap-3 text-xs">
-              <span className="inline-flex items-center gap-1.5">
-                <span className="inline-block w-3 h-3 rounded bg-slate-400"></span>
-                <span className="text-slate-700">Outflow (spending/tax)</span>
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="inline-block w-3 h-3 rounded bg-emerald-400"></span>
-                <span className="text-slate-700">Income sources</span>
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="inline-block w-3 h-3 rounded bg-sky-400"></span>
-                <span className="text-slate-700">Withdrawals from accounts</span>
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="inline-block w-3 h-3 rounded bg-indigo-400"></span>
-                <span className="text-slate-700">Roth transfer</span>
-              </span>
-              {isCouple && (
-                <span className="text-slate-600">
-                  Couple rows show year, then primary/spouse ages underneath.
-                </span>
-              )}
-            </div>
+            <CompositionLegend rows={results.yearlyData.filter(row => row.phase !== 'accumulation')} couple={isCouple} />
+            {isCouple && <p className="year-couple-note">Couple rows show year, then primary/spouse ages underneath.</p>}
 
             <div className="year-table-scroll overflow-auto max-h-[600px] print:max-h-none print:overflow-visible" role="region" aria-label="Year-by-year projection table" tabIndex={0}>
               <table className="w-full min-w-[1500px] text-xs">
+                <colgroup><col span={2} /><col span={2} className="year-outflow" /><col span={displayInputs.pensionIncome > 0 ? 3 : 2} className="year-income" /><col span={showInheritedCol ? 7 : 6} className="year-withdrawals" /><col className="year-transfer" /><col span={2} className="year-ending" /></colgroup>
                 <thead className="bg-white sticky top-0 z-10 print:static">
                   {/* Group headers */}
                   <tr className="border-b border-slate-200">
@@ -5550,7 +5576,7 @@ export default function RetirementPlanner() {
                           ) || rawRow.total <= 0;
                       return (
                         <Fragment key={d.year}>
-                        <tr
+                        <tr data-year-row="true" data-milestone={Math.round(d.age) % 5 === 0} data-shortfall={isShortfallYear}
                           className={
                             isShortfallYear
                               ? "border-b border-rose-200 bg-rose-50 hover:bg-rose-100"
@@ -5562,7 +5588,7 @@ export default function RetirementPlanner() {
                               ? (
                                 <span className="inline-flex flex-col leading-tight">
                                   <span>{d.year}</span>
-                                  <span className="text-[10px] font-normal text-slate-500">
+                                  <span className="text-[12px] font-normal text-slate-500">
                                     {Math.round(d.primaryAge ?? d.age)} / {Math.round(d.spouseAge)}
                                   </span>
                                 </span>
@@ -5574,7 +5600,7 @@ export default function RetirementPlanner() {
                               <PhasePill phase={d.phase} />
                               {d.rmdAmount > 0 && (
                                 <span
-                                  className="text-[10px] font-medium bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded"
+                                  className="text-[12px] font-medium bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded"
                                   title={`RMD required: ${fmtMoney(d.rmdAmount)}`}
                                 >
                                   RMD
@@ -5582,7 +5608,7 @@ export default function RetirementPlanner() {
                               )}
                               {d.surplusToCash > 500 && (
                                 <span
-                                  className="text-[10px] font-medium bg-sky-100 text-sky-800 px-1.5 py-0.5 rounded"
+                                  className="text-[12px] font-medium bg-sky-100 text-sky-800 px-1.5 py-0.5 rounded"
                                   title={`Required withdrawals exceeded spending + tax by ${fmtMoney(d.surplusToCash)}. That after-tax excess was deposited into Cash/HYSA — it is not extra spending, and it is why the cash balance grows in RMD years.`}
                                 >
                                   →CASH
@@ -5590,7 +5616,7 @@ export default function RetirementPlanner() {
                               )}
                               {d.irmaaTriggered && (
                                 <span
-                                  className="text-[10px] font-medium bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded"
+                                  className="text-[12px] font-medium bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded"
                                   title={`IRMAA surcharge flag: ~${fmtMoney(d.irmaaSurcharge)} (approximate)`}
                                 >
                                   IRMAA
@@ -5598,7 +5624,7 @@ export default function RetirementPlanner() {
                               )}
                               {d.acaSubsidy > 0 && (
                                 <span
-                                  className="text-[10px] font-medium bg-teal-100 text-teal-800 px-1.5 py-0.5 rounded"
+                                  className="text-[12px] font-medium bg-teal-100 text-teal-800 px-1.5 py-0.5 rounded"
                                   title={`ACA subsidy savings: ${fmtMoney(d.acaSubsidy)}`}
                                 >
                                   ACA
@@ -5606,7 +5632,7 @@ export default function RetirementPlanner() {
                               )}
                               {isShortfallYear && (
                                 <span
-                                  className="text-[10px] font-bold bg-rose-600 text-white px-1.5 py-0.5 rounded"
+                                  className="text-[12px] font-bold bg-rose-600 text-white px-1.5 py-0.5 rounded"
                                   title={`Unfunded need this year: ${fmtMoney(d.unmetCashFlow)}. Spending + taxes exceed available withdrawals.`}
                                 >
                                   SHORTFALL
@@ -5614,7 +5640,7 @@ export default function RetirementPlanner() {
                               )}
                               {d.reserveUsed > 0 && (
                                 <span
-                                  className="text-[10px] font-bold bg-amber-500 text-white px-1.5 py-0.5 rounded"
+                                  className="text-[12px] font-bold bg-amber-500 text-white px-1.5 py-0.5 rounded"
                                   title={`Dipped into the protected cash reserve: ${fmtMoney(d.reserveUsed)} (floor this year: ${fmtMoney(d.cashFloor)}). All other accounts were exhausted.`}
                                 >
                                   RESERVE
@@ -5622,7 +5648,7 @@ export default function RetirementPlanner() {
                               )}
                               {d.earlyPenalty > 0 && (
                                 <span
-                                  className="text-[10px] font-bold bg-orange-600 text-white px-1.5 py-0.5 rounded"
+                                  className="text-[12px] font-bold bg-orange-600 text-white px-1.5 py-0.5 rounded"
                                   title={`10% early-withdrawal penalty: ${fmtMoney(d.earlyPenalty)} included in this year's Tax. Applies to 401k/IRA (and modeled Roth) draws before age 59½.`}
                                 >
                                   PENALTY
@@ -5703,7 +5729,7 @@ export default function RetirementPlanner() {
                               {d.from401k > 0 ? fmtMoney(d.from401k) : "—"}
                             </span>
                             {d.conversion > 0 && (
-                              <span className="block text-[10px] leading-tight text-indigo-600 whitespace-nowrap">
+                              <span className="block text-[12px] leading-tight text-indigo-600 whitespace-nowrap">
                                 -{fmtMoney(d.conversion)} xfer
                               </span>
                             )}
@@ -5773,7 +5799,7 @@ export default function RetirementPlanner() {
                             {fmtMoney(d.total)}
                           </td>
                           <td className="px-2 py-1.5 bg-slate-50 min-w-[120px]">
-                            <MiniStackedBar row={d} />
+                            <YearComposition row={d} maximum={retirementCompositionMaximum} real={showRealDollars} couple={isCouple} />
                           </td>
                         </tr>
                         {isCouple && d.ownerDetails && (
@@ -5996,7 +6022,7 @@ export default function RetirementPlanner() {
               mcRunning={mcRunning}
               adjust={adjust}
               showRealDollars={showRealDollars}
-              setShowRealDollars={setShowRealDollars}
+              onAssumptions={() => { navigate('settings'); setSettingsTarget('Risk Assumptions'); }}
             />
           )}
 
@@ -6194,25 +6220,25 @@ function ScenarioComparison({
             <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
             <XAxis
               dataKey="retirementAge"
-              tick={{ fontSize: 11, fill: "#64748b" }}
+              tick={{ fontSize: 12, fill: "#64748b" }}
               label={{
                 value: couple ? "Primary / spouse retirement age" : "Retirement Age",
                 position: "insideBottom",
                 offset: -5,
-                fontSize: 11,
+                fontSize: 12,
               }}
             />
             <YAxis
               tickFormatter={(v) =>
                 v >= 1000000 ? `$${(v / 1000000).toFixed(1)}M` : `$${(v / 1000).toFixed(0)}K`
               }
-              tick={{ fontSize: 11, fill: "#64748b" }}
+              tick={{ fontSize: 12, fill: "#64748b" }}
             />
             <Tooltip
               formatter={(v) => fmtMoney(v)}
               contentStyle={{ fontSize: 12 }}
             />
-            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Legend verticalAlign="top" align="right" wrapperStyle={{ fontSize: 12, paddingBottom: 12 }} />
             <Line
               type="monotone"
               dataKey="Modest"
@@ -6555,7 +6581,7 @@ function PlannerChat({
                               {suggestion.rationale}
                             </p>
                           </div>
-                          <span className="h-fit rounded bg-white px-2 py-0.5 text-[10px] font-medium text-indigo-700 border border-indigo-200">
+                          <span className="h-fit rounded bg-white px-2 py-0.5 text-[12px] font-medium text-indigo-700 border border-indigo-200">
                             {suggestion.confidence}
                           </span>
                         </div>
@@ -6650,7 +6676,7 @@ function PlannerChat({
             onChange={(event) => setDraft(event.target.value)}
             placeholder="Ask about cash drawdown, spending capacity, Roth conversions, taxes, or a scenario you want to test..."
             rows={compact ? 2 : 3}
-            className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm"
           />
           <button
             type="submit"
@@ -6661,7 +6687,7 @@ function PlannerChat({
           </button>
         </form>
 
-        <p className="text-[11px] text-slate-400 leading-relaxed">
+        <p className="text-[12px] text-slate-400 leading-relaxed">
           AI answers can be wrong and are not financial, tax, or investment
           advice. Verify anything important with a professional before acting.
         </p>
@@ -6691,7 +6717,7 @@ function RiskAnalysis({
   runMC,
   mcRunning,
   showRealDollars,
-  setShowRealDollars,
+  onAssumptions,
 }) {
   const firstYear = results.yearlyData[0]?.year ?? PROJECTION_START_YEAR;
   const endYear = results.yearlyData.at(-1)?.year ?? firstYear;
@@ -6699,24 +6725,25 @@ function RiskAnalysis({
   const chartData = mcResults
     ? mcResults.percentiles.map((p, index) => ({
         age: p.age,
-        "10th %ile (bad)": Math.round(adjustRisk(p.p10, results.yearlyData[index]?.year ?? firstYear + index)),
+        "10th percentile": Math.round(adjustRisk(p.p10, results.yearlyData[index]?.year ?? firstYear + index)),
         "25th %ile": Math.round(adjustRisk(p.p25, results.yearlyData[index]?.year ?? firstYear + index)),
         "50th %ile (median)": Math.round(adjustRisk(p.p50, results.yearlyData[index]?.year ?? firstYear + index)),
         "75th %ile": Math.round(adjustRisk(p.p75, results.yearlyData[index]?.year ?? firstYear + index)),
-        "90th %ile (great)": Math.round(adjustRisk(p.p90, results.yearlyData[index]?.year ?? firstYear + index)),
+        "90th percentile": Math.round(adjustRisk(p.p90, results.yearlyData[index]?.year ?? firstYear + index)),
       }))
     : [];
 
-  const diagnosis = mcResults
+  const diagnosis = mcResults && Number.isFinite(mcResults.successRate)
     ? diagnoseSuccessRate(inputs, results, mcResults)
     : null;
 
   return (
-    <div className="space-y-6">
+    <div className="risk-analysis space-y-6">
       <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm">
         <h2 className="text-lg font-bold text-slate-900 mb-1">
-          Risk Analysis — Sequence of Returns
+          Sequence-of-returns simulation
         </h2>
+        <details className="risk-methodology"><summary>How this simulation works</summary>
         <p className="text-xs text-slate-500 mb-2">
           The main plan assumes steady {fmtPct(inputs.postReturn)} returns
           every year in retirement. Real markets don't work that way — you
@@ -6733,6 +6760,8 @@ function RiskAnalysis({
           and fat-tail crashes are represented only approximately.
         </p>
 
+        </details>
+
         <div className="flex items-center gap-3 mb-4">
           <button
             onClick={runMC}
@@ -6745,26 +6774,7 @@ function RiskAnalysis({
                 ? "Re-run Monte Carlo (inputs changed)"
                 : "Run Monte Carlo (500 sims)"}
           </button>
-          {mcResults && (
-            <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg p-1 ml-auto">
-              <button
-                onClick={() => setShowRealDollars(false)}
-                className={`text-xs px-3 py-1.5 rounded font-medium transition ${
-                  !showRealDollars ? "bg-indigo-600 text-white" : "text-slate-600"
-                }`}
-              >
-                Nominal $
-              </button>
-              <button
-                onClick={() => setShowRealDollars(true)}
-                className={`text-xs px-3 py-1.5 rounded font-medium transition ${
-                  showRealDollars ? "bg-indigo-600 text-white" : "text-slate-600"
-                }`}
-              >
-                Today's $
-              </button>
-            </div>
-          )}
+
         </div>
 
         {!mcResults && !mcRunning && (
@@ -6795,49 +6805,23 @@ function RiskAnalysis({
                 </p>
               </div>
             )}
-            {/* Volatility context banner */}
-            <div className="mb-4 bg-sky-50 border border-sky-200 rounded p-3">
-              <p className="text-xs text-sky-900 leading-relaxed">
-                <span className="font-semibold">Simulation assumption:</span>{" "}
-                Your portfolio volatility is set to{" "}
-                <span className="font-semibold">
-                  {fmtPct(inputs.portfolioVolatility)}
-                </span>{" "}
-                (
-                {inputs.portfolioVolatility <= 0.09
-                  ? "conservative allocation"
-                  : inputs.portfolioVolatility <= 0.12
-                    ? "diversified like a target-date fund"
-                    : inputs.portfolioVolatility <= 0.14
-                      ? "aggressive"
-                      : "all equities"}
-                ) with taxable-account annual drag of{" "}
-                <span className="font-semibold">
-                  {fmtPct(inputs.taxableAnnualTaxDrag)}
-                </span>
-                . Both are adjustable in All settings under "Risk Assumptions" — roughly 9-11% suits a balanced target-date-style mix, ~15% all equities.
-              </p>
+            <div className="risk-assumptions mb-4">
+              <span><strong>Simulation assumptions:</strong> volatility {fmtPct(inputs.portfolioVolatility)} · taxable annual drag {fmtPct(inputs.taxableAnnualTaxDrag)} · flexible spending {inputs.flexibleSpending ? 'on' : 'off'}.</span>
+              <button className="text-action" onClick={onAssumptions}>Edit risk assumptions</button>
             </div>
+            <p className="metric-basis mb-3">{showRealDollars ? "Today's dollars" : 'Future dollars'} · End balances in {endYear}. Success means no modeled funding shortfall through the plan horizon and no invalid calculation.</p>
+            {mcResults.isEstimate && <p className="risk-provisional" role="status"><strong>Provisional simulation.</strong> {mcResults.invalidRunCount > 0 ? `${mcResults.invalidRunCount} runs have invalid calculations; a success rate is unavailable.` : 'Unresolved financial details affect these results.'}</p>}
 
             <div
-              className={`grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 ${mcStale ? "opacity-60" : ""}`}
+              className={`risk-results grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 ${mcStale ? "opacity-60" : ""}`}
             >
               <MetricCard
                 label="Success Rate"
-                value={fmtPct(mcResults.successRate)}
-                sublabel={
-                  mcResults.successRate >= 0.95
-                    ? "High confidence (in this model)"
-                    : mcResults.successRate >= 0.85
-                      ? "Historically favorable range"
-                      : mcResults.successRate >= 0.75
-                        ? "Workable with some risk"
-                        : mcResults.successRate >= 0.6
-                          ? "Notable risk — revisit assumptions"
-                          : "High risk of depletion"
-                }
+                emphasis
+                value={Number.isFinite(mcResults.successRate) ? fmtPct(mcResults.successRate) : "Unavailable"}
+                sublabel={Number.isFinite(mcResults.successRate) ? `${Math.round(mcResults.successRate * mcResults.numSims)} of ${mcResults.numSims} simulations funded the plan${mcResults.isEstimate ? ' · provisional' : ''}` : 'Review calculation warnings'}
                 tone={
-                  mcResults.successRate >= 0.85
+                  !Number.isFinite(mcResults.successRate) ? "warn" : mcResults.successRate >= 0.85
                     ? "good"
                     : mcResults.successRate >= 0.75
                       ? "warn"
@@ -6855,26 +6839,24 @@ function RiskAnalysis({
                 sublabel="50th percentile outcome"
               />
               <MetricCard
-                label="Worst-Case (10th %ile)"
+                label="Lower outcome"
                 value={fmtMoney(
                   adjustRisk(
                     mcResults.finalP10,
                     endYear,
                   ),
                 )}
-                sublabel="Bottom 10% of runs"
-                tone={mcResults.finalP10 > 0 ? "neutral" : "bad"}
+                sublabel="10th percentile · not the worst case"
               />
               <MetricCard
-                label="Best-Case (90th %ile)"
+                label="Upper outcome"
                 value={fmtMoney(
                   adjustRisk(
                     mcResults.finalP90,
                     endYear,
                   ),
                 )}
-                sublabel="Top 10% of runs"
-                tone="good"
+                sublabel="90th percentile · not the best case"
               />
             </div>
 
@@ -6962,111 +6944,11 @@ function RiskAnalysis({
             )}
 
             {/* Historical Perspective — grounds the MC result in real data */}
-            {results && (
-              <div className="mb-5 bg-emerald-50 border border-emerald-200 rounded-lg p-4">
-                <h3 className="text-sm font-bold text-emerald-900 mb-2">
-                  Historical Perspective (Trinity Study)
-                </h3>
-                <p className="text-xs text-emerald-900 leading-relaxed mb-3">
-                  Monte Carlo uses random future scenarios. But we also have{" "}
-                  <span className="font-semibold">100+ years of actual US market history</span>{" "}
-                  to compare against. Here's how your plan would have fared in
-                  every real historical 35-year period:
-                </p>
-                <div className="bg-white rounded border border-emerald-200 overflow-hidden">
-                  <table className="w-full text-xs">
-                    <thead className="bg-emerald-50 border-b border-emerald-200">
-                      <tr>
-                        <th className="px-3 py-2 text-left font-semibold text-emerald-900">
-                          Withdrawal Rate
-                        </th>
-                        <th className="px-3 py-2 text-right font-semibold text-emerald-900">
-                          Historical Success (35-year horizon)
-                        </th>
-                        <th className="px-3 py-2 text-left font-semibold text-emerald-900">
-                          Notes
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr className="border-b border-emerald-100">
-                        <td className="px-3 py-1.5 font-medium">3.0%</td>
-                        <td className="px-3 py-1.5 text-right text-emerald-700 font-semibold">
-                          ~100%
-                        </td>
-                        <td className="px-3 py-1.5 text-slate-600">
-                          Never failed, any period
-                        </td>
-                      </tr>
-                      <tr
-                        className={`border-b border-emerald-100 ${
-                          results.summary.year1WithdrawalRate < 0.04
-                            ? "bg-emerald-100"
-                            : ""
-                        }`}
-                      >
-                        <td className="px-3 py-1.5 font-medium">3.5%</td>
-                        <td className="px-3 py-1.5 text-right text-emerald-700 font-semibold">
-                          ~96%
-                        </td>
-                        <td className="px-3 py-1.5 text-slate-600">
-                          Failed only in absolute-worst historical sequences
-                        </td>
-                      </tr>
-                      <tr className="border-b border-emerald-100">
-                        <td className="px-3 py-1.5 font-medium">4.0%</td>
-                        <td className="px-3 py-1.5 text-right text-emerald-700 font-semibold">
-                          ~91%
-                        </td>
-                        <td className="px-3 py-1.5 text-slate-600">
-                          Classic "safe" Bengen rule
-                        </td>
-                      </tr>
-                      <tr className="border-b border-emerald-100">
-                        <td className="px-3 py-1.5 font-medium">4.5%</td>
-                        <td className="px-3 py-1.5 text-right text-amber-700 font-semibold">
-                          ~82%
-                        </td>
-                        <td className="px-3 py-1.5 text-slate-600">
-                          Above safe zone
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="px-3 py-1.5 font-medium">5.0%</td>
-                        <td className="px-3 py-1.5 text-right text-rose-700 font-semibold">
-                          ~68%
-                        </td>
-                        <td className="px-3 py-1.5 text-slate-600">
-                          Risky territory
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-                <div className="mt-3 p-3 bg-white border border-emerald-300 rounded">
-                  <p className="text-xs text-emerald-900 leading-relaxed">
-                    <span className="font-bold">Your Year-1 withdrawal rate is{" "}
-                      {fmtPct(results.summary.year1WithdrawalRate)}
-                    </span>
-                    .{" "}
-                    {results.summary.year1WithdrawalRate < 0.04
-                      ? "In US market history back to ~1926, starting rates at this level survived nearly every 35-year period — including retirements that began in 1929, 1966, and 1973."
-                      : "In US market history back to ~1926, starting rates above 4% failed in a meaningful share of 35-year periods — the table above shows how quickly the odds fall as the rate rises."}{" "}
-                    Past performance is not a guarantee; treat this as
-                    historical context, not a prediction.
-                  </p>
-                  <p className="text-xs text-emerald-900 leading-relaxed mt-2">
-                    If the Monte Carlo above shows a lower success rate, it's
-                    a stress test using parametric random draws that produce
-                    more extreme sequences than real markets tend to (markets
-                    have some mean reversion and valuation-based recovery).
-                    Historical bootstrap results and parametric Monte Carlo
-                    both have limitations — treat them as different lenses on
-                    the same question.
-                  </p>
-                </div>
-              </div>
-            )}
+            <details className="risk-methodology">
+              <summary>Historical research and this simulation</summary>
+              <p>This view uses randomized returns. It does not replay your plan against historical market periods. Published withdrawal-rate research uses its own portfolios, time horizons, spending rules, and tax assumptions; its results are not a personalized success rate for this plan.</p>
+              <p>Use the same assumptions when comparing plans. Historical research and modeled outcomes answer different questions; neither guarantees a future result.</p>
+            </details>
 
             <h3 className="text-sm font-semibold text-slate-800 mb-2">
               Portfolio Paths (range across 500 simulated markets)
@@ -7076,25 +6958,25 @@ function RiskAnalysis({
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis
                   dataKey="age"
-                  tick={{ fontSize: 11, fill: "#64748b" }}
+                  tick={{ fontSize: 12, fill: "#64748b" }}
                   label={{
                     value: "Age",
                     position: "insideBottom",
                     offset: -2,
-                    fontSize: 11,
+                    fontSize: 12,
                   }}
                 />
                 <YAxis
                   tickFormatter={(v) =>
                     v >= 1000000 ? `$${(v / 1000000).toFixed(1)}M` : `$${(v / 1000).toFixed(0)}K`
                   }
-                  tick={{ fontSize: 11, fill: "#64748b" }}
+                  tick={{ fontSize: 12, fill: "#64748b" }}
                 />
                 <Tooltip formatter={(v) => fmtMoney(v)} contentStyle={{ fontSize: 12 }} />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
                 <Area
                   type="monotone"
-                  dataKey="90th %ile (great)"
+                  dataKey="90th percentile"
                   stroke="#059669"
                   fill="#6ee7b7"
                   fillOpacity={0.3}
@@ -7123,7 +7005,7 @@ function RiskAnalysis({
                 />
                 <Area
                   type="monotone"
-                  dataKey="10th %ile (bad)"
+                  dataKey="10th percentile"
                   stroke="#dc2626"
                   fill="#fecaca"
                   fillOpacity={0.3}
@@ -7138,7 +7020,7 @@ function RiskAnalysis({
               <ul className="text-xs text-slate-700 space-y-1.5 leading-relaxed list-disc list-inside">
                 <li>
                   <span className="font-medium">Success Rate</span> = % of 500
-                  simulated markets where your money didn't run out before age{" "}
+                  simulated markets with no modeled funding shortfall or invalid calculation through age{" "}
                   {inputs.planThroughAge}.
                 </li>
                 <li>
@@ -7151,9 +7033,7 @@ function RiskAnalysis({
                 <li>
                   The{" "}
                   <span className="text-rose-700 font-medium">10th %ile line</span>{" "}
-                  represents unlucky market scenarios (think retiring right
-                  before the 2008 crash). If your plan survives this line,
-                  you're protected against most realistic downside.
+                  marks the lower 10th percentile at each year. Outcomes can be worse; this line is not a guarantee or one specific simulated path.
                 </li>
                 <li>
                   The{" "}
@@ -7162,8 +7042,7 @@ function RiskAnalysis({
                   worse.
                 </li>
                 <li>
-                  Wide spread between 10th and 90th = high variance. Narrow
-                  spread = predictable outcomes.
+                  A wider spread shows greater variation within this model. A narrow spread does not account for risks omitted from the assumptions.
                 </li>
               </ul>
             </div>

@@ -1,0 +1,50 @@
+.retirement-outlook { background:var(--surface); border:1px solid var(--line); border-radius:16px; box-shadow:0 3px 12px var(--shadow-outlook); }
+.outlook-milestone { display:none; color:var(--ink-muted); font-size:12px; margin-top:8px; }
+@media (max-width:650px) {
+  .outlook-retirement-marker .recharts-label { display:none; }
+  .outlook-milestone { display:block; }
+}
+.outlook-main { display:grid; grid-template-columns:minmax(0,.95fr) minmax(0,1.2fr); gap:36px; padding:26px 28px 18px; align-items:center; }
+.outlook-status { display:flex; align-items:center; gap:8px; color:var(--positive); font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.12em; margin-bottom:12px; }
+.outlook-status > span { width:6px; height:6px; background:currentColor; border-radius:50%; }
+.outlook-status.danger { color:var(--negative); }
+.outlook-status.caution { color:var(--warning-ink); }
+.outlook-story h3 { font-size:clamp(24px,2.4vw,36px); line-height:1.2; font-weight:700; letter-spacing:-1px; max-width:22ch; color:var(--ink); text-wrap:balance; }
+.outlook-shortfall-age { color:var(--negative); }
+.outlook-description { max-width:49ch; margin-top:12px; color:var(--ink-tertiary); font-size:14px; line-height:1.65; }
+.outlook-basis { color:var(--ink-muted); font-size:12px; margin-top:7px; }
+.outlook-actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-top:20px; }
+.outlook-actions button { display:flex; align-items:center; gap:14px; min-height:38px; padding:8px 12px; border-radius:7px; font-size:12px; font-weight:600; transition:background .15s,color .15s; }
+.outlook-detail-action { color:var(--interactive); background:var(--brand-tint); }
+.outlook-detail-action:hover { background:var(--brand-tint-hover); }
+.outlook-review-action { color:var(--warning-ink); }
+.outlook-review-action:hover { background:var(--warning-bg); }
+.outlook-chart-panel { min-width:0; }
+.outlook-chart-caption { display:flex; justify-content:space-between; gap:12px; font-size:12px; color:var(--ink-muted); }
+.outlook-chart-caption > :first-child { color:var(--ink-secondary); font-weight:600; }
+.outlook-chart { height:175px; margin-top:4px; }
+.outlook-chart-footnote { color:var(--ink-muted); text-align:right; font-size:12px; margin-top:4px; }
+.outlook-metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); border-top:1px solid var(--line-soft); padding:18px 28px; }
+.outlook-metrics .compact-metric { padding:0 22px; }
+.outlook-metrics .compact-metric:first-child { padding-left:0; }
+.outlook-metrics .compact-metric:last-child { padding-right:0; }
+.outlook-metrics .compact-metric > span { font-size:12px; }
+.outlook-metrics .compact-metric > strong { font-size:25px; font-weight:700; color:var(--ink); }
+.outlook-metrics .compact-metric.negative > strong { color:var(--negative); }
+.outlook-metrics .compact-metric summary { color:var(--ink-muted); }
+.outlook-metrics .compact-metric:last-child details[open] p { right:0; }
+.outlook-notices { border-top:1px solid var(--line-soft); padding:10px 28px; font-size:12px; color:var(--warning-ink); }
+.outlook-notices summary { width:fit-content; }
+.outlook-notices p { margin-top:10px; }
+.outlook-notices ul { list-style:disc; padding:8px 18px; line-height:1.7; }
+.dashboard-overview:has(.retirement-outlook) .overview-heading { margin-bottom:14px; }
+.dashboard-overview:has(.retirement-outlook) .overview-heading h2 { font-size:18px; letter-spacing:-.3px; }
+.dashboard-overview:has(.retirement-outlook) .dollar-switch { background:var(--brand-tint); border-color:var(--brand-border-soft); border-radius:8px; }
+.dashboard-overview:has(.retirement-outlook) .dollar-switch button { padding:5px 11px; border-radius:5px; font-size:12px; color:var(--ink-tertiary); transition:background .15s,color .15s; }
+.dashboard-overview:has(.retirement-outlook) .dollar-switch button[aria-pressed=true] { background:var(--surface); color:var(--brand-emphasis); box-shadow:0 1px 3px var(--shadow-control); }
+@media (max-width:1000px) { .outlook-main { gap:24px; padding:22px; }.outlook-story h3 { font-size:27px; }.outlook-metrics { padding:18px 22px; }.outlook-metrics .compact-metric { padding:0 14px; } }
+@media (max-width:650px) {
+  .outlook-main { grid-template-columns:1fr; gap:24px; padding:22px 18px 16px; }.outlook-story h3 { max-width:24ch; font-size:28px; }.outlook-description { margin-top:10px; }.outlook-actions { margin-top:16px; }.outlook-chart { height:155px; }.outlook-chart-footnote { text-align:left; font-size:12px; }
+  .outlook-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px 0; padding:18px; }.outlook-metrics .compact-metric { padding:0 12px; }.outlook-metrics .compact-metric:nth-child(3) { padding-left:0; }.outlook-metrics .compact-metric:nth-child(2) { border:0; padding-right:0; }.outlook-metrics .compact-metric >strong { font-size:23px; }.outlook-metrics .compact-metric details[open] p { position:static; width:auto; padding:8px 0; border:0; box-shadow:none; }.outlook-notices { padding:12px 18px; }
+}
+@media (prefers-reduced-motion:reduce) { .outlook-actions button,.dashboard-overview:has(.retirement-outlook) .dollar-switch button { transition:none; } }
