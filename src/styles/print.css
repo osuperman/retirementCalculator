@@ -13,7 +13,9 @@
   tr { break-inside:avoid; page-break-inside:avoid; }
   .save-reminder { display:none; }
   .year-tools { display:none!important; }.year-groups dl > div[hidden] { display:flex; }.year-empty { display:none; }
-  .planner-header,.navigation-row,.quick-sidebar,.settings-view,.baseline-controls,.explore-details,.year-picker,.review-link,.dollar-switch,.scenario-menu { display:none!important; }
+  .planner-header,.quick-sidebar,.settings-view,.baseline-controls,.explore-details,.year-picker,.review-link,.dollar-switch,.scenario-menu { display:none!important; }
+  .workspace-content { display:contents; }
+  .workspace-content > .dashboard-overview { padding:24px 28px 18px; }
   .planner-workspace,.workspace-main,.plan-report,.dashboard-charts,.year-workspace,.plan-explanation,.report-notes,.section-body { display:block!important; }
   .planner-workspace { padding:0; }.overview-row { display:block; }.overview-metrics { display:grid; grid-template-columns:repeat(4,1fr); }.compact-metric details p { position:static; width:auto; box-shadow:none; border:0; }
   .plan-report > * { margin:18px 0; }.year-table-scroll { overflow:visible!important; max-height:none!important; }.year-identity { position:static; }.year-inspector { break-inside:auto; }.raw-year { display:none; }

@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { fmtMoneyFull } from '../finance/engine.js';
 import { buildReviewItems } from './reviewModel.js';
 import { ReviewContext } from './ReviewContext.js';
@@ -18,13 +19,42 @@ export function NumericField({ value, onValue, nullable = false, ...props }) {
     }} />;
 }
 
-export function WorkspaceNav({ active, onNavigate }) {
+const NAV_GROUPS = [
+  ['Your plan', [['settings', 'Your information']]],
+  ['Results', [['plan', 'Overview'], ['years', 'Year by year']]],
+  ['Explore', [['compare', 'Compare plans'], ['risk', 'Risk analysis']]],
+];
+
+export function WorkspaceNav({ active, onNavigate, reviewCount = 0, onAssistant, assistantOpen, settingsIndexRef }) {
+  const [sectionsExpanded, setSectionsExpanded] = useState(true);
+  const sectionsId = useId();
+  useEffect(() => {
+    if (active === 'settings') setSectionsExpanded(true);
+  }, [active]);
   return <nav className="workspace-nav" aria-label="Planner workspaces">
-    {[
-      ['plan', 'Dashboard'], ['settings', 'All settings'], ['years', 'Year-by-year'],
-      ['compare', 'Compare'], ['risk', 'Risk analysis'],
-    ].map(([key, label]) => <button key={key} aria-current={active === key ? 'page' : undefined}
-      className={active === key ? 'selected' : ''} onClick={() => onNavigate(key)}>{label}</button>)}
+    {NAV_GROUPS.map(([title, items]) => <div className="workspace-nav-group" key={title}>
+      <p className="workspace-nav-title">{title}</p>
+      {items.map(([key, label]) => <div className="workspace-nav-item" key={key}>
+        <div className="workspace-nav-link-row">
+        <button aria-current={active === key ? 'page' : undefined}
+          aria-expanded={key === 'settings' ? active === 'settings' && sectionsExpanded : undefined}
+          aria-controls={key === 'settings' ? sectionsId : undefined}
+          className={active === key ? 'selected' : ''} onClick={() => {
+            if (key === 'settings' && active === 'settings') setSectionsExpanded(value => !value);
+            else onNavigate(key);
+          }}>
+          <span>{label}</span>
+          {key === 'settings' && reviewCount > 0 && <span className="workspace-nav-badge" aria-label={`${reviewCount} details need review`}>{reviewCount}</span>}
+        </button>
+        {key === 'settings' && active === 'settings' && <button className="workspace-nav-disclosure"
+          aria-label={sectionsExpanded ? 'Collapse information sections' : 'Expand information sections'}
+          aria-expanded={sectionsExpanded} aria-controls={sectionsId}
+          onClick={() => setSectionsExpanded(value => !value)}><span aria-hidden="true">{sectionsExpanded ? '⌃' : '⌄'}</span></button>}
+        </div>
+        {key === 'settings' && <div id={sectionsId} ref={settingsIndexRef} className="rail-settings-slot" hidden={active !== 'settings' || !sectionsExpanded} />}
+      </div>)}
+      {title === 'Explore' && <button className="assistant-launch" aria-expanded={assistantOpen} onClick={onAssistant}>Ask about this plan</button>}
+    </div>)}
   </nav>;
 }
 
@@ -99,8 +129,12 @@ export function ExploreDetails({ onNavigate, noticeCount }) {
   </section>;
 }
 
-const workspaceScrollOffset = () => (document.querySelector('.navigation-row')?.getBoundingClientRect().height || 0)
-  + (document.querySelector('.save-reminder')?.getBoundingClientRect().height || 0) + 24;
+const workspaceScrollOffset = () => {
+  const header = document.querySelector('.planner-header');
+  const stickyHeader = header && ['sticky', 'fixed'].includes(getComputedStyle(header).position);
+  return (stickyHeader ? header.getBoundingClientRect().height : 0)
+    + (document.querySelector('.save-reminder')?.getBoundingClientRect().height || 0) + 24;
+};
 function scrollToWorkspaceElement(element) {
   window.scrollTo({ top: window.scrollY + element.getBoundingClientRect().top - workspaceScrollOffset() });
 }
@@ -123,7 +157,7 @@ function revealSection(element, focusInput = false) {
   });
 }
 
-export function SettingsWorkspace({ children, scope, historyRequest, sectionRequest, notices = [], inputs, active = true, onYear }) {
+export function SettingsWorkspace({ children, scope, historyRequest, sectionRequest, notices = [], inputs, active = true, onYear, indexTarget }) {
   const root = useRef(null);
   const reviewHeading = useRef(null);
   const [sections, setSections] = useState([]);
@@ -183,12 +217,13 @@ export function SettingsWorkspace({ children, scope, historyRequest, sectionRequ
     const field = target.fields.map(key => owner?.querySelector(`[data-review-field="${key}"]`)).find(Boolean);
     revealSection(field ?? owner, Boolean(field));
   };
-  return <ReviewContext.Provider value={reviews}><section className="settings-workspace" aria-label="All plan settings">
-    <div className="settings-heading"><h2>Plan assumptions</h2><p>Every assumption, in one place. Changes update your active scenario.</p></div>
-    <nav className="settings-index" aria-label="Settings sections">
+  const sectionIndex = <nav className={indexTarget ? 'rail-settings-index' : 'settings-index'} aria-label="Settings sections">
       <strong>Jump to a section</strong>
       {sections.map(section => <button key={section.index} aria-current={currentSection === section.index ? 'location' : undefined} onClick={() => revealSection(section.element)}>{section.title}</button>)}
-    </nav>
+    </nav>;
+  return <ReviewContext.Provider value={reviews}><section className="settings-workspace" aria-label="All plan settings">
+    <div className="settings-heading"><h2>Plan assumptions</h2><p>Every assumption, in one place. Changes update your active scenario.</p></div>
+    {indexTarget ? active && createPortal(sectionIndex, indexTarget) : sectionIndex}
     <div ref={root} className="settings-editor">
       {reviews.length > 0 && <div className="settings-notices"><h3 ref={reviewHeading} tabIndex={-1}>Financial details to review ({reviews.length})</h3>
         <p>Each note describes a current assumption or limitation. Reviewing a field does not confirm it automatically.</p>

@@ -47,7 +47,7 @@
 .compact-notices p,.compact-notices li { margin-top:8px; line-height:1.5; }
 .compact-notices ul { padding-left:18px; list-style:disc; }
 .review-link { color:var(--interactive); align-self:flex-end; font-weight:600; }
-.quick-sidebar { position:sticky; top:77px; max-height:calc(100vh - var(--workspace-nav-height,54px) - var(--workspace-save-height,0px) - 44px); overflow-y:auto; overflow-x:hidden; padding:3px; scrollbar-gutter:stable; }
+.quick-sidebar { position:sticky; top:24px; max-height:calc(100vh - var(--workspace-header-height,0px) - var(--workspace-save-height,0px) - 44px); overflow-y:auto; overflow-x:hidden; padding:3px; scrollbar-gutter:stable; }
 .quick-controls { background:var(--surface); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
 .quick-controls > button { background:var(--surface); padding:18px 18px 8px; }
 .quick-controls > div { padding:10px 18px 18px; }

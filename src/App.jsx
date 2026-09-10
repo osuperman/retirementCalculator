@@ -3379,6 +3379,7 @@ export default function RetirementPlanner() {
   const [selectedYear, setSelectedYear] = useState(null);
   const [scenarioRequest, setScenarioRequest] = useState(null);
   const [chatOpen, setChatOpen] = useState(false);
+  const [settingsIndexTarget, setSettingsIndexTarget] = useState(null);
   const [saveError, setSaveError] = useState('');
   const workspaceRef = useRef(null);
   const navigate = (destination) => {
@@ -3418,11 +3419,13 @@ export default function RetirementPlanner() {
   const isDirty = useMemo(() => hasNumericChanges(inputs, saveBaseline), [inputs, saveBaseline]);
   useEffect(() => {
     const app = document.querySelector('.planner-app');
-    const navigation = app?.querySelector('.navigation-row');
+    const navigation = app?.querySelector('.planner-header');
     const reminder = app?.querySelector('.save-reminder');
     if (!app || !navigation) return;
     const measure = () => {
-      app.style.setProperty('--workspace-nav-height', `${navigation.getBoundingClientRect().height}px`);
+      const stickyHeader = ['sticky', 'fixed'].includes(getComputedStyle(navigation).position);
+      app.style.setProperty('--workspace-header-height', `${stickyHeader ? navigation.getBoundingClientRect().height : 0}px`);
+      app.style.setProperty('--workspace-nav-height', '0px');
       app.style.setProperty('--workspace-save-height', `${reminder?.getBoundingClientRect().height || 0}px`);
     };
     const observer = new ResizeObserver(measure);
@@ -3909,8 +3912,6 @@ export default function RetirementPlanner() {
           </div></details>
         </div>
       </header>
-      <div className="navigation-row print:hidden"><WorkspaceNav active={activeTab} onNavigate={navigate} />
-        <button className="assistant-launch" aria-expanded={chatOpen} onClick={() => setChatOpen(!chatOpen)}>Ask about this plan</button></div>
       {scenarioRequest && <ScenarioDialog request={scenarioRequest} onSubmit={submitScenarioName} onClose={() => setScenarioRequest(null)} />}
       {saveError && <p role="alert" className="save-error">{saveError}</p>}
       {storeReady && isDirty && <div className="save-reminder print:hidden" role="status">
@@ -3925,6 +3926,16 @@ export default function RetirementPlanner() {
         onApply={handleImportSettings}
       />
 
+      <div className={`planner-workspace workspace-${activeTab}`}>
+        <aside className="quick-sidebar print:hidden">
+          <WorkspaceNav active={activeTab} onNavigate={navigate} reviewCount={s.modelNotices?.length ?? 0}
+            assistantOpen={chatOpen} onAssistant={() => setChatOpen(value => !value)} settingsIndexRef={setSettingsIndexTarget} />
+          <div className="quick-sidebar-controls">
+            <KeyLevers inputs={inputs} isCouple={isCouple} update={update} updateCouple={updateCouple} onSettings={() => navigate('settings')} />
+            <BaselineControls comparison={comparison} simulationStatus={mcResults ? mcStale ? 'Risk simulation needs rerunning after your changes.' : 'Risk simulation uses current inputs; it is separate from this baseline comparison.' : undefined} onCapture={() => setBaselineInputs(captureBaseline(inputs))} onRestore={() => { setInputs(captureBaseline(baselineInputs)); setMcResults(null); }} />
+          </div>
+        </aside>
+        <div className="workspace-content">
       <div className={`dashboard-overview${activeTab !== 'plan' ? ' is-secondary' : ''}`}>
         <div className="overview-heading"><h2 ref={activeTab === 'plan' ? workspaceRef : undefined} tabIndex={-1}>Your retirement outlook</h2>
           <div className="dollar-switch" role="group" aria-label="Display dollars"><button aria-pressed={!showRealDollars} onClick={() => setShowRealDollars(false)}>Future dollars</button><button aria-pressed={showRealDollars} onClick={() => setShowRealDollars(true)}>Today's dollars</button></div></div>
@@ -3935,22 +3946,14 @@ export default function RetirementPlanner() {
       </div>
 
       {activeTab !== 'plan' && <div className="workspace-heading print:hidden">
-        <div className="overview-heading"><h2 ref={workspaceRef} tabIndex={-1}>{({settings:'All settings', years:'Year-by-year', compare:'Compare plans', risk:'Risk analysis'})[activeTab]}</h2>
+        <div className="overview-heading"><h2 ref={workspaceRef} tabIndex={-1}>{({settings:'Your information', years:'Year by year', compare:'Compare plans', risk:'Risk analysis'})[activeTab]}</h2>
           <div className="dollar-switch" role="group" aria-label="Display dollars"><button aria-pressed={!showRealDollars} onClick={() => setShowRealDollars(false)}>Future dollars</button><button aria-pressed={showRealDollars} onClick={() => setShowRealDollars(true)}>Today's dollars</button></div></div>
         <CompactOutlook rows={chartData} shortfall={shortfall} summary={s} isCouple={isCouple} scenario={activeScenario?.name || 'Unsaved plan'} onDashboard={() => navigate('plan')} onReview={() => navigate('history')}
           simulationStatus={activeTab === 'risk' ? mcRunning ? 'Simulation running' : mcStale ? 'Simulation needs rerunning' : mcResults ? 'Simulation uses current inputs' : 'Simulation not run' : undefined} />
       </div>}
 
-      {/* Main layout */}
-      <div className={`planner-workspace workspace-${activeTab}`}>
-        {/* Inputs sidebar — its own scroll container on desktop so the
-            input list and the results never fight over one scrollbar. */}
-        <aside className="quick-sidebar print:hidden">
-          <KeyLevers inputs={inputs} isCouple={isCouple} update={update} updateCouple={updateCouple} onSettings={() => navigate('settings')} />
-          <BaselineControls comparison={comparison} simulationStatus={mcResults ? mcStale ? 'Risk simulation needs rerunning after your changes.' : 'Risk simulation uses current inputs; it is separate from this baseline comparison.' : undefined} onCapture={() => setBaselineInputs(captureBaseline(inputs))} onRestore={() => { setInputs(captureBaseline(baselineInputs)); setMcResults(null); }} />
-        </aside>
         <div className={activeTab === 'settings' ? 'settings-view print:hidden' : 'settings-view hidden print:hidden'}>
-        <SettingsWorkspace scope={isCouple ? 'couple' : 'individual'} inputs={inputs} active={activeTab === 'settings'} sectionRequest={settingsTarget} historyRequest={historyRequest} notices={s.modelNotices} onYear={year => {setSelectedYear(year); navigate('years');}}>
+        <SettingsWorkspace indexTarget={settingsIndexTarget} scope={isCouple ? 'couple' : 'individual'} inputs={inputs} active={activeTab === 'settings'} sectionRequest={settingsTarget} historyRequest={historyRequest} notices={s.modelNotices} onYear={year => {setSelectedYear(year); navigate('years');}}>
           <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm">
             <h2 className="text-base font-bold text-slate-900 mb-1">
               Household and filing status
@@ -6027,6 +6030,7 @@ export default function RetirementPlanner() {
           )}
 
         </main>
+        </div>
       </div>
       <PlannerChat
         profile={chatProfile}
